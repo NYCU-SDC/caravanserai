@@ -2,36 +2,6 @@ package v1
 
 import "time"
 
-// TaintEffect defines the scheduling behaviour imposed by a Taint.
-type TaintEffect string
-
-const (
-	// TaintEffectNoSchedule prevents new Projects from being scheduled onto
-	// the Node. Projects already running are unaffected.
-	TaintEffectNoSchedule TaintEffect = "NoSchedule"
-
-	// TaintEffectNoExecute evicts running Projects that do not tolerate the
-	// Taint in addition to blocking new ones.
-	TaintEffectNoExecute TaintEffect = "NoExecute"
-)
-
-// Taint is attached to a Node to repel Projects that do not declare a matching
-// Toleration. The semantics mirror the Kubernetes Taint/Toleration model.
-type Taint struct {
-	Key    string      `json:"key"             yaml:"key"`
-	Value  string      `json:"value,omitempty" yaml:"value,omitempty"`
-	Effect TaintEffect `json:"effect"          yaml:"effect"`
-}
-
-// Toleration is declared on a Project to permit scheduling onto Nodes that
-// carry a matching Taint.
-type Toleration struct {
-	Key   string `json:"key"             yaml:"key"`
-	Value string `json:"value,omitempty" yaml:"value,omitempty"`
-	// Effect matches only Taints with this effect. Empty string matches all.
-	Effect TaintEffect `json:"effect,omitempty" yaml:"effect,omitempty"`
-}
-
 // NetworkMode describes the connectivity mode reported by the Tailscale/Headscale
 // overlay network.
 type NetworkMode string
@@ -51,10 +21,6 @@ type NodeNetworkStatus struct {
 
 	// Mode is Direct when a peer-to-peer path exists, DERP otherwise.
 	Mode NetworkMode `json:"mode,omitempty" yaml:"mode,omitempty"`
-
-	// ActiveDERP is the relay server ID when Mode == DERP. The Scheduler
-	// uses this to penalise the Node's effective bandwidth score.
-	ActiveDERP string `json:"activeDerp,omitempty" yaml:"activeDerp,omitempty"`
 
 	// Throughput is measured by the Agent at startup and periodically.
 	Throughput NodeThroughput `json:"throughput,omitempty" yaml:"throughput,omitempty"`
@@ -87,10 +53,6 @@ type NodeSpec struct {
 	// onto this Node. The TaintsController will automatically add a
 	// NoSchedule Taint when this field is true.
 	Unschedulable bool `json:"unschedulable,omitempty" yaml:"unschedulable,omitempty"`
-
-	// Taints are advanced scheduling repellents. The TaintsController may
-	// also inject system Taints (e.g. node.caravanserai.io/unreachable).
-	Taints []Taint `json:"taints,omitempty" yaml:"taints,omitempty"`
 }
 
 // NodeStatus is written by the Agent (heartbeat fields) and the Controller

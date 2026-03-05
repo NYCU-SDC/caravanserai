@@ -25,6 +25,11 @@ const (
 	// ProjectPhaseTerminating means a deletion has been requested and the
 	// Agent is tearing down containers.
 	ProjectPhaseTerminating ProjectPhase = "Terminating"
+
+	// ProjectPhaseTerminated means the Agent has finished removing all
+	// containers and Docker resources. The ProjectTerminationController will
+	// delete the record from the store shortly after this phase is observed.
+	ProjectPhaseTerminated ProjectPhase = "Terminated"
 )
 
 // EnvVar is a single environment variable to inject into a container.
@@ -59,24 +64,18 @@ type ServiceDef struct {
 type VolumeType string
 
 const (
-	// VolumeTypeManaged means Caravanserai owns the full lifecycle:
-	// provisioning, backup, restore, and deletion.
-	VolumeTypeManaged VolumeType = "Managed"
+	//// VolumeTypeManaged means Caravanserai owns the full lifecycle:
+	//// provisioning, backup, restore, and deletion.
+	//VolumeTypeManaged VolumeType = "Managed"
 
 	// VolumeTypeEphemeral means the volume is discarded when the Project
 	// is stopped or moved. No backup or restore occurs.
 	VolumeTypeEphemeral VolumeType = "Ephemeral"
 
-	// VolumeTypeHostPath mounts a path from the Node's filesystem directly.
-	// Reserved for privileged workloads such as monitoring agents.
-	VolumeTypeHostPath VolumeType = "HostPath"
+	//// VolumeTypeHostPath mounts a path from the Node's filesystem directly.
+	//// Reserved for privileged workloads such as monitoring agents.
+	//VolumeTypeHostPath VolumeType = "HostPath"
 )
-
-// PersistenceConfig controls whether a Managed volume survives a Project
-// move or restart.
-type PersistenceConfig struct {
-	Enabled bool `json:"enabled" yaml:"enabled"`
-}
 
 // VolumeDef describes a named volume used by one or more services.
 type VolumeDef struct {
@@ -84,10 +83,6 @@ type VolumeDef struct {
 
 	// Type determines lifecycle and backup semantics.
 	Type VolumeType `json:"type" yaml:"type"`
-
-	// Persistence controls whether the data survives container restarts.
-	// Only meaningful for VolumeTypeManaged.
-	Persistence PersistenceConfig `json:"persistence,omitempty" yaml:"persistence,omitempty"`
 }
 
 // IngressScope controls whether a route is exposed to the public internet
@@ -95,7 +90,9 @@ type VolumeDef struct {
 type IngressScope string
 
 const (
-	IngressScopePublic   IngressScope = "Public"
+	// Todo: add "Public" scope and implement Cloudflare Tunnel integration.
+	//IngressScopePublic   IngressScope = "Public"
+
 	IngressScopeInternal IngressScope = "Internal"
 )
 
@@ -121,23 +118,8 @@ type IngressDef struct {
 	Access IngressAccess `json:"access,omitempty" yaml:"access,omitempty"`
 }
 
-// ResourceRequirements is the resource budget a Project requests from the
-// Scheduler. The Scheduler will not place the Project on a Node that cannot
-// satisfy all fields.
-type ResourceRequirements struct {
-	CPU    string `json:"cpu,omitempty"    yaml:"cpu,omitempty"`
-	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
-}
-
 // ProjectSpec is the desired state declared by the user.
 type ProjectSpec struct {
-	// Tolerations allow the Project to be scheduled onto Nodes with matching
-	// Taints. An empty list means the Project will only land on taint-free Nodes.
-	Tolerations []Toleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty"`
-
-	// Resources is the resource budget requested from the Scheduler.
-	Resources ResourceRequirements `json:"resources,omitempty" yaml:"resources,omitempty"`
-
 	// Services is the ordered list of containers to run.
 	Services []ServiceDef `json:"services" yaml:"services"`
 
