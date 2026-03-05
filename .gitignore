@@ -115,4 +115,6 @@ fabric.properties
 # End of https://www.toptal.com/developers/gitignore/api/go,goland+all
 
 .env
-.bin/
+/bin/cara-agent
+/bin/cara-server
+/bin/caractl
