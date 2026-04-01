@@ -1,0 +1,8 @@
+apiVersion: caravanserai/v1
+kind: Project
+metadata:
+  name: nginx-demo
+spec:
+  services:
+    - name: web
+      image: nginx:alpine

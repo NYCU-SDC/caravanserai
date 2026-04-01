@@ -1,0 +1,28 @@
+apiVersion: caravanserai/v1
+kind: Project
+metadata:
+  name: wordpress
+spec:
+  services:
+    - name: db
+      image: mysql:8
+      env:
+        - name: MYSQL_ROOT_PASSWORD
+          value: "secret"
+        - name: MYSQL_DATABASE
+          value: "wp"
+      volumeMounts:
+        - name: mysql-data
+          mountPath: /var/lib/mysql
+    - name: app
+      image: wordpress:latest
+      env:
+        - name: WORDPRESS_DB_HOST
+          value: db          # resolves via the shared bridge network
+        - name: WORDPRESS_DB_PASSWORD
+          value: "secret"
+        - name: WORDPRESS_DB_NAME
+          value: "wp"
+  volumes:
+    - name: mysql-data
+      type: Ephemeral
