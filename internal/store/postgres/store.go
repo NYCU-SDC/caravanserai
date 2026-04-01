@@ -459,6 +459,35 @@ func (s *Store) ListProjectsByPhases(ctx context.Context, phases []v1.ProjectPha
 	return scanProjects(rows)
 }
 
+// ListProjectsByNodeRef implements store.ProjectStore.
+// Returns all Projects assigned to nodeRef whose phase is one of phases.
+// nodeRef is stored inside the status JSONB column (not a promoted column),
+// so we query it with the ->> operator. The promoted phase column is still
+// used for the phase filter, keeping that part index-friendly.
+func (s *Store) ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*v1.Project, error) {
+	if len(phases) == 0 {
+		return nil, nil
+	}
+
+	phaseStrings := make([]string, len(phases))
+	for i, p := range phases {
+		phaseStrings[i] = string(p)
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT name, spec, status, labels, annotations, created_at, updated_at
+		FROM resources
+		WHERE kind = $1 AND phase = ANY($2) AND status->>'nodeRef' = $3`,
+		kindProject, phaseStrings, nodeRef,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list projects by node_ref %q phases %v: %w", nodeRef, phases, err)
+	}
+	defer rows.Close()
+
+	return scanProjects(rows)
+}
+
 // UpdateProject implements store.ProjectStore.
 func (s *Store) UpdateProject(ctx context.Context, project *v1.Project) error {
 	project.ObjectMeta.UpdatedAt = time.Now().UTC()

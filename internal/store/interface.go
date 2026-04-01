@@ -105,4 +105,10 @@ type ProjectStore interface {
 	// Project.  Used by the Controller Manager to avoid overwriting Spec
 	// changes made concurrently by the API server.
 	UpdateProjectStatus(ctx context.Context, name string, status v1.ProjectStatus) error
+
+	// ListProjectsByNodeRef returns all Projects assigned to the given node
+	// whose phase is one of the supplied phases.  Used by
+	// ProjectReschedulerController to find work that needs to be moved or
+	// force-terminated when a node goes NotReady.
+	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*v1.Project, error)
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"NYCU-SDC/caravanserai/internal/event"
+
 	"go.uber.org/zap"
 )
 
@@ -62,15 +64,18 @@ const (
 type NodeHealthController struct {
 	logger *zap.Logger
 	store  NodeStore
+	bus    *event.Bus
 }
 
 // NewNodeHealthController creates a NodeHealthController.
 // store may be nil during early development; the controller will log a warning
 // and become a no-op until a real store is injected.
-func NewNodeHealthController(logger *zap.Logger, store NodeStore) *NodeHealthController {
+// bus may be nil; if so, no node.updated events are published.
+func NewNodeHealthController(logger *zap.Logger, store NodeStore, bus *event.Bus) *NodeHealthController {
 	return &NodeHealthController{
 		logger: logger,
 		store:  store,
+		bus:    bus,
 	}
 }
 
@@ -110,6 +115,11 @@ func (c *NodeHealthController) Reconcile(ctx context.Context, name string) (Resu
 			"Agent has not posted a heartbeat within the timeout window",
 		); err != nil {
 			return Result{}, err
+		}
+		// Notify ProjectReschedulerController (and any other subscribers) that
+		// this node's state changed so they can react immediately.
+		if c.bus != nil {
+			c.bus.Publish(event.TopicNodeUpdated, name)
 		}
 
 	case age <= NodeHeartbeatTimeout && snap.State == NodeStateNotReady:
