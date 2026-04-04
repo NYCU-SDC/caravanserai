@@ -23,12 +23,12 @@ const (
 	// NotReady nodes as a fallback in case an event was dropped.
 	reschedulerResyncInterval = 30 * time.Second
 
-	// RunningGracePeriod is the maximum time a Running project on a NotReady
+	// runningGracePeriod is the maximum time a Running project on a NotReady
 	// node is allowed before the rescheduler resets it to Pending.  This gives
 	// transient network issues time to resolve before the project is moved to
 	// another node, avoiding unnecessary churn and split-brain risk for
 	// stateful workloads.  Set to 3× the 90-second heartbeat timeout.
-	RunningGracePeriod = 3 * time.Minute
+	runningGracePeriod = 3 * time.Minute
 
 	// condTypeTerminatingAt is the Condition.Type written by the rescheduler
 	// when it first observes a Terminating project whose node is NotReady.
@@ -322,8 +322,8 @@ func (c *ProjectReschedulerController) handleRunning(
 	}
 
 	elapsed := c.clock.Since(notReadyAt)
-	if elapsed < RunningGracePeriod {
-		remaining := RunningGracePeriod - elapsed
+	if elapsed < runningGracePeriod {
+		remaining := runningGracePeriod - elapsed
 		log.Info("Running project waiting for grace period",
 			zap.Duration("elapsed", elapsed),
 			zap.Duration("remaining", remaining),
@@ -334,7 +334,7 @@ func (c *ProjectReschedulerController) handleRunning(
 	// Grace period exceeded — reset to Pending.
 	log.Info("Running grace period exceeded, resetting project to Pending",
 		zap.Duration("elapsed", elapsed),
-		zap.Duration("gracePeriod", RunningGracePeriod),
+		zap.Duration("gracePeriod", runningGracePeriod),
 	)
 	if err := c.projects.SetProjectPending(ctx, p.Name); err != nil {
 		if errors.Is(err, store.ErrNotFound) {

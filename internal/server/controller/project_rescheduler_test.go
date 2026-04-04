@@ -71,7 +71,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//   3. Do NOT re-write NotReadyAt — the condition already exists
 		//      and its timestamp must not be reset.
 		clk := newFakeClock()
-		notReadyAt := clk.Time.Add(-RunningGracePeriod / 2) // within grace period
+		notReadyAt := clk.Time.Add(-runningGracePeriod / 2) // within grace period
 		ns := newFakeReschedulerNodeStore()
 		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
@@ -105,7 +105,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//   2. Do NOT requeue — this project is done.
 		//   3. Do NOT re-write NotReadyAt — the condition already exists.
 		clk := newFakeClock()
-		notReadyAt := clk.Time.Add(-RunningGracePeriod - time.Minute) // past grace period
+		notReadyAt := clk.Time.Add(-runningGracePeriod - time.Minute) // past grace period
 		ns := newFakeReschedulerNodeStore()
 		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
