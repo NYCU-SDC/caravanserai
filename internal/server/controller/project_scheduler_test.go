@@ -63,16 +63,16 @@ func TestProjectSchedulerReconcile(t *testing.T) {
 		assert.Empty(t, ps.SetProjectScheduledCalls, "should not schedule a non-Pending project")
 	})
 
-	t.Run("project not found propagates error", func(t *testing.T) {
+	t.Run("project not found returns without error", func(t *testing.T) {
 		ps := newFakeSchedulerProjectStore()
 		// Do not add "my-app" — GetProjectPhase returns store.ErrNotFound.
 		ns := newFakeSchedulerNodeStore("node-1")
 		ctrl := NewProjectSchedulerController(zap.NewNop(), ps, ns, nil)
 
 		res, err := ctrl.Reconcile(context.Background(), "my-app")
-		// ProjectSchedulerController does not special-case ErrNotFound;
-		// the error propagates so the manager retries with backoff.
-		require.Error(t, err)
+		// ProjectSchedulerController treats ErrNotFound as a no-op: the
+		// project was deleted between Seed and Reconcile, which is a normal race.
+		require.NoError(t, err)
 		assert.False(t, res.Requeue)
 		assert.Empty(t, ps.SetProjectScheduledCalls)
 	})

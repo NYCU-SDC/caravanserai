@@ -2,9 +2,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"NYCU-SDC/caravanserai/internal/event"
+	"NYCU-SDC/caravanserai/internal/store"
+
 	"go.uber.org/zap"
 )
 
@@ -98,6 +101,10 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 
 	phase, _, err := c.projects.GetProjectPhase(ctx, name)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			log.Debug("Project not found, skipping")
+			return Result{}, nil
+		}
 		return Result{}, err
 	}
 

@@ -87,15 +87,15 @@ func TestNodeHealthReconcile(t *testing.T) {
 		assert.Equal(t, "AgentReady", s.SetNodeStateCalls[0].Reason)
 	})
 
-	t.Run("node not found propagates error", func(t *testing.T) {
+	t.Run("node not found returns without error", func(t *testing.T) {
 		s := newFakeNodeStore()
 		// Do not add "node-1" — GetNodeStatus will return store.ErrNotFound.
 		ctrl := NewNodeHealthController(zap.NewNop(), s, nil)
 
 		res, err := ctrl.Reconcile(context.Background(), "node-1")
-		// NodeHealthController does not special-case ErrNotFound; it
-		// propagates the error so the manager can retry with backoff.
-		require.Error(t, err)
+		// NodeHealthController treats ErrNotFound as a no-op: the node was
+		// deleted between Seed and Reconcile, which is a normal race.
+		require.NoError(t, err)
 		assert.False(t, res.Requeue)
 		assert.Empty(t, s.SetNodeStateCalls)
 	})
