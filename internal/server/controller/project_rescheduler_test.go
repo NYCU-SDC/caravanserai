@@ -35,7 +35,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//
 		// Expected behaviour (handleRunning, !found branch):
 		//   1. Record a NotReadyAt condition with the current timestamp —
-		//      this starts the 3-minute grace period clock.
+		//      this starts the grace period clock.
 		//   2. Requeue so the manager checks again after the grace period.
 		//   3. Do NOT reset to Pending yet — the node might recover.
 		clk := newFakeClock()
@@ -60,8 +60,8 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 	})
 
 	t.Run("NotReady node with Running project within grace period requeues", func(t *testing.T) {
-		// Scenario: the NotReadyAt condition was recorded 1 minute ago.
-		// The 3-minute grace period has NOT elapsed yet — the node might
+		// Scenario: the NotReadyAt condition was recorded halfway through the
+		// grace period. The grace period has NOT elapsed yet — the node might
 		// still come back.
 		//
 		// Expected behaviour (handleRunning, elapsed < runningGracePeriod):
@@ -71,7 +71,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//   3. Do NOT re-write NotReadyAt — the condition already exists
 		//      and its timestamp must not be reset.
 		clk := newFakeClock()
-		notReadyAt := clk.Time.Add(-1 * time.Minute) // within 3-min grace period
+		notReadyAt := clk.Time.Add(-RunningGracePeriod / 2) // within grace period
 		ns := newFakeReschedulerNodeStore()
 		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
@@ -96,9 +96,8 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 	})
 
 	t.Run("NotReady node with Running project past grace period resets to Pending", func(t *testing.T) {
-		// Scenario: the NotReadyAt condition was recorded 4 minutes ago
-		// (exceeding the 3-minute runningGracePeriod). The node never
-		// recovered, so the project should be reset to Pending.
+		// Scenario: the NotReadyAt condition was recorded past the grace period.
+		// The node never recovered, so the project should be reset to Pending.
 		//
 		// Expected behaviour (handleRunning, elapsed >= runningGracePeriod):
 		//   1. Call SetProjectPending — resets the project to Pending so the
@@ -106,7 +105,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//   2. Do NOT requeue — this project is done.
 		//   3. Do NOT re-write NotReadyAt — the condition already exists.
 		clk := newFakeClock()
-		notReadyAt := clk.Time.Add(-4 * time.Minute) // past 3-min grace period
+		notReadyAt := clk.Time.Add(-RunningGracePeriod - time.Minute) // past grace period
 		ns := newFakeReschedulerNodeStore()
 		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
@@ -138,7 +137,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//
 		// Expected behaviour (handleTerminating, !found branch):
 		//   1. Record a TerminatingAt condition with the current timestamp —
-		//      this starts the 10-minute force-termination clock.
+		//      this starts the force-termination clock.
 		//   2. Requeue so the manager checks again after the timeout elapses.
 		//   3. Do NOT force-terminate yet — the node might recover in time.
 		clk := newFakeClock()
@@ -163,9 +162,8 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 	})
 
 	t.Run("NotReady node with Terminating project past timeout forces Terminated", func(t *testing.T) {
-		// Scenario: the TerminatingAt condition was recorded 11 minutes ago
-		// (exceeding the 10-minute terminatingTimeout). The node never
-		// recovered, so the graceful teardown is assumed to have failed.
+		// Scenario: the TerminatingAt condition was recorded past the timeout.
+		// The node never recovered, so the graceful teardown is assumed to have failed.
 		//
 		// Expected behaviour (handleTerminating, elapsed >= terminatingTimeout):
 		//   1. Call ForceTerminated — transitions the project to Terminated
@@ -173,7 +171,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//   2. Do NOT requeue — this project is done.
 		//   3. Do NOT re-write TerminatingAt — the condition already exists.
 		clk := newFakeClock()
-		terminatingAt := clk.Time.Add(-11 * time.Minute) // past 10-min timeout
+		terminatingAt := clk.Time.Add(-terminatingTimeout - time.Minute) // past timeout
 		ns := newFakeReschedulerNodeStore()
 		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
@@ -199,8 +197,8 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 	})
 
 	t.Run("NotReady node with Terminating project within timeout requeues", func(t *testing.T) {
-		// Scenario: the TerminatingAt condition was recorded 5 minutes ago.
-		// The 10-minute timeout has NOT elapsed yet — the node might still
+		// Scenario: the TerminatingAt condition was recorded halfway through the
+		// timeout. The timeout has NOT elapsed yet — the node might still
 		// come back and finish the graceful teardown.
 		//
 		// Expected behaviour (handleTerminating, elapsed < terminatingTimeout):
@@ -211,7 +209,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//      and its timestamp must not be reset (that would restart the
 		//      clock and potentially let a project stay in Terminating forever).
 		clk := newFakeClock()
-		terminatingAt := clk.Time.Add(-5 * time.Minute) // within 10-min timeout
+		terminatingAt := clk.Time.Add(-terminatingTimeout / 2) // within timeout
 		ns := newFakeReschedulerNodeStore()
 		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()

@@ -4,6 +4,8 @@ description: Pick up a Jira issue, discuss architecture, then implement
 
 Fetch the Jira issue `$1` and prepare to work on it. Follow these phases strictly — do NOT skip the discussion phase.
 
+Use the `question` tool for ALL interactions with the user. Ask ONE question at a time — wait for the answer before asking the next. Earlier answers may change what you need to ask next.
+
 ## Phase 1 — Understand the task
 
 1. Fetch the issue using `jira_getJiraIssue` with cloudId `clustron.atlassian.net` and issueIdOrKey `$1`. Use `responseContentFormat: markdown`.
@@ -17,14 +19,22 @@ Fetch the Jira issue `$1` and prepare to work on it. Follow these phases strictl
 
 ## Phase 2 — Discuss with the user (MANDATORY)
 
-Present a structured implementation plan to the user. Include:
+First, present a brief summary of the task (2-3 sentences) so the user knows you understood it.
 
-- **Summary**: One paragraph of what the task asks for and why.
-- **Proposed approach**: File-by-file list of changes, in execution order. For each file, briefly describe what will be added or modified.
-- **Open questions**: Anything ambiguous in the issue, design trade-offs, or decisions that need user input.
-- **Risk areas**: Parts of the implementation that might be tricky or have non-obvious side effects.
+Then use the `question` tool to walk through decisions **one at a time**. Typical questions to ask (adapt based on the task):
 
-**STOP HERE and wait for the user to confirm or adjust the plan.** Do not proceed to Phase 3 until the user explicitly says to go ahead.
+1. **Approach confirmation** — Present 2-3 possible approaches with trade-offs. Let the user pick.
+2. **Scope clarification** — If the issue has ambiguity, ask about each ambiguous point separately.
+3. **Design decisions** — For each non-obvious design choice (data model, API shape, naming, error handling), ask one question with concrete options.
+4. **Edge cases** — Ask about any edge cases or constraints you identified.
+
+Rules for questions:
+- ONE question per `question` tool call. Never batch multiple decisions.
+- Provide concrete options with brief descriptions — do not ask open-ended questions unless necessary.
+- After each answer, re-evaluate whether your next planned question is still relevant.
+- When all decisions are resolved, use the `question` tool to present the final implementation plan and ask for a go/no-go confirmation.
+
+**Do NOT proceed to Phase 3 until the user explicitly confirms.**
 
 ## Phase 3 — Implement
 
