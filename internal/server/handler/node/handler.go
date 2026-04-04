@@ -10,8 +10,10 @@
 package node
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -25,13 +27,20 @@ import (
 
 // Handler implements apiserver.RouteRegistrar for Node endpoints.
 type Handler struct {
-	logger *zap.Logger
-	store  store.NodeStore
+	logger       *zap.Logger
+	store        store.NodeStore
+	projectStore ProjectLister
+}
+
+// ProjectLister is the narrow interface the node handler needs to check
+// whether any projects are assigned to a node before allowing deletion.
+type ProjectLister interface {
+	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*v1.Project, error)
 }
 
 // NewHandler creates a Node Handler.
-func NewHandler(logger *zap.Logger, s store.NodeStore) *Handler {
-	return &Handler{logger: logger, store: s}
+func NewHandler(logger *zap.Logger, s store.NodeStore, ps ProjectLister) *Handler {
+	return &Handler{logger: logger, store: s, projectStore: ps}
 }
 
 // RegisterRoutes satisfies apiserver.RouteRegistrar.
@@ -73,6 +82,7 @@ func (h *Handler) createNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	node.TypeMeta = v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Node"}
 	h.writeJSON(w, http.StatusCreated, &node)
 }
 
@@ -111,6 +121,26 @@ func (h *Handler) getNode(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) deleteNode(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+
+	// Guard: reject deletion when projects are still assigned to this node.
+	activePhases := []v1.ProjectPhase{
+		v1.ProjectPhaseScheduled,
+		v1.ProjectPhaseRunning,
+		v1.ProjectPhaseTerminating,
+	}
+	projects, err := h.projectStore.ListProjectsByNodeRef(r.Context(), name, activePhases)
+	if err != nil {
+		h.logger.Error("ListProjectsByNodeRef failed during node delete",
+			zap.String("name", name), zap.Error(err))
+		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if len(projects) > 0 {
+		h.writeError(w, http.StatusConflict,
+			fmt.Sprintf("cannot delete node %q: %d project(s) still assigned", name, len(projects)))
+		return
+	}
+
 	if err := h.store.DeleteNode(r.Context(), name); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.writeError(w, http.StatusNotFound, "node not found: "+name)

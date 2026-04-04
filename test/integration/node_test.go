@@ -82,7 +82,8 @@ func run(m *testing.M) int {
 	}
 
 	// pgstore.New runs embedded migrations, so the schema is always in sync.
-	pgStore, err := pgstore.New(context.Background(), databaseURL, logger)
+	// Pass nil for event.Bus — integration tests don't need event publishing.
+	pgStore, err := pgstore.New(context.Background(), databaseURL, logger, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration: pgstore.New: %v\n", err)
 		return 1
@@ -92,7 +93,7 @@ func run(m *testing.M) int {
 	// Assemble apiserver with a minimal middleware set (no tracing overhead).
 	basicMiddleware := middleware.NewSet()
 	apiSrv := apiserver.New(logger, basicMiddleware)
-	apiSrv.Register(nodehandler.NewHandler(logger, pgStore))
+	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore))
 
 	ts := httptest.NewServer(apiSrv.Handler())
 	defer ts.Close()

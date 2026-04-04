@@ -412,7 +412,7 @@ func main() {
 
 	apiSrv := apiserver.New(logger, basicMiddleware)
 
-	apiSrv.Register(nodehandler.NewHandler(logger, pgStore))
+	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore))
 	apiSrv.Register(projecthandler.NewHandler(logger, pgStore))
 
 	// ============================================

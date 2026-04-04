@@ -65,18 +65,31 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 
 	// 2. Ensure all Ephemeral volumes exist.
 	if err := r.ensureVolumes(ctx, project.Name, project.Spec.Volumes); err != nil {
+		r.rollback(ctx, project, log)
 		return fmt.Errorf("ensure volumes: %w", err)
 	}
 
 	// 3. Ensure every service container exists and is running.
 	for _, svc := range project.Spec.Services {
 		if err := r.ensureContainer(ctx, project.Name, svc); err != nil {
+			r.rollback(ctx, project, log)
 			return fmt.Errorf("ensure container %q: %w", svc.Name, err)
 		}
 		log.Info("Service container reconciled", zap.String("service", svc.Name))
 	}
 
 	return nil
+}
+
+// rollback removes all Docker resources (containers, network, volumes) that
+// were partially created during a failed ReconcileProject. It uses
+// RemoveProject which is already idempotent and tolerates missing resources.
+func (r *DockerRuntime) rollback(ctx context.Context, project *v1.Project, log *zap.Logger) {
+	log.Warn("Reconcile failed, rolling back Docker resources")
+	if err := r.RemoveProject(ctx, project.Name, project.Spec); err != nil {
+		log.Error("Rollback failed, resources may leak",
+			zap.Error(err))
+	}
 }
 
 // RemoveProject implements Runtime.

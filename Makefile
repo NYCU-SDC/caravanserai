@@ -40,4 +40,30 @@ test-integration:
 		&& echo -e "==> $(BLUE)All integration tests passed$(NC)" \
 		|| (echo -e "==> $(RED)Integration tests failed$(NC)" && exit 1)
 
+dev-up:
+	@echo -e ":: $(GREEN)Starting development PostgreSQL...$(NC)"
+	@docker compose up -d --wait \
+		&& echo -e "==> $(BLUE)PostgreSQL is ready$(NC)" \
+		|| (echo -e "==> $(RED)Failed to start PostgreSQL$(NC)" && exit 1)
+
+dev-down:
+	@echo -e ":: $(GREEN)Stopping development services...$(NC)"
+	@docker compose down \
+		&& echo -e "==> $(BLUE)Services stopped$(NC)"
+
+dev-reset:
+	@echo -e ":: $(GREEN)Resetting development environment (wiping data)...$(NC)"
+	@docker compose down -v \
+		&& docker compose up -d --wait \
+		&& echo -e "==> $(BLUE)Development environment reset complete$(NC)" \
+		|| (echo -e "==> $(RED)Failed to reset development environment$(NC)" && exit 1)
+
+dev-server: dev-up build
+	@echo -e ":: $(GREEN)Starting cara-server...$(NC)"
+	@./bin/cara-server
+
+dev-logs:
+	@docker compose logs -f
+
 .PHONY: all prepare build run-server run-agent run-cli test test-integration
+.PHONY: dev-up dev-down dev-reset dev-server dev-logs

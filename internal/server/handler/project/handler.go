@@ -57,6 +57,22 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate spec: at least one service with a non-empty image is required.
+	if len(project.Spec.Services) == 0 {
+		h.writeError(w, http.StatusBadRequest, "spec.services must contain at least one service")
+		return
+	}
+	for _, svc := range project.Spec.Services {
+		if svc.Name == "" {
+			h.writeError(w, http.StatusBadRequest, "each service must have a non-empty name")
+			return
+		}
+		if svc.Image == "" {
+			h.writeError(w, http.StatusBadRequest, "service "+svc.Name+": image is required")
+			return
+		}
+	}
+
 	// New projects start in Pending phase; the Scheduler will assign a node.
 	if project.Status.Phase == "" {
 		project.Status.Phase = v1.ProjectPhasePending
@@ -72,6 +88,7 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	project.TypeMeta = v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"}
 	h.writeJSON(w, http.StatusCreated, &project)
 }
 
