@@ -64,7 +64,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		// The 3-minute grace period has NOT elapsed yet — the node might
 		// still come back.
 		//
-		// Expected behaviour (handleRunning, elapsed < RunningGracePeriod):
+		// Expected behaviour (handleRunning, elapsed < runningGracePeriod):
 		//   1. Requeue — the manager will re-run Reconcile later to check
 		//      whether the grace period has now expired.
 		//   2. Do NOT reset to Pending — still within the grace period.
@@ -97,10 +97,10 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 
 	t.Run("NotReady node with Running project past grace period resets to Pending", func(t *testing.T) {
 		// Scenario: the NotReadyAt condition was recorded 4 minutes ago
-		// (exceeding the 3-minute RunningGracePeriod). The node never
+		// (exceeding the 3-minute runningGracePeriod). The node never
 		// recovered, so the project should be reset to Pending.
 		//
-		// Expected behaviour (handleRunning, elapsed >= RunningGracePeriod):
+		// Expected behaviour (handleRunning, elapsed >= runningGracePeriod):
 		//   1. Call SetProjectPending — resets the project to Pending so the
 		//      scheduler can place it on a healthy node.
 		//   2. Do NOT requeue — this project is done.
