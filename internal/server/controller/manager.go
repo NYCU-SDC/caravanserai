@@ -36,6 +36,42 @@ type registration struct {
 	workers int
 }
 
+// ManagerOption configures optional behaviour on the Manager.
+type ManagerOption func(*managerOptions)
+
+type managerOptions struct {
+	requeueAfter time.Duration
+	errorBackoff time.Duration
+}
+
+// WithRequeueAfter overrides the default requeue delay used when
+// Result.Requeue is true.  This is intended for integration tests that need
+// faster convergence.
+func WithRequeueAfter(d time.Duration) ManagerOption {
+	return func(o *managerOptions) {
+		o.requeueAfter = d
+	}
+}
+
+// WithErrorBackoff overrides the default error backoff delay used when
+// Reconcile returns an error.  This is intended for integration tests.
+func WithErrorBackoff(d time.Duration) ManagerOption {
+	return func(o *managerOptions) {
+		o.errorBackoff = d
+	}
+}
+
+func applyManagerOptions(opts []ManagerOption) managerOptions {
+	o := managerOptions{
+		requeueAfter: defaultRequeueAfter,
+		errorBackoff: defaultErrorBackoff,
+	}
+	for _, fn := range opts {
+		fn(&o)
+	}
+	return o
+}
+
 // Manager runs one or more Controllers in their own goroutine pools.
 // It is the entry point for the control-plane loop.
 //
@@ -47,13 +83,18 @@ type registration struct {
 type Manager struct {
 	logger        *zap.Logger
 	registrations []registration
+	requeueAfter  time.Duration
+	errorBackoff  time.Duration
 }
 
 // NewManager creates an empty Manager.  Register controllers with Add or
 // AddWithWorkers before calling Start.
-func NewManager(logger *zap.Logger) *Manager {
+func NewManager(logger *zap.Logger, opts ...ManagerOption) *Manager {
+	o := applyManagerOptions(opts)
 	return &Manager{
-		logger: logger,
+		logger:       logger,
+		requeueAfter: o.requeueAfter,
+		errorBackoff: o.errorBackoff,
 	}
 }
 
@@ -178,13 +219,14 @@ func (m *Manager) runWorker(ctx context.Context, ctrl Controller, queue chan wor
 			case err != nil:
 				log.Error("Reconcile failed, will retry",
 					zap.String("name", w.name),
-					zap.Duration("backoff", defaultErrorBackoff),
+					zap.Duration("backoff", m.errorBackoff),
 					zap.Error(err),
 				)
 				name := w.name
+				backoff := m.errorBackoff
 				go func() {
 					select {
-					case <-time.After(defaultErrorBackoff):
+					case <-time.After(backoff):
 						select {
 						case queue <- work{name: name}:
 						default:
@@ -197,12 +239,13 @@ func (m *Manager) runWorker(ctx context.Context, ctrl Controller, queue chan wor
 			case result.Requeue:
 				log.Debug("Reconcile requested requeue",
 					zap.String("name", w.name),
-					zap.Duration("after", defaultRequeueAfter),
+					zap.Duration("after", m.requeueAfter),
 				)
 				name := w.name
+				requeueAfter := m.requeueAfter
 				go func() {
 					select {
-					case <-time.After(defaultRequeueAfter):
+					case <-time.After(requeueAfter):
 						select {
 						case queue <- work{name: name}:
 						default:

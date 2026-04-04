@@ -45,10 +45,11 @@ type SchedulerNodeStore interface {
 // weighted random) can be dropped in later without changing the controller
 // lifecycle or the Manager wiring.
 type ProjectSchedulerController struct {
-	logger   *zap.Logger
-	projects SchedulerProjectStore
-	nodes    SchedulerNodeStore
-	bus      *event.Bus
+	logger       *zap.Logger
+	projects     SchedulerProjectStore
+	nodes        SchedulerNodeStore
+	bus          *event.Bus
+	seedInterval time.Duration
 }
 
 // NewProjectSchedulerController creates a ProjectSchedulerController.
@@ -60,12 +61,19 @@ func NewProjectSchedulerController(
 	projects SchedulerProjectStore,
 	nodes SchedulerNodeStore,
 	bus *event.Bus,
+	opts ...Option,
 ) *ProjectSchedulerController {
+	o := applyOptions(opts)
+	interval := o.seedInterval
+	if interval == 0 {
+		interval = projectResyncInterval
+	}
 	return &ProjectSchedulerController{
-		logger:   logger,
-		projects: projects,
-		nodes:    nodes,
-		bus:      bus,
+		logger:       logger,
+		projects:     projects,
+		nodes:        nodes,
+		bus:          bus,
+		seedInterval: interval,
 	}
 }
 
@@ -146,7 +154,7 @@ func (c *ProjectSchedulerController) Seed(ctx context.Context, enqueue func(name
 		log.Debug("Subscribed to project.created events")
 	}
 
-	tick := time.NewTicker(projectResyncInterval)
+	tick := time.NewTicker(c.seedInterval)
 	defer tick.Stop()
 
 	// Run one resync immediately so any pre-existing Pending projects are

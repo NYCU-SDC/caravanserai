@@ -100,11 +100,12 @@ type ReschedulerNodeStore interface {
 //     terminatingTimeout, force-transition to Terminated so that
 //     ProjectTerminationController can delete the DB record.
 type ProjectReschedulerController struct {
-	logger   *zap.Logger
-	projects ReschedulerProjectStore
-	nodes    ReschedulerNodeStore
-	bus      *event.Bus
-	clock    Clock
+	logger       *zap.Logger
+	projects     ReschedulerProjectStore
+	nodes        ReschedulerNodeStore
+	bus          *event.Bus
+	clock        Clock
+	seedInterval time.Duration
 }
 
 // NewProjectReschedulerController creates a ProjectReschedulerController.
@@ -117,12 +118,17 @@ func NewProjectReschedulerController(
 	opts ...Option,
 ) *ProjectReschedulerController {
 	o := applyOptions(opts)
+	interval := o.seedInterval
+	if interval == 0 {
+		interval = reschedulerResyncInterval
+	}
 	return &ProjectReschedulerController{
-		logger:   logger,
-		projects: projects,
-		nodes:    nodes,
-		bus:      bus,
-		clock:    o.clock,
+		logger:       logger,
+		projects:     projects,
+		nodes:        nodes,
+		bus:          bus,
+		clock:        o.clock,
+		seedInterval: interval,
 	}
 }
 
@@ -353,7 +359,7 @@ func (c *ProjectReschedulerController) Seed(ctx context.Context, enqueue func(na
 		log.Debug("Subscribed to node.updated events")
 	}
 
-	tick := time.NewTicker(reschedulerResyncInterval)
+	tick := time.NewTicker(c.seedInterval)
 	defer tick.Stop()
 
 	// Run one resync immediately to handle nodes that were already NotReady

@@ -20,7 +20,8 @@ func (realClock) Since(t time.Time) time.Duration { return time.Since(t) }
 // options holds shared configuration that can be applied to any controller
 // that supports functional options.
 type options struct {
-	clock Clock
+	clock        Clock
+	seedInterval time.Duration
 }
 
 // Option configures optional behaviour on controllers that accept it.
@@ -34,9 +35,18 @@ func WithClock(c Clock) Option {
 	}
 }
 
+// WithSeedInterval overrides the default seed/resync ticker interval.  This is
+// intended for integration tests that need faster convergence.
+func WithSeedInterval(d time.Duration) Option {
+	return func(o *options) {
+		o.seedInterval = d
+	}
+}
+
 // applyOptions folds all Option functions into an options struct with sensible
 // defaults.  Controllers should call this once in their constructor and read
-// whichever fields they need.
+// whichever fields they need.  seedInterval is left at zero — each controller
+// must check and apply its own default if o.seedInterval == 0.
 func applyOptions(opts []Option) options {
 	o := options{}
 	for _, fn := range opts {

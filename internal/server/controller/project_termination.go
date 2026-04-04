@@ -41,9 +41,10 @@ type TerminationProjectStore interface {
 //  4. This controller's Seed goroutine receives the event and enqueues the name.
 //  5. Reconcile verifies the phase is still Terminated and deletes the record.
 type ProjectTerminationController struct {
-	logger   *zap.Logger
-	projects TerminationProjectStore
-	bus      *event.Bus
+	logger       *zap.Logger
+	projects     TerminationProjectStore
+	bus          *event.Bus
+	seedInterval time.Duration
 }
 
 // NewProjectTerminationController creates a ProjectTerminationController.
@@ -52,11 +53,18 @@ func NewProjectTerminationController(
 	logger *zap.Logger,
 	projects TerminationProjectStore,
 	bus *event.Bus,
+	opts ...Option,
 ) *ProjectTerminationController {
+	o := applyOptions(opts)
+	interval := o.seedInterval
+	if interval == 0 {
+		interval = terminationResyncInterval
+	}
 	return &ProjectTerminationController{
-		logger:   logger,
-		projects: projects,
-		bus:      bus,
+		logger:       logger,
+		projects:     projects,
+		bus:          bus,
+		seedInterval: interval,
 	}
 }
 
@@ -114,7 +122,7 @@ func (c *ProjectTerminationController) Seed(ctx context.Context, enqueue func(na
 		log.Debug("Subscribed to project.updated events")
 	}
 
-	tick := time.NewTicker(terminationResyncInterval)
+	tick := time.NewTicker(c.seedInterval)
 	defer tick.Stop()
 
 	// Run one resync immediately on startup to catch any pre-existing
