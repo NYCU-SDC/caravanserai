@@ -9,6 +9,21 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// fakeClock — implements Clock for deterministic tests
+// ---------------------------------------------------------------------------
+
+// fakeClock is a test Clock whose time is controlled by the test.  Now()
+// returns the value of Time, and Since(t) returns Time.Sub(t).
+type fakeClock struct {
+	Time time.Time
+}
+
+var _ Clock = (*fakeClock)(nil)
+
+func (fc *fakeClock) Now() time.Time                  { return fc.Time }
+func (fc *fakeClock) Since(t time.Time) time.Duration { return fc.Time.Sub(t) }
+
+// ---------------------------------------------------------------------------
 // Call-recording types
 // ---------------------------------------------------------------------------
 
