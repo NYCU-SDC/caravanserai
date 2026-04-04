@@ -52,10 +52,11 @@ type NodeStatusSnapshot struct {
 // (timer-based); once a real Store watch is available, change events will
 // drive reconciliation instead.
 type NodeHealthController struct {
-	logger *zap.Logger
-	store  NodeStore
-	bus    *event.Bus
-	clock  Clock
+	logger       *zap.Logger
+	store        NodeStore
+	bus          *event.Bus
+	clock        Clock
+	seedInterval time.Duration
 }
 
 // NewNodeHealthController creates a NodeHealthController.
@@ -64,11 +65,16 @@ type NodeHealthController struct {
 // bus may be nil; if so, no node.updated events are published.
 func NewNodeHealthController(logger *zap.Logger, store NodeStore, bus *event.Bus, opts ...Option) *NodeHealthController {
 	o := applyOptions(opts)
+	interval := o.seedInterval
+	if interval == 0 {
+		interval = nodeSeedInterval
+	}
 	return &NodeHealthController{
-		logger: logger,
-		store:  store,
-		bus:    bus,
-		clock:  o.clock,
+		logger:       logger,
+		store:        store,
+		bus:          bus,
+		clock:        o.clock,
+		seedInterval: interval,
 	}
 }
 
@@ -147,7 +153,7 @@ func (c *NodeHealthController) Seed(ctx context.Context, enqueue func(name strin
 		return
 	}
 
-	tick := time.NewTicker(nodeSeedInterval)
+	tick := time.NewTicker(c.seedInterval)
 	defer tick.Stop()
 
 	// Run once immediately on startup before the first tick.
