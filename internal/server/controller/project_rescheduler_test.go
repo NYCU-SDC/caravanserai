@@ -10,10 +10,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// reschedulerBase is a fixed reference point used by rescheduler tests so that
-// assertions are fully deterministic and independent of wall-clock time.
-var reschedulerBase = time.Date(2025, 6, 15, 8, 0, 0, 0, time.UTC)
-
 func TestProjectReschedulerReconcile(t *testing.T) {
 	t.Run("NotReady node with Scheduled project resets to Pending", func(t *testing.T) {
 		ns := newFakeReschedulerNodeStore()
@@ -61,8 +57,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//      this starts the 10-minute force-termination clock.
 		//   2. Requeue so the manager checks again after the timeout elapses.
 		//   3. Do NOT force-terminate yet — the node might recover in time.
-		now := reschedulerBase
-		clk := &fakeClock{Time: now}
+		clk := newFakeClock()
 		ns := newFakeReschedulerNodeStore()
 		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
@@ -79,7 +74,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		assert.True(t, res.Requeue, "should requeue to check timeout later")
 		require.Len(t, ps.SetTerminatingAtCalls, 1)
 		assert.Equal(t, "app-1", ps.SetTerminatingAtCalls[0].Name)
-		assert.Equal(t, now.UTC(), ps.SetTerminatingAtCalls[0].At, "should record the fake clock's time")
+		assert.Equal(t, clk.Time.UTC(), ps.SetTerminatingAtCalls[0].At, "should record the fake clock's time")
 		assert.Empty(t, ps.ForceTerminatedCalls, "should not force-terminate on first observation")
 	})
 
@@ -93,9 +88,8 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//      phase so ProjectTerminationController can delete the DB record.
 		//   2. Do NOT requeue — this project is done.
 		//   3. Do NOT re-write TerminatingAt — the condition already exists.
-		now := reschedulerBase
-		terminatingAt := now.Add(-11 * time.Minute) // past 10-min timeout
-		clk := &fakeClock{Time: now}
+		clk := newFakeClock()
+		terminatingAt := clk.Time.Add(-11 * time.Minute) // past 10-min timeout
 		ns := newFakeReschedulerNodeStore()
 		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
@@ -132,9 +126,8 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//   3. Do NOT re-write TerminatingAt — the condition already exists
 		//      and its timestamp must not be reset (that would restart the
 		//      clock and potentially let a project stay in Terminating forever).
-		now := reschedulerBase
-		terminatingAt := now.Add(-5 * time.Minute) // within 10-min timeout
-		clk := &fakeClock{Time: now}
+		clk := newFakeClock()
+		terminatingAt := clk.Time.Add(-5 * time.Minute) // within 10-min timeout
 		ns := newFakeReschedulerNodeStore()
 		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
