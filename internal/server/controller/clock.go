@@ -34,15 +34,16 @@ func WithClock(c Clock) Option {
 	}
 }
 
-// appliedClock resolves the final Clock from a variadic Option slice,
-// defaulting to realClock{} when no WithClock option is provided.
-func appliedClock(opts []Option) Clock {
+// applyOptions folds all Option functions into an options struct with sensible
+// defaults.  Controllers should call this once in their constructor and read
+// whichever fields they need.
+func applyOptions(opts []Option) options {
 	o := options{}
 	for _, fn := range opts {
 		fn(&o)
 	}
 	if o.clock == nil {
-		return realClock{}
+		o.clock = realClock{}
 	}
-	return o.clock
+	return o
 }

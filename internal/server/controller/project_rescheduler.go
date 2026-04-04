@@ -108,12 +108,13 @@ func NewProjectReschedulerController(
 	bus *event.Bus,
 	opts ...Option,
 ) *ProjectReschedulerController {
+	o := applyOptions(opts)
 	return &ProjectReschedulerController{
 		logger:   logger,
 		projects: projects,
 		nodes:    nodes,
 		bus:      bus,
-		clock:    appliedClock(opts),
+		clock:    o.clock,
 	}
 }
 

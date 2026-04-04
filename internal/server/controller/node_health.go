@@ -75,11 +75,12 @@ type NodeHealthController struct {
 // and become a no-op until a real store is injected.
 // bus may be nil; if so, no node.updated events are published.
 func NewNodeHealthController(logger *zap.Logger, store NodeStore, bus *event.Bus, opts ...Option) *NodeHealthController {
+	o := applyOptions(opts)
 	return &NodeHealthController{
 		logger: logger,
 		store:  store,
 		bus:    bus,
-		clock:  appliedClock(opts),
+		clock:  o.clock,
 	}
 }
 
