@@ -81,7 +81,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 			NodeRef: "node-1",
 			Conditions: []ConditionSnapshot{
 				{
-					Type:               condTypeNotReadyAt,
+					Type:               ConditionTypeNotReadyAt,
 					LastTransitionTime: notReadyAt,
 				},
 			},
@@ -115,7 +115,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 			NodeRef: "node-1",
 			Conditions: []ConditionSnapshot{
 				{
-					Type:               condTypeNotReadyAt,
+					Type:               ConditionTypeNotReadyAt,
 					LastTransitionTime: notReadyAt,
 				},
 			},
@@ -181,7 +181,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 			NodeRef: "node-1",
 			Conditions: []ConditionSnapshot{
 				{
-					Type:               condTypeTerminatingAt,
+					Type:               ConditionTypeTerminatingAt,
 					LastTransitionTime: terminatingAt,
 				},
 			},
@@ -219,7 +219,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 			NodeRef: "node-1",
 			Conditions: []ConditionSnapshot{
 				{
-					Type:               condTypeTerminatingAt,
+					Type:               ConditionTypeTerminatingAt,
 					LastTransitionTime: terminatingAt,
 				},
 			},

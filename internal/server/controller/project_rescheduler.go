@@ -29,18 +29,6 @@ const (
 	// another node, avoiding unnecessary churn and split-brain risk for
 	// stateful workloads.  Set to 3× the 90-second heartbeat timeout.
 	runningGracePeriod = 3 * time.Minute
-
-	// condTypeTerminatingAt is the Condition.Type written by the rescheduler
-	// when it first observes a Terminating project whose node is NotReady.
-	// Its LastTransitionTime serves as the start of the force-termination
-	// timeout clock.
-	condTypeTerminatingAt = "TerminatingAt"
-
-	// condTypeNotReadyAt is the Condition.Type written by the rescheduler
-	// when it first observes a Running project whose node is NotReady.
-	// Its LastTransitionTime serves as the start of the running grace
-	// period clock.
-	condTypeNotReadyAt = "NotReadyAt"
 )
 
 // ProjectSnapshot is the minimal view of a Project needed by
@@ -55,7 +43,7 @@ type ProjectSnapshot struct {
 // ConditionSnapshot is the minimal view of a Condition needed by this
 // controller.
 type ConditionSnapshot struct {
-	Type               string
+	Type               ConditionType
 	LastTransitionTime time.Time
 }
 
@@ -236,7 +224,7 @@ func (c *ProjectReschedulerController) handleTerminating(
 	var terminatingAt time.Time
 	var found bool
 	for _, cond := range p.Conditions {
-		if cond.Type == condTypeTerminatingAt {
+		if cond.Type == ConditionTypeTerminatingAt {
 			terminatingAt = cond.LastTransitionTime
 			found = true
 			break
@@ -298,7 +286,7 @@ func (c *ProjectReschedulerController) handleRunning(
 	var notReadyAt time.Time
 	var found bool
 	for _, cond := range p.Conditions {
-		if cond.Type == condTypeNotReadyAt {
+		if cond.Type == ConditionTypeNotReadyAt {
 			notReadyAt = cond.LastTransitionTime
 			found = true
 			break

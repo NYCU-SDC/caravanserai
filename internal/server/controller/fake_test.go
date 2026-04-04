@@ -395,7 +395,7 @@ func (f *fakeReschedulerProjectStore) SetTerminatingAt(_ context.Context, name s
 		// Replace or add the TerminatingAt condition.
 		replaced := false
 		for i, c := range p.Conditions {
-			if c.Type == condTypeTerminatingAt {
+			if c.Type == ConditionTypeTerminatingAt {
 				p.Conditions[i].LastTransitionTime = at
 				replaced = true
 				break
@@ -403,7 +403,7 @@ func (f *fakeReschedulerProjectStore) SetTerminatingAt(_ context.Context, name s
 		}
 		if !replaced {
 			p.Conditions = append(p.Conditions, ConditionSnapshot{
-				Type:               condTypeTerminatingAt,
+				Type:               ConditionTypeTerminatingAt,
 				LastTransitionTime: at,
 			})
 		}
@@ -425,7 +425,7 @@ func (f *fakeReschedulerProjectStore) SetNotReadyAt(_ context.Context, name stri
 		// Replace or add the NotReadyAt condition.
 		replaced := false
 		for i, c := range p.Conditions {
-			if c.Type == condTypeNotReadyAt {
+			if c.Type == ConditionTypeNotReadyAt {
 				p.Conditions[i].LastTransitionTime = at
 				replaced = true
 				break
@@ -433,7 +433,7 @@ func (f *fakeReschedulerProjectStore) SetNotReadyAt(_ context.Context, name stri
 		}
 		if !replaced {
 			p.Conditions = append(p.Conditions, ConditionSnapshot{
-				Type:               condTypeNotReadyAt,
+				Type:               ConditionTypeNotReadyAt,
 				LastTransitionTime: at,
 			})
 		}

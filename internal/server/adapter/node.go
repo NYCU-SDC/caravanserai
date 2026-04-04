@@ -57,7 +57,6 @@ func (a *NodeStoreAdapter) SetNodeState(ctx context.Context, name string, state 
 	}
 	node.Status.State = v1.NodeState(state)
 	// Update or append the Ready condition.
-	condType := "Ready"
 	condStatus := v1.ConditionTrue
 	if state != controller.NodeStateReady {
 		condStatus = v1.ConditionFalse
@@ -65,9 +64,9 @@ func (a *NodeStoreAdapter) SetNodeState(ctx context.Context, name string, state 
 	now := time.Now().UTC()
 	updated := false
 	for i, c := range node.Status.Conditions {
-		if c.Type == condType {
+		if c.Type == v1.ConditionTypeReady {
 			node.Status.Conditions[i] = v1.Condition{
-				Type:               condType,
+				Type:               v1.ConditionTypeReady,
 				Status:             condStatus,
 				Reason:             reason,
 				Message:            message,
@@ -79,7 +78,7 @@ func (a *NodeStoreAdapter) SetNodeState(ctx context.Context, name string, state 
 	}
 	if !updated {
 		node.Status.Conditions = append(node.Status.Conditions, v1.Condition{
-			Type:               condType,
+			Type:               v1.ConditionTypeReady,
 			Status:             condStatus,
 			Reason:             reason,
 			Message:            message,

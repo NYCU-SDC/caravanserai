@@ -280,10 +280,9 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Update or append a Phase condition when reason/message are provided.
 	if req.Reason != "" || req.Message != "" {
-		condType := "Phase"
 		now := time.Now().UTC()
 		cond := v1.Condition{
-			Type:               condType,
+			Type:               v1.ConditionTypePhase,
 			Status:             v1.ConditionTrue,
 			Reason:             req.Reason,
 			Message:            req.Message,
@@ -291,7 +290,7 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		updated := false
 		for i, c := range status.Conditions {
-			if c.Type == condType {
+			if c.Type == v1.ConditionTypePhase {
 				status.Conditions[i] = cond
 				updated = true
 				break
