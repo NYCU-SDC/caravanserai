@@ -2,9 +2,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"NYCU-SDC/caravanserai/internal/event"
+	"NYCU-SDC/caravanserai/internal/store"
 
 	"go.uber.org/zap"
 )
@@ -94,6 +96,10 @@ func (c *NodeHealthController) Reconcile(ctx context.Context, name string) (Resu
 
 	snap, err := c.store.GetNodeStatus(ctx, name)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			log.Debug("Node not found, skipping")
+			return Result{}, nil
+		}
 		return Result{}, err
 	}
 
