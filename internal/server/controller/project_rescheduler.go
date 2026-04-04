@@ -23,11 +23,24 @@ const (
 	// NotReady nodes as a fallback in case an event was dropped.
 	reschedulerResyncInterval = 30 * time.Second
 
+	// runningGracePeriod is the maximum time a Running project on a NotReady
+	// node is allowed before the rescheduler resets it to Pending.  This gives
+	// transient network issues time to resolve before the project is moved to
+	// another node, avoiding unnecessary churn and split-brain risk for
+	// stateful workloads.  Set to 3× the 90-second heartbeat timeout.
+	RunningGracePeriod = 3 * time.Minute
+
 	// condTypeTerminatingAt is the Condition.Type written by the rescheduler
-	// when it first observes a Terminating project whose node is NotReady.
+	// when it first observe a Terminating project whose node is NotReady.
 	// Its LastTransitionTime serves as the start of the force-termination
 	// timeout clock.
 	condTypeTerminatingAt = "TerminatingAt"
+
+	// condTypeNotReadyAt is the Condition.Type written by the rescheduler
+	// when it first observes a Running project whose node is NotReady.
+	// Its LastTransitionTime serves as the start of the running grace
+	// period clock.
+	condTypeNotReadyAt = "NotReadyAt"
 )
 
 // ProjectSnapshot is the minimal view of a Project needed by
@@ -62,6 +75,12 @@ type ReschedulerProjectStore interface {
 	// NotReady.  This timestamp is used to calculate the force-termination
 	// timeout.
 	SetTerminatingAt(ctx context.Context, name string, at time.Time) error
+
+	// SetNotReadyAt writes (or replaces) a NotReadyAt condition on the
+	// Project to record when the rescheduler first observed the node as
+	// NotReady while the project was Running.  This timestamp is used to
+	// calculate the running grace period before resetting to Pending.
+	SetNotReadyAt(ctx context.Context, name string, at time.Time) error
 
 	// ForceTerminated transitions the Project to Terminated phase and records a
 	// Phase condition with reason=TerminationTimeout.  The
@@ -162,10 +181,9 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 
 	for _, p := range projects {
 		switch p.Phase {
-		case ProjectPhaseScheduled, ProjectPhaseRunning:
-			log.Info("Resetting project to Pending due to NotReady node",
+		case ProjectPhaseScheduled:
+			log.Info("Resetting scheduled project to Pending due to NotReady node",
 				zap.String("project", p.Name),
-				zap.String("phase", string(p.Phase)),
 			)
 			if err := c.projects.SetProjectPending(ctx, p.Name); err != nil {
 				if errors.Is(err, store.ErrNotFound) {
@@ -174,7 +192,16 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 				}
 				return Result{}, err
 			}
-			log.Info("Project reset to Pending", zap.String("project", p.Name))
+			log.Info("Scheduled project reset to Pending", zap.String("project", p.Name))
+
+		case ProjectPhaseRunning:
+			requeue, err := c.handleRunning(ctx, log, p)
+			if err != nil {
+				return Result{}, err
+			}
+			if requeue {
+				requeueNeeded = true
+			}
 
 		case ProjectPhaseTerminating:
 			requeue, err := c.handleTerminating(ctx, log, p)
@@ -255,6 +282,68 @@ func (c *ProjectReschedulerController) handleTerminating(
 		return false, err
 	}
 	log.Info("Project force-terminated", zap.String("project", p.Name))
+	return false, nil
+}
+
+// handleRunning processes a single Running project on a NotReady node.
+// Returns (true, nil) if the project still needs to be checked again later.
+func (c *ProjectReschedulerController) handleRunning(
+	ctx context.Context,
+	log *zap.Logger,
+	p *ProjectSnapshot,
+) (requeue bool, err error) {
+	log = log.With(zap.String("project", p.Name))
+
+	// Find the NotReadyAt condition, if any.
+	var notReadyAt time.Time
+	var found bool
+	for _, cond := range p.Conditions {
+		if cond.Type == condTypeNotReadyAt {
+			notReadyAt = cond.LastTransitionTime
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		// First time we see this Running project on a NotReady node.
+		// Record the current time as the start of the grace period clock.
+		now := c.clock.Now().UTC()
+		log.Info("Recording NotReadyAt timestamp for stranded running project", zap.Time("at", now))
+		if err := c.projects.SetNotReadyAt(ctx, p.Name, now); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				log.Debug("Project disappeared before NotReadyAt write, skipping")
+				return false, nil
+			}
+			return false, err
+		}
+		// Come back after the grace period to check.
+		return true, nil
+	}
+
+	elapsed := c.clock.Since(notReadyAt)
+	if elapsed < RunningGracePeriod {
+		remaining := RunningGracePeriod - elapsed
+		log.Info("Running project waiting for grace period",
+			zap.Duration("elapsed", elapsed),
+			zap.Duration("remaining", remaining),
+		)
+		return true, nil
+	}
+
+	// Grace period exceeded — reset to Pending.
+	log.Info("Running grace period exceeded, resetting project to Pending",
+		zap.Duration("elapsed", elapsed),
+		zap.Duration("gracePeriod", RunningGracePeriod),
+	)
+	if err := c.projects.SetProjectPending(ctx, p.Name); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			log.Debug("Project disappeared before SetProjectPending, skipping")
+			return false, nil
+		}
+		return false, err
+	}
+	log.Info("Running project reset to Pending", zap.String("project", p.Name))
 	return false, nil
 }
 
