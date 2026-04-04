@@ -46,19 +46,19 @@ func (a *NodeStoreAdapter) GetNodeStatus(ctx context.Context, name string) (cont
 	}
 	return controller.NodeStatusSnapshot{
 		LastHeartbeat: node.Status.LastHeartbeat,
-		State:         controller.NodeState(node.Status.State),
+		State:         node.Status.State,
 	}, nil
 }
 
-func (a *NodeStoreAdapter) SetNodeState(ctx context.Context, name string, state controller.NodeState, reason, message string) error {
+func (a *NodeStoreAdapter) SetNodeState(ctx context.Context, name string, state v1.NodeState, reason, message string) error {
 	node, err := a.s.GetNode(ctx, name)
 	if err != nil {
 		return err
 	}
-	node.Status.State = v1.NodeState(state)
+	node.Status.State = state
 	// Update or append the Ready condition.
 	condStatus := v1.ConditionTrue
-	if state != controller.NodeStateReady {
+	if state != v1.NodeStateReady {
 		condStatus = v1.ConditionFalse
 	}
 	now := time.Now().UTC()

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/event"
 	"NYCU-SDC/caravanserai/internal/store"
 
@@ -35,7 +36,7 @@ const (
 // ProjectReschedulerController.
 type ProjectSnapshot struct {
 	Name       string
-	Phase      ProjectPhase
+	Phase      v1.ProjectPhase
 	NodeRef    string
 	Conditions []ConditionSnapshot
 }
@@ -43,7 +44,7 @@ type ProjectSnapshot struct {
 // ConditionSnapshot is the minimal view of a Condition needed by this
 // controller.
 type ConditionSnapshot struct {
-	Type               ConditionType
+	Type               v1.ConditionType
 	LastTransitionTime time.Time
 }
 
@@ -52,7 +53,7 @@ type ConditionSnapshot struct {
 type ReschedulerProjectStore interface {
 	// ListProjectsByNodeRef returns all Projects assigned to nodeRef whose
 	// phase is one of phases.
-	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []ProjectPhase) ([]*ProjectSnapshot, error)
+	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*ProjectSnapshot, error)
 
 	// SetProjectPending clears the nodeRef, sets phase=Pending, and records a
 	// Phase condition with reason=NodeNotReady.
@@ -146,15 +147,15 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 		return Result{}, err
 	}
 
-	if snap.State != NodeStateNotReady {
+	if snap.State != v1.NodeStateNotReady {
 		log.Debug("Node is not NotReady, nothing to do", zap.String("state", string(snap.State)))
 		return Result{}, nil
 	}
 
-	projects, err := c.projects.ListProjectsByNodeRef(ctx, name, []ProjectPhase{
-		ProjectPhaseScheduled,
-		ProjectPhaseRunning,
-		ProjectPhaseTerminating,
+	projects, err := c.projects.ListProjectsByNodeRef(ctx, name, []v1.ProjectPhase{
+		v1.ProjectPhaseScheduled,
+		v1.ProjectPhaseRunning,
+		v1.ProjectPhaseTerminating,
 	})
 	if err != nil {
 		return Result{}, err
@@ -169,7 +170,7 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 
 	for _, p := range projects {
 		switch p.Phase {
-		case ProjectPhaseScheduled:
+		case v1.ProjectPhaseScheduled:
 			log.Info("Resetting scheduled project to Pending due to NotReady node",
 				zap.String("project", p.Name),
 			)
@@ -182,7 +183,7 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 			}
 			log.Info("Scheduled project reset to Pending", zap.String("project", p.Name))
 
-		case ProjectPhaseRunning:
+		case v1.ProjectPhaseRunning:
 			requeue, err := c.handleRunning(ctx, log, p)
 			if err != nil {
 				return Result{}, err
@@ -191,7 +192,7 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 				requeueNeeded = true
 			}
 
-		case ProjectPhaseTerminating:
+		case v1.ProjectPhaseTerminating:
 			requeue, err := c.handleTerminating(ctx, log, p)
 			if err != nil {
 				return Result{}, err
@@ -224,7 +225,7 @@ func (c *ProjectReschedulerController) handleTerminating(
 	var terminatingAt time.Time
 	var found bool
 	for _, cond := range p.Conditions {
-		if cond.Type == ConditionTypeTerminatingAt {
+		if cond.Type == v1.ConditionTypeTerminatingAt {
 			terminatingAt = cond.LastTransitionTime
 			found = true
 			break
@@ -286,7 +287,7 @@ func (c *ProjectReschedulerController) handleRunning(
 	var notReadyAt time.Time
 	var found bool
 	for _, cond := range p.Conditions {
-		if cond.Type == ConditionTypeNotReadyAt {
+		if cond.Type == v1.ConditionTypeNotReadyAt {
 			notReadyAt = cond.LastTransitionTime
 			found = true
 			break

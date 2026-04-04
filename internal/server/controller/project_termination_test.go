@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	v1 "NYCU-SDC/caravanserai/api/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -12,7 +13,7 @@ import (
 func TestProjectTerminationReconcile(t *testing.T) {
 	t.Run("Terminated project is deleted from store", func(t *testing.T) {
 		ps := newFakeTerminationProjectStore()
-		ps.projects["my-app"] = terminationProjectRecord{Phase: ProjectPhaseTerminated}
+		ps.projects["my-app"] = terminationProjectRecord{Phase: v1.ProjectPhaseTerminated}
 		ctrl := NewProjectTerminationController(zap.NewNop(), ps, nil)
 
 		res, err := ctrl.Reconcile(context.Background(), "my-app")
@@ -27,7 +28,7 @@ func TestProjectTerminationReconcile(t *testing.T) {
 
 	t.Run("project not in Terminated phase is a no-op", func(t *testing.T) {
 		ps := newFakeTerminationProjectStore()
-		ps.projects["my-app"] = terminationProjectRecord{Phase: ProjectPhaseRunning}
+		ps.projects["my-app"] = terminationProjectRecord{Phase: v1.ProjectPhaseRunning}
 		ctrl := NewProjectTerminationController(zap.NewNop(), ps, nil)
 
 		res, err := ctrl.Reconcile(context.Background(), "my-app")

@@ -32,8 +32,8 @@ func NewProjectStoreAdapter(s *pgstore.Store) *ProjectStoreAdapter {
 	return &ProjectStoreAdapter{s: s}
 }
 
-func (a *ProjectStoreAdapter) ListProjectNamesByPhase(ctx context.Context, phase controller.ProjectPhase) ([]string, error) {
-	projects, err := a.s.ListProjectsByPhase(ctx, v1.ProjectPhase(phase))
+func (a *ProjectStoreAdapter) ListProjectNamesByPhase(ctx context.Context, phase v1.ProjectPhase) ([]string, error) {
+	projects, err := a.s.ListProjectsByPhase(ctx, phase)
 	if err != nil {
 		return nil, err
 	}
@@ -44,12 +44,12 @@ func (a *ProjectStoreAdapter) ListProjectNamesByPhase(ctx context.Context, phase
 	return names, nil
 }
 
-func (a *ProjectStoreAdapter) GetProjectPhase(ctx context.Context, name string) (controller.ProjectPhase, string, error) {
+func (a *ProjectStoreAdapter) GetProjectPhase(ctx context.Context, name string) (v1.ProjectPhase, string, error) {
 	project, err := a.s.GetProject(ctx, name)
 	if err != nil {
 		return "", "", err
 	}
-	return controller.ProjectPhase(project.Status.Phase), project.Status.NodeRef, nil
+	return project.Status.Phase, project.Status.NodeRef, nil
 }
 
 func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nodeRef string) error {
@@ -62,13 +62,12 @@ func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nod
 	return a.s.UpdateProjectStatus(ctx, name, project.Status)
 }
 
-func (a *ProjectStoreAdapter) SetProjectPhase(ctx context.Context, name string, phase controller.ProjectPhase, reason, message string) error {
+func (a *ProjectStoreAdapter) SetProjectPhase(ctx context.Context, name string, phase v1.ProjectPhase, reason, message string) error {
 	project, err := a.s.GetProject(ctx, name)
 	if err != nil {
 		return err
 	}
-	project.Status.Phase = v1.ProjectPhase(phase)
-	// Update or append a phase condition.
+	project.Status.Phase = phase
 	now := time.Now().UTC()
 	cond := v1.Condition{
 		Type:               v1.ConditionTypePhase,
@@ -97,12 +96,8 @@ func (a *ProjectStoreAdapter) DeleteProject(ctx context.Context, name string) er
 
 // ListProjectsByNodeRef satisfies controller.ReschedulerProjectStore.
 // It converts api/v1 Projects into controller.ProjectSnapshot values.
-func (a *ProjectStoreAdapter) ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []controller.ProjectPhase) ([]*controller.ProjectSnapshot, error) {
-	v1Phases := make([]v1.ProjectPhase, len(phases))
-	for i, p := range phases {
-		v1Phases[i] = v1.ProjectPhase(p)
-	}
-	projects, err := a.s.ListProjectsByNodeRef(ctx, nodeRef, v1Phases)
+func (a *ProjectStoreAdapter) ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*controller.ProjectSnapshot, error) {
+	projects, err := a.s.ListProjectsByNodeRef(ctx, nodeRef, phases)
 	if err != nil {
 		return nil, err
 	}
@@ -111,13 +106,13 @@ func (a *ProjectStoreAdapter) ListProjectsByNodeRef(ctx context.Context, nodeRef
 		conditions := make([]controller.ConditionSnapshot, len(p.Status.Conditions))
 		for j, c := range p.Status.Conditions {
 			conditions[j] = controller.ConditionSnapshot{
-				Type:               controller.ConditionType(c.Type),
+				Type:               c.Type,
 				LastTransitionTime: c.LastTransitionTime,
 			}
 		}
 		snapshots[i] = &controller.ProjectSnapshot{
 			Name:       p.Name,
-			Phase:      controller.ProjectPhase(p.Status.Phase),
+			Phase:      p.Status.Phase,
 			NodeRef:    p.Status.NodeRef,
 			Conditions: conditions,
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	v1 "NYCU-SDC/caravanserai/api/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -12,7 +13,7 @@ import (
 func TestProjectSchedulerReconcile(t *testing.T) {
 	t.Run("Pending project with one Ready node is scheduled", func(t *testing.T) {
 		ps := newFakeSchedulerProjectStore()
-		ps.projects["my-app"] = schedulerProjectRecord{Phase: ProjectPhasePending}
+		ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhasePending}
 		ns := newFakeSchedulerNodeStore("node-1")
 		ctrl := NewProjectSchedulerController(zap.NewNop(), ps, ns, nil)
 
@@ -26,7 +27,7 @@ func TestProjectSchedulerReconcile(t *testing.T) {
 
 	t.Run("Pending project with no Ready nodes requeues", func(t *testing.T) {
 		ps := newFakeSchedulerProjectStore()
-		ps.projects["my-app"] = schedulerProjectRecord{Phase: ProjectPhasePending}
+		ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhasePending}
 		ns := newFakeSchedulerNodeStore() // no ready nodes
 		ctrl := NewProjectSchedulerController(zap.NewNop(), ps, ns, nil)
 
@@ -38,7 +39,7 @@ func TestProjectSchedulerReconcile(t *testing.T) {
 
 	t.Run("Pending project with multiple Ready nodes is scheduled to one", func(t *testing.T) {
 		ps := newFakeSchedulerProjectStore()
-		ps.projects["my-app"] = schedulerProjectRecord{Phase: ProjectPhasePending}
+		ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhasePending}
 		ns := newFakeSchedulerNodeStore("node-a", "node-b", "node-c")
 		ctrl := NewProjectSchedulerController(zap.NewNop(), ps, ns, nil)
 
@@ -53,7 +54,7 @@ func TestProjectSchedulerReconcile(t *testing.T) {
 
 	t.Run("project not Pending is a no-op", func(t *testing.T) {
 		ps := newFakeSchedulerProjectStore()
-		ps.projects["my-app"] = schedulerProjectRecord{Phase: ProjectPhaseRunning, NodeRef: "node-1"}
+		ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhaseRunning, NodeRef: "node-1"}
 		ns := newFakeSchedulerNodeStore("node-1")
 		ctrl := NewProjectSchedulerController(zap.NewNop(), ps, ns, nil)
 
