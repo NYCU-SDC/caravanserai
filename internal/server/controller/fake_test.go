@@ -97,16 +97,20 @@ func (f *fakeNodeStore) SetNodeState(_ context.Context, name string, state NodeS
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	// 1. Error injection.
 	if err, ok := f.errs[name]; ok {
 		return err
 	}
+
+	// 2. Record the call for later assertions.
 	f.SetNodeStateCalls = append(f.SetNodeStateCalls, setNodeStateCall{
 		Name:    name,
 		State:   state,
 		Reason:  reason,
 		Message: message,
 	})
-	// Update the in-memory state so subsequent reads reflect the change.
+
+	// 3. Update the in-memory state so subsequent reads reflect the change.
 	if snap, ok := f.nodes[name]; ok {
 		snap.State = state
 		f.nodes[name] = snap
@@ -174,10 +178,12 @@ func (f *fakeSchedulerProjectStore) SetProjectScheduled(_ context.Context, name,
 	if err, ok := f.errs[name]; ok {
 		return err
 	}
+
 	f.SetProjectScheduledCalls = append(f.SetProjectScheduledCalls, setProjectScheduledCall{
 		Name:    name,
 		NodeRef: nodeRef,
 	})
+
 	if r, ok := f.projects[name]; ok {
 		r.Phase = ProjectPhaseScheduled
 		r.NodeRef = nodeRef
@@ -270,7 +276,9 @@ func (f *fakeTerminationProjectStore) DeleteProject(_ context.Context, name stri
 	if err, ok := f.errs[name]; ok {
 		return err
 	}
+
 	f.DeleteProjectCalls = append(f.DeleteProjectCalls, deleteProjectCall{Name: name})
+
 	if _, ok := f.projects[name]; !ok {
 		return store.ErrNotFound
 	}
@@ -334,7 +342,9 @@ func (f *fakeReschedulerProjectStore) SetProjectPending(_ context.Context, name 
 	if err, ok := f.errs[name]; ok {
 		return err
 	}
+
 	f.SetProjectPendingCalls = append(f.SetProjectPendingCalls, setProjectPendingCall{Name: name})
+
 	if p, ok := f.projects[name]; ok {
 		p.Phase = ProjectPhasePending
 		p.NodeRef = ""
@@ -349,7 +359,9 @@ func (f *fakeReschedulerProjectStore) SetTerminatingAt(_ context.Context, name s
 	if err, ok := f.errs[name]; ok {
 		return err
 	}
+
 	f.SetTerminatingAtCalls = append(f.SetTerminatingAtCalls, setTerminatingAtCall{Name: name, At: at})
+
 	if p, ok := f.projects[name]; ok {
 		// Replace or add the TerminatingAt condition.
 		replaced := false
@@ -377,7 +389,9 @@ func (f *fakeReschedulerProjectStore) ForceTerminated(_ context.Context, name st
 	if err, ok := f.errs[name]; ok {
 		return err
 	}
+
 	f.ForceTerminatedCalls = append(f.ForceTerminatedCalls, forceTerminatedCall{Name: name})
+
 	if p, ok := f.projects[name]; ok {
 		p.Phase = ProjectPhaseTerminated
 	}
