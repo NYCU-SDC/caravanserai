@@ -289,6 +289,36 @@ func (a *projectStoreAdapter) SetTerminatingAt(ctx context.Context, name string,
 	return a.s.UpdateProjectStatus(ctx, name, project.Status)
 }
 
+// SetNotReadyAt satisfies controller.ReschedulerProjectStore.
+// Writes (or replaces) the NotReadyAt condition to record the time at which
+// the rescheduler first observed this Running project as stranded on a NotReady
+// node.  The grace period clock starts from this timestamp.
+func (a *projectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at time.Time) error {
+	project, err := a.s.GetProject(ctx, name)
+	if err != nil {
+		return err
+	}
+	cond := v1.Condition{
+		Type:               "NotReadyAt",
+		Status:             v1.ConditionTrue,
+		Reason:             "NodeNotReady",
+		Message:            "Node went NotReady while project was Running; running grace period clock started",
+		LastTransitionTime: at,
+	}
+	updated := false
+	for i, c := range project.Status.Conditions {
+		if c.Type == "NotReadyAt" {
+			project.Status.Conditions[i] = cond
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		project.Status.Conditions = append(project.Status.Conditions, cond)
+	}
+	return a.s.UpdateProjectStatus(ctx, name, project.Status)
+}
+
 // ForceTerminated satisfies controller.ReschedulerProjectStore.
 // Transitions the project to Terminated and records a Phase condition with
 // reason=TerminationTimeout.

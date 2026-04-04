@@ -64,6 +64,12 @@ type setTerminatingAtCall struct {
 	At   time.Time
 }
 
+// setNotReadyAtCall records a single invocation of SetNotReadyAt.
+type setNotReadyAtCall struct {
+	Name string
+	At   time.Time
+}
+
 // forceTerminatedCall records a single invocation of ForceTerminated.
 type forceTerminatedCall struct {
 	Name string
@@ -319,6 +325,7 @@ type fakeReschedulerProjectStore struct {
 
 	SetProjectPendingCalls []setProjectPendingCall
 	SetTerminatingAtCalls  []setTerminatingAtCall
+	SetNotReadyAtCalls     []setNotReadyAtCall
 	ForceTerminatedCalls   []forceTerminatedCall
 }
 
@@ -397,6 +404,36 @@ func (f *fakeReschedulerProjectStore) SetTerminatingAt(_ context.Context, name s
 		if !replaced {
 			p.Conditions = append(p.Conditions, ConditionSnapshot{
 				Type:               condTypeTerminatingAt,
+				LastTransitionTime: at,
+			})
+		}
+	}
+	return nil
+}
+
+func (f *fakeReschedulerProjectStore) SetNotReadyAt(_ context.Context, name string, at time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err, ok := f.errs[name]; ok {
+		return err
+	}
+
+	f.SetNotReadyAtCalls = append(f.SetNotReadyAtCalls, setNotReadyAtCall{Name: name, At: at})
+
+	if p, ok := f.projects[name]; ok {
+		// Replace or add the NotReadyAt condition.
+		replaced := false
+		for i, c := range p.Conditions {
+			if c.Type == condTypeNotReadyAt {
+				p.Conditions[i].LastTransitionTime = at
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			p.Conditions = append(p.Conditions, ConditionSnapshot{
+				Type:               condTypeNotReadyAt,
 				LastTransitionTime: at,
 			})
 		}
