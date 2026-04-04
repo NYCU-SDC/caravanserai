@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	v1 "NYCU-SDC/caravanserai/api/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -16,7 +17,7 @@ func TestNodeHealthReconcile(t *testing.T) {
 		s := newFakeNodeStore()
 		s.nodes["node-1"] = NodeStatusSnapshot{
 			LastHeartbeat: clk.Time.Add(-10 * time.Second), // well within 90 s
-			State:         NodeStateReady,
+			State:         v1.NodeStateReady,
 		}
 		ctrl := NewNodeHealthController(zap.NewNop(), s, nil, WithClock(clk))
 
@@ -31,7 +32,7 @@ func TestNodeHealthReconcile(t *testing.T) {
 		s := newFakeNodeStore()
 		s.nodes["node-1"] = NodeStatusSnapshot{
 			LastHeartbeat: clk.Time.Add(-2 * NodeHeartbeatTimeout), // 180 s ago
-			State:         NodeStateReady,
+			State:         v1.NodeStateReady,
 		}
 		ctrl := NewNodeHealthController(zap.NewNop(), s, nil, WithClock(clk))
 
@@ -40,7 +41,7 @@ func TestNodeHealthReconcile(t *testing.T) {
 		assert.False(t, res.Requeue)
 		require.Len(t, s.SetNodeStateCalls, 1)
 		assert.Equal(t, "node-1", s.SetNodeStateCalls[0].Name)
-		assert.Equal(t, NodeStateNotReady, s.SetNodeStateCalls[0].State)
+		assert.Equal(t, v1.NodeStateNotReady, s.SetNodeStateCalls[0].State)
 		assert.Equal(t, "HeartbeatTimeout", s.SetNodeStateCalls[0].Reason)
 	})
 
@@ -49,7 +50,7 @@ func TestNodeHealthReconcile(t *testing.T) {
 		s := newFakeNodeStore()
 		s.nodes["node-1"] = NodeStatusSnapshot{
 			LastHeartbeat: clk.Time.Add(-2 * NodeHeartbeatTimeout),
-			State:         NodeStateNotReady,
+			State:         v1.NodeStateNotReady,
 		}
 		ctrl := NewNodeHealthController(zap.NewNop(), s, nil, WithClock(clk))
 
@@ -64,7 +65,7 @@ func TestNodeHealthReconcile(t *testing.T) {
 		s := newFakeNodeStore()
 		s.nodes["node-1"] = NodeStatusSnapshot{
 			LastHeartbeat: clk.Time.Add(-2 * NodeHeartbeatTimeout),
-			State:         NodeStateDraining,
+			State:         v1.NodeStateDraining,
 		}
 		ctrl := NewNodeHealthController(zap.NewNop(), s, nil, WithClock(clk))
 
@@ -79,7 +80,7 @@ func TestNodeHealthReconcile(t *testing.T) {
 		s := newFakeNodeStore()
 		s.nodes["node-1"] = NodeStatusSnapshot{
 			LastHeartbeat: clk.Time.Add(-10 * time.Second), // fresh heartbeat
-			State:         NodeStateNotReady,
+			State:         v1.NodeStateNotReady,
 		}
 		ctrl := NewNodeHealthController(zap.NewNop(), s, nil, WithClock(clk))
 
@@ -88,7 +89,7 @@ func TestNodeHealthReconcile(t *testing.T) {
 		assert.False(t, res.Requeue)
 		require.Len(t, s.SetNodeStateCalls, 1)
 		assert.Equal(t, "node-1", s.SetNodeStateCalls[0].Name)
-		assert.Equal(t, NodeStateReady, s.SetNodeStateCalls[0].State)
+		assert.Equal(t, v1.NodeStateReady, s.SetNodeStateCalls[0].State)
 		assert.Equal(t, "AgentReady", s.SetNodeStateCalls[0].Reason)
 	})
 

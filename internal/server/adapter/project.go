@@ -32,8 +32,8 @@ func NewProjectStoreAdapter(s *pgstore.Store) *ProjectStoreAdapter {
 	return &ProjectStoreAdapter{s: s}
 }
 
-func (a *ProjectStoreAdapter) ListProjectNamesByPhase(ctx context.Context, phase controller.ProjectPhase) ([]string, error) {
-	projects, err := a.s.ListProjectsByPhase(ctx, v1.ProjectPhase(phase))
+func (a *ProjectStoreAdapter) ListProjectNamesByPhase(ctx context.Context, phase v1.ProjectPhase) ([]string, error) {
+	projects, err := a.s.ListProjectsByPhase(ctx, phase)
 	if err != nil {
 		return nil, err
 	}
@@ -44,12 +44,12 @@ func (a *ProjectStoreAdapter) ListProjectNamesByPhase(ctx context.Context, phase
 	return names, nil
 }
 
-func (a *ProjectStoreAdapter) GetProjectPhase(ctx context.Context, name string) (controller.ProjectPhase, string, error) {
+func (a *ProjectStoreAdapter) GetProjectPhase(ctx context.Context, name string) (v1.ProjectPhase, string, error) {
 	project, err := a.s.GetProject(ctx, name)
 	if err != nil {
 		return "", "", err
 	}
-	return controller.ProjectPhase(project.Status.Phase), project.Status.NodeRef, nil
+	return project.Status.Phase, project.Status.NodeRef, nil
 }
 
 func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nodeRef string) error {
@@ -62,25 +62,23 @@ func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nod
 	return a.s.UpdateProjectStatus(ctx, name, project.Status)
 }
 
-func (a *ProjectStoreAdapter) SetProjectPhase(ctx context.Context, name string, phase controller.ProjectPhase, reason, message string) error {
+func (a *ProjectStoreAdapter) SetProjectPhase(ctx context.Context, name string, phase v1.ProjectPhase, reason, message string) error {
 	project, err := a.s.GetProject(ctx, name)
 	if err != nil {
 		return err
 	}
-	project.Status.Phase = v1.ProjectPhase(phase)
-	// Update or append a phase condition.
-	condType := "Phase"
+	project.Status.Phase = phase
 	now := time.Now().UTC()
 	cond := v1.Condition{
-		Type:               condType,
-		Status:             "True",
+		Type:               v1.ConditionTypePhase,
+		Status:             v1.ConditionTrue,
 		Reason:             reason,
 		Message:            message,
 		LastTransitionTime: now,
 	}
 	updated := false
 	for i, c := range project.Status.Conditions {
-		if c.Type == condType {
+		if c.Type == v1.ConditionTypePhase {
 			project.Status.Conditions[i] = cond
 			updated = true
 			break
@@ -98,12 +96,8 @@ func (a *ProjectStoreAdapter) DeleteProject(ctx context.Context, name string) er
 
 // ListProjectsByNodeRef satisfies controller.ReschedulerProjectStore.
 // It converts api/v1 Projects into controller.ProjectSnapshot values.
-func (a *ProjectStoreAdapter) ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []controller.ProjectPhase) ([]*controller.ProjectSnapshot, error) {
-	v1Phases := make([]v1.ProjectPhase, len(phases))
-	for i, p := range phases {
-		v1Phases[i] = v1.ProjectPhase(p)
-	}
-	projects, err := a.s.ListProjectsByNodeRef(ctx, nodeRef, v1Phases)
+func (a *ProjectStoreAdapter) ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*controller.ProjectSnapshot, error) {
+	projects, err := a.s.ListProjectsByNodeRef(ctx, nodeRef, phases)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +112,7 @@ func (a *ProjectStoreAdapter) ListProjectsByNodeRef(ctx context.Context, nodeRef
 		}
 		snapshots[i] = &controller.ProjectSnapshot{
 			Name:       p.Name,
-			Phase:      controller.ProjectPhase(p.Status.Phase),
+			Phase:      p.Status.Phase,
 			NodeRef:    p.Status.NodeRef,
 			Conditions: conditions,
 		}
@@ -138,7 +132,7 @@ func (a *ProjectStoreAdapter) SetProjectPending(ctx context.Context, name string
 	project.Status.NodeRef = ""
 	now := time.Now().UTC()
 	cond := v1.Condition{
-		Type:               "Phase",
+		Type:               v1.ConditionTypePhase,
 		Status:             v1.ConditionTrue,
 		Reason:             "NodeNotReady",
 		Message:            "Node went NotReady; project reset to Pending for rescheduling",
@@ -146,7 +140,7 @@ func (a *ProjectStoreAdapter) SetProjectPending(ctx context.Context, name string
 	}
 	updated := false
 	for i, c := range project.Status.Conditions {
-		if c.Type == "Phase" {
+		if c.Type == v1.ConditionTypePhase {
 			project.Status.Conditions[i] = cond
 			updated = true
 			break
@@ -167,7 +161,7 @@ func (a *ProjectStoreAdapter) SetTerminatingAt(ctx context.Context, name string,
 		return err
 	}
 	cond := v1.Condition{
-		Type:               "TerminatingAt",
+		Type:               v1.ConditionTypeTerminatingAt,
 		Status:             v1.ConditionTrue,
 		Reason:             "NodeNotReady",
 		Message:            "Node went NotReady while project was Terminating; force-termination timeout clock started",
@@ -175,7 +169,7 @@ func (a *ProjectStoreAdapter) SetTerminatingAt(ctx context.Context, name string,
 	}
 	updated := false
 	for i, c := range project.Status.Conditions {
-		if c.Type == "TerminatingAt" {
+		if c.Type == v1.ConditionTypeTerminatingAt {
 			project.Status.Conditions[i] = cond
 			updated = true
 			break
@@ -197,7 +191,7 @@ func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at
 		return err
 	}
 	cond := v1.Condition{
-		Type:               "NotReadyAt",
+		Type:               v1.ConditionTypeNotReadyAt,
 		Status:             v1.ConditionTrue,
 		Reason:             "NodeNotReady",
 		Message:            "Node went NotReady while project was Running; running grace period clock started",
@@ -205,7 +199,7 @@ func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at
 	}
 	updated := false
 	for i, c := range project.Status.Conditions {
-		if c.Type == "NotReadyAt" {
+		if c.Type == v1.ConditionTypeNotReadyAt {
 			project.Status.Conditions[i] = cond
 			updated = true
 			break
@@ -228,7 +222,7 @@ func (a *ProjectStoreAdapter) ForceTerminated(ctx context.Context, name string) 
 	project.Status.Phase = v1.ProjectPhaseTerminated
 	now := time.Now().UTC()
 	cond := v1.Condition{
-		Type:               "Phase",
+		Type:               v1.ConditionTypePhase,
 		Status:             v1.ConditionTrue,
 		Reason:             "TerminationTimeout",
 		Message:            "Node was NotReady for too long; project force-terminated. Docker resources on the node may need manual cleanup.",
@@ -236,7 +230,7 @@ func (a *ProjectStoreAdapter) ForceTerminated(ctx context.Context, name string) 
 	}
 	updated := false
 	for i, c := range project.Status.Conditions {
-		if c.Type == "Phase" {
+		if c.Type == v1.ConditionTypePhase {
 			project.Status.Conditions[i] = cond
 			updated = true
 			break

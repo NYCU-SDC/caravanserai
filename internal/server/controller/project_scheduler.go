@@ -5,24 +5,11 @@ import (
 	"errors"
 	"time"
 
+	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/event"
 	"NYCU-SDC/caravanserai/internal/store"
 
 	"go.uber.org/zap"
-)
-
-// ProjectPhase mirrors api/v1.ProjectPhase.  Redeclared here for the same
-// reason as NodeState: to keep this package free of circular imports until the
-// store layer is in place.
-type ProjectPhase string
-
-const (
-	ProjectPhasePending     ProjectPhase = "Pending"
-	ProjectPhaseScheduled   ProjectPhase = "Scheduled"
-	ProjectPhaseRunning     ProjectPhase = "Running"
-	ProjectPhaseFailed      ProjectPhase = "Failed"
-	ProjectPhaseTerminating ProjectPhase = "Terminating"
-	ProjectPhaseTerminated  ProjectPhase = "Terminated"
 )
 
 // projectResyncInterval is how often the Seed loop re-enqueues all Pending
@@ -33,10 +20,10 @@ const projectResyncInterval = 30 * time.Second
 // ProjectSchedulerController.
 type SchedulerProjectStore interface {
 	// ListProjectNamesByPhase returns the names of all Projects in the given phase.
-	ListProjectNamesByPhase(ctx context.Context, phase ProjectPhase) ([]string, error)
+	ListProjectNamesByPhase(ctx context.Context, phase v1.ProjectPhase) ([]string, error)
 
 	// GetProjectPhase returns the current phase and nodeRef of the named Project.
-	GetProjectPhase(ctx context.Context, name string) (ProjectPhase, string, error)
+	GetProjectPhase(ctx context.Context, name string) (v1.ProjectPhase, string, error)
 
 	// SetProjectScheduled writes the nodeRef and transitions the Project to
 	// Scheduled phase atomically.
@@ -108,7 +95,7 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		return Result{}, err
 	}
 
-	if phase != ProjectPhasePending {
+	if phase != v1.ProjectPhasePending {
 		log.Debug("Project is not Pending, nothing to do", zap.String("phase", string(phase)))
 		return Result{}, nil
 	}
@@ -188,7 +175,7 @@ func (c *ProjectSchedulerController) Seed(ctx context.Context, enqueue func(name
 
 // resyncPending lists all Pending projects and enqueues each one.
 func (c *ProjectSchedulerController) resyncPending(ctx context.Context, enqueue func(name string)) {
-	names, err := c.projects.ListProjectNamesByPhase(ctx, ProjectPhasePending)
+	names, err := c.projects.ListProjectNamesByPhase(ctx, v1.ProjectPhasePending)
 	if err != nil {
 		c.logger.Error("Seed: failed to list pending projects", zap.Error(err),
 			zap.String("controller", c.Name()))

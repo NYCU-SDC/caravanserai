@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/event"
 	"NYCU-SDC/caravanserai/internal/store"
 
@@ -34,27 +35,14 @@ type NodeStore interface {
 	GetNodeStatus(ctx context.Context, name string) (NodeStatusSnapshot, error)
 
 	// SetNodeState writes the aggregated state and updates the Ready condition.
-	SetNodeState(ctx context.Context, name string, state NodeState, reason, message string) error
+	SetNodeState(ctx context.Context, name string, state v1.NodeState, reason, message string) error
 }
 
 // NodeStatusSnapshot is a minimal view of NodeStatus used by this controller.
-// It avoids importing api/v1 directly and keeps the dependency graph shallow.
 type NodeStatusSnapshot struct {
 	LastHeartbeat time.Time
-	State         NodeState
+	State         v1.NodeState
 }
-
-// NodeState mirrors api/v1.NodeState.  It is redeclared here so that this
-// package does not create a circular dependency with api/v1 before the store
-// layer is wired up.  Once the store interface is finalised the two
-// declarations can be unified.
-type NodeState string
-
-const (
-	NodeStateReady    NodeState = "Ready"
-	NodeStateNotReady NodeState = "NotReady"
-	NodeStateDraining NodeState = "Draining"
-)
 
 // NodeHealthController watches all Nodes and marks them NotReady when their
 // heartbeat goes stale.
@@ -109,17 +97,17 @@ func (c *NodeHealthController) Reconcile(ctx context.Context, name string) (Resu
 	age := c.clock.Since(snap.LastHeartbeat)
 
 	switch {
-	case snap.State == NodeStateDraining:
+	case snap.State == v1.NodeStateDraining:
 		// Draining is an admin-set state; the health controller does not touch it.
 		log.Debug("Node is draining, skipping health check")
 		return Result{}, nil
 
-	case age > NodeHeartbeatTimeout && snap.State != NodeStateNotReady:
+	case age > NodeHeartbeatTimeout && snap.State != v1.NodeStateNotReady:
 		log.Info("Node heartbeat timed out, marking NotReady",
 			zap.Duration("age", age),
 			zap.Duration("timeout", NodeHeartbeatTimeout),
 		)
-		if err := c.store.SetNodeState(ctx, name, NodeStateNotReady,
+		if err := c.store.SetNodeState(ctx, name, v1.NodeStateNotReady,
 			"HeartbeatTimeout",
 			"Agent has not posted a heartbeat within the timeout window",
 		); err != nil {
@@ -131,11 +119,11 @@ func (c *NodeHealthController) Reconcile(ctx context.Context, name string) (Resu
 			c.bus.Publish(event.TopicNodeUpdated, name)
 		}
 
-	case age <= NodeHeartbeatTimeout && snap.State == NodeStateNotReady:
+	case age <= NodeHeartbeatTimeout && snap.State == v1.NodeStateNotReady:
 		log.Info("Node heartbeat recovered, marking Ready",
 			zap.Duration("age", age),
 		)
-		if err := c.store.SetNodeState(ctx, name, NodeStateReady,
+		if err := c.store.SetNodeState(ctx, name, v1.NodeStateReady,
 			"AgentReady",
 			"Agent is healthy and posting heartbeats",
 		); err != nil {

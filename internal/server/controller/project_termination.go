@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/event"
 	"NYCU-SDC/caravanserai/internal/store"
 
@@ -19,10 +20,10 @@ const terminationResyncInterval = 30 * time.Second
 // ProjectTerminationController.
 type TerminationProjectStore interface {
 	// ListProjectNamesByPhase returns the names of all Projects in the given phase.
-	ListProjectNamesByPhase(ctx context.Context, phase ProjectPhase) ([]string, error)
+	ListProjectNamesByPhase(ctx context.Context, phase v1.ProjectPhase) ([]string, error)
 
 	// GetProjectPhase returns the current phase of the named Project.
-	GetProjectPhase(ctx context.Context, name string) (ProjectPhase, string, error)
+	GetProjectPhase(ctx context.Context, name string) (v1.ProjectPhase, string, error)
 
 	// DeleteProject removes the Project record from the store.
 	// Returns store.ErrNotFound if the project no longer exists (safe to ignore).
@@ -79,7 +80,7 @@ func (c *ProjectTerminationController) Reconcile(ctx context.Context, name strin
 		return Result{}, err
 	}
 
-	if phase != ProjectPhaseTerminated {
+	if phase != v1.ProjectPhaseTerminated {
 		log.Debug("Project is not Terminated, skipping", zap.String("phase", string(phase)))
 		return Result{}, nil
 	}
@@ -141,7 +142,7 @@ func (c *ProjectTerminationController) Seed(ctx context.Context, enqueue func(na
 
 // resyncTerminated lists all Terminated projects and enqueues each one.
 func (c *ProjectTerminationController) resyncTerminated(ctx context.Context, enqueue func(name string)) {
-	names, err := c.projects.ListProjectNamesByPhase(ctx, ProjectPhaseTerminated)
+	names, err := c.projects.ListProjectNamesByPhase(ctx, v1.ProjectPhaseTerminated)
 	if err != nil {
 		c.logger.Error("Seed: failed to list terminated projects", zap.Error(err),
 			zap.String("controller", c.Name()))

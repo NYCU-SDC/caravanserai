@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	v1 "NYCU-SDC/caravanserai/api/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -13,11 +14,11 @@ import (
 func TestProjectReschedulerReconcile(t *testing.T) {
 	t.Run("NotReady node with Scheduled project resets to Pending", func(t *testing.T) {
 		ns := newFakeReschedulerNodeStore()
-		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
+		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
 		ps.projects["app-1"] = &ProjectSnapshot{
 			Name:    "app-1",
-			Phase:   ProjectPhaseScheduled,
+			Phase:   v1.ProjectPhaseScheduled,
 			NodeRef: "node-1",
 		}
 		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil)
@@ -40,11 +41,11 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//   3. Do NOT reset to Pending yet — the node might recover.
 		clk := newFakeClock()
 		ns := newFakeReschedulerNodeStore()
-		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
+		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
 		ps.projects["app-1"] = &ProjectSnapshot{
 			Name:    "app-1",
-			Phase:   ProjectPhaseRunning,
+			Phase:   v1.ProjectPhaseRunning,
 			NodeRef: "node-1",
 			// No conditions — first observation.
 		}
@@ -73,15 +74,15 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		clk := newFakeClock()
 		notReadyAt := clk.Time.Add(-runningGracePeriod / 2) // within grace period
 		ns := newFakeReschedulerNodeStore()
-		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
+		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
 		ps.projects["app-1"] = &ProjectSnapshot{
 			Name:    "app-1",
-			Phase:   ProjectPhaseRunning,
+			Phase:   v1.ProjectPhaseRunning,
 			NodeRef: "node-1",
 			Conditions: []ConditionSnapshot{
 				{
-					Type:               condTypeNotReadyAt,
+					Type:               v1.ConditionTypeNotReadyAt,
 					LastTransitionTime: notReadyAt,
 				},
 			},
@@ -107,15 +108,15 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		clk := newFakeClock()
 		notReadyAt := clk.Time.Add(-runningGracePeriod - time.Minute) // past grace period
 		ns := newFakeReschedulerNodeStore()
-		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
+		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
 		ps.projects["app-1"] = &ProjectSnapshot{
 			Name:    "app-1",
-			Phase:   ProjectPhaseRunning,
+			Phase:   v1.ProjectPhaseRunning,
 			NodeRef: "node-1",
 			Conditions: []ConditionSnapshot{
 				{
-					Type:               condTypeNotReadyAt,
+					Type:               v1.ConditionTypeNotReadyAt,
 					LastTransitionTime: notReadyAt,
 				},
 			},
@@ -142,11 +143,11 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//   3. Do NOT force-terminate yet — the node might recover in time.
 		clk := newFakeClock()
 		ns := newFakeReschedulerNodeStore()
-		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
+		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
 		ps.projects["app-1"] = &ProjectSnapshot{
 			Name:    "app-1",
-			Phase:   ProjectPhaseTerminating,
+			Phase:   v1.ProjectPhaseTerminating,
 			NodeRef: "node-1",
 			// No conditions — first observation.
 		}
@@ -173,15 +174,15 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		clk := newFakeClock()
 		terminatingAt := clk.Time.Add(-terminatingTimeout - time.Minute) // past timeout
 		ns := newFakeReschedulerNodeStore()
-		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
+		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
 		ps.projects["app-1"] = &ProjectSnapshot{
 			Name:    "app-1",
-			Phase:   ProjectPhaseTerminating,
+			Phase:   v1.ProjectPhaseTerminating,
 			NodeRef: "node-1",
 			Conditions: []ConditionSnapshot{
 				{
-					Type:               condTypeTerminatingAt,
+					Type:               v1.ConditionTypeTerminatingAt,
 					LastTransitionTime: terminatingAt,
 				},
 			},
@@ -211,15 +212,15 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		clk := newFakeClock()
 		terminatingAt := clk.Time.Add(-terminatingTimeout / 2) // within timeout
 		ns := newFakeReschedulerNodeStore()
-		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateNotReady}
+		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
 		ps.projects["app-1"] = &ProjectSnapshot{
 			Name:    "app-1",
-			Phase:   ProjectPhaseTerminating,
+			Phase:   v1.ProjectPhaseTerminating,
 			NodeRef: "node-1",
 			Conditions: []ConditionSnapshot{
 				{
-					Type:               condTypeTerminatingAt,
+					Type:               v1.ConditionTypeTerminatingAt,
 					LastTransitionTime: terminatingAt,
 				},
 			},
@@ -235,7 +236,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 
 	t.Run("Ready node is a no-op", func(t *testing.T) {
 		ns := newFakeReschedulerNodeStore()
-		ns.nodes["node-1"] = NodeStatusSnapshot{State: NodeStateReady}
+		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateReady}
 		ps := newFakeReschedulerProjectStore()
 		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil)
 

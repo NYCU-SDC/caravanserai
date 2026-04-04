@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/store"
 )
 
@@ -37,7 +38,7 @@ func newFakeClock() *fakeClock { return &fakeClock{Time: testBaseTime} }
 // setNodeStateCall records a single invocation of SetNodeState.
 type setNodeStateCall struct {
 	Name    string
-	State   NodeState
+	State   v1.NodeState
 	Reason  string
 	Message string
 }
@@ -121,7 +122,7 @@ func (f *fakeNodeStore) GetNodeStatus(_ context.Context, name string) (NodeStatu
 	return snap, nil
 }
 
-func (f *fakeNodeStore) SetNodeState(_ context.Context, name string, state NodeState, reason, message string) error {
+func (f *fakeNodeStore) SetNodeState(_ context.Context, name string, state v1.NodeState, reason, message string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -159,7 +160,7 @@ type fakeSchedulerProjectStore struct {
 }
 
 type schedulerProjectRecord struct {
-	Phase   ProjectPhase
+	Phase   v1.ProjectPhase
 	NodeRef string
 }
 
@@ -172,7 +173,7 @@ func newFakeSchedulerProjectStore() *fakeSchedulerProjectStore {
 	}
 }
 
-func (f *fakeSchedulerProjectStore) ListProjectNamesByPhase(_ context.Context, phase ProjectPhase) ([]string, error) {
+func (f *fakeSchedulerProjectStore) ListProjectNamesByPhase(_ context.Context, phase v1.ProjectPhase) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -185,7 +186,7 @@ func (f *fakeSchedulerProjectStore) ListProjectNamesByPhase(_ context.Context, p
 	return names, nil
 }
 
-func (f *fakeSchedulerProjectStore) GetProjectPhase(_ context.Context, name string) (ProjectPhase, string, error) {
+func (f *fakeSchedulerProjectStore) GetProjectPhase(_ context.Context, name string) (v1.ProjectPhase, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -213,7 +214,7 @@ func (f *fakeSchedulerProjectStore) SetProjectScheduled(_ context.Context, name,
 	})
 
 	if r, ok := f.projects[name]; ok {
-		r.Phase = ProjectPhaseScheduled
+		r.Phase = v1.ProjectPhaseScheduled
 		r.NodeRef = nodeRef
 		f.projects[name] = r
 	}
@@ -257,7 +258,7 @@ type fakeTerminationProjectStore struct {
 }
 
 type terminationProjectRecord struct {
-	Phase   ProjectPhase
+	Phase   v1.ProjectPhase
 	NodeRef string
 }
 
@@ -270,7 +271,7 @@ func newFakeTerminationProjectStore() *fakeTerminationProjectStore {
 	}
 }
 
-func (f *fakeTerminationProjectStore) ListProjectNamesByPhase(_ context.Context, phase ProjectPhase) ([]string, error) {
+func (f *fakeTerminationProjectStore) ListProjectNamesByPhase(_ context.Context, phase v1.ProjectPhase) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -283,7 +284,7 @@ func (f *fakeTerminationProjectStore) ListProjectNamesByPhase(_ context.Context,
 	return names, nil
 }
 
-func (f *fakeTerminationProjectStore) GetProjectPhase(_ context.Context, name string) (ProjectPhase, string, error) {
+func (f *fakeTerminationProjectStore) GetProjectPhase(_ context.Context, name string) (v1.ProjectPhase, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -341,12 +342,12 @@ func newFakeReschedulerProjectStore() *fakeReschedulerProjectStore {
 func (f *fakeReschedulerProjectStore) ListProjectsByNodeRef(
 	_ context.Context,
 	nodeRef string,
-	phases []ProjectPhase,
+	phases []v1.ProjectPhase,
 ) ([]*ProjectSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	phaseSet := make(map[ProjectPhase]bool, len(phases))
+	phaseSet := make(map[v1.ProjectPhase]bool, len(phases))
 	for _, ph := range phases {
 		phaseSet[ph] = true
 	}
@@ -375,7 +376,7 @@ func (f *fakeReschedulerProjectStore) SetProjectPending(_ context.Context, name 
 	f.SetProjectPendingCalls = append(f.SetProjectPendingCalls, setProjectPendingCall{Name: name})
 
 	if p, ok := f.projects[name]; ok {
-		p.Phase = ProjectPhasePending
+		p.Phase = v1.ProjectPhasePending
 		p.NodeRef = ""
 	}
 	return nil
@@ -395,7 +396,7 @@ func (f *fakeReschedulerProjectStore) SetTerminatingAt(_ context.Context, name s
 		// Replace or add the TerminatingAt condition.
 		replaced := false
 		for i, c := range p.Conditions {
-			if c.Type == condTypeTerminatingAt {
+			if c.Type == v1.ConditionTypeTerminatingAt {
 				p.Conditions[i].LastTransitionTime = at
 				replaced = true
 				break
@@ -403,7 +404,7 @@ func (f *fakeReschedulerProjectStore) SetTerminatingAt(_ context.Context, name s
 		}
 		if !replaced {
 			p.Conditions = append(p.Conditions, ConditionSnapshot{
-				Type:               condTypeTerminatingAt,
+				Type:               v1.ConditionTypeTerminatingAt,
 				LastTransitionTime: at,
 			})
 		}
@@ -425,7 +426,7 @@ func (f *fakeReschedulerProjectStore) SetNotReadyAt(_ context.Context, name stri
 		// Replace or add the NotReadyAt condition.
 		replaced := false
 		for i, c := range p.Conditions {
-			if c.Type == condTypeNotReadyAt {
+			if c.Type == v1.ConditionTypeNotReadyAt {
 				p.Conditions[i].LastTransitionTime = at
 				replaced = true
 				break
@@ -433,7 +434,7 @@ func (f *fakeReschedulerProjectStore) SetNotReadyAt(_ context.Context, name stri
 		}
 		if !replaced {
 			p.Conditions = append(p.Conditions, ConditionSnapshot{
-				Type:               condTypeNotReadyAt,
+				Type:               v1.ConditionTypeNotReadyAt,
 				LastTransitionTime: at,
 			})
 		}
@@ -452,7 +453,7 @@ func (f *fakeReschedulerProjectStore) ForceTerminated(_ context.Context, name st
 	f.ForceTerminatedCalls = append(f.ForceTerminatedCalls, forceTerminatedCall{Name: name})
 
 	if p, ok := f.projects[name]; ok {
-		p.Phase = ProjectPhaseTerminated
+		p.Phase = v1.ProjectPhaseTerminated
 	}
 	return nil
 }
@@ -496,7 +497,7 @@ func (f *fakeReschedulerNodeStore) ListNotReadyNodeNames(_ context.Context) ([]s
 
 	var names []string
 	for n, snap := range f.nodes {
-		if snap.State == NodeStateNotReady {
+		if snap.State == v1.NodeStateNotReady {
 			names = append(names, n)
 		}
 	}

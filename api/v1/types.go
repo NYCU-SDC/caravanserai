@@ -29,37 +29,6 @@ type ObjectMeta struct {
 	UpdatedAt time.Time `json:"updatedAt,omitempty" yaml:"updatedAt,omitempty"`
 }
 
-// ConditionStatus mirrors the Kubernetes convention: "True", "False", or "Unknown".
-type ConditionStatus string
-
-const (
-	ConditionTrue    ConditionStatus = "True"
-	ConditionFalse   ConditionStatus = "False"
-	ConditionUnknown ConditionStatus = "Unknown"
-)
-
-// Condition describes a single observable aspect of a resource's state.
-// It mirrors the Kubernetes Condition pattern so the mental model stays familiar.
-type Condition struct {
-	// Type is a machine-readable identifier, e.g. "Ready", "DiskPressure".
-	Type string `json:"type" yaml:"type"`
-
-	// Status is one of True, False, Unknown.
-	Status ConditionStatus `json:"status" yaml:"status"`
-
-	// LastHeartbeatTime is when this condition was last sampled.
-	LastHeartbeatTime time.Time `json:"lastHeartbeatTime,omitempty" yaml:"lastHeartbeatTime,omitempty"`
-
-	// LastTransitionTime is when the Status last changed.
-	LastTransitionTime time.Time `json:"lastTransitionTime,omitempty" yaml:"lastTransitionTime,omitempty"`
-
-	// Reason is a CamelCase word summarising why the condition has this status.
-	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
-
-	// Message is a human-readable explanation.
-	Message string `json:"message,omitempty" yaml:"message,omitempty"`
-}
-
 // ResourceList is a named set of resource quantities, e.g. cpu, memory, disk.
 // Values follow the same string format as Kubernetes: "500m", "4Gi", "100Mbps".
 type ResourceList map[string]string
