@@ -67,17 +67,20 @@ type NodeHealthController struct {
 	logger *zap.Logger
 	store  NodeStore
 	bus    *event.Bus
+	clock  Clock
 }
 
 // NewNodeHealthController creates a NodeHealthController.
 // store may be nil during early development; the controller will log a warning
 // and become a no-op until a real store is injected.
 // bus may be nil; if so, no node.updated events are published.
-func NewNodeHealthController(logger *zap.Logger, store NodeStore, bus *event.Bus) *NodeHealthController {
+func NewNodeHealthController(logger *zap.Logger, store NodeStore, bus *event.Bus, opts ...Option) *NodeHealthController {
+	o := applyOptions(opts)
 	return &NodeHealthController{
 		logger: logger,
 		store:  store,
 		bus:    bus,
+		clock:  o.clock,
 	}
 }
 
@@ -103,7 +106,7 @@ func (c *NodeHealthController) Reconcile(ctx context.Context, name string) (Resu
 		return Result{}, err
 	}
 
-	age := time.Since(snap.LastHeartbeat)
+	age := c.clock.Since(snap.LastHeartbeat)
 
 	switch {
 	case snap.State == NodeStateDraining:

@@ -9,6 +9,28 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// fakeClock — implements Clock for deterministic tests
+// ---------------------------------------------------------------------------
+
+// testBaseTime is a fixed reference point shared by all controller tests so
+// that assertions are fully deterministic and independent of wall-clock time.
+var testBaseTime = time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+
+// fakeClock is a test Clock whose time is controlled by the test.  Now()
+// returns the value of Time, and Since(t) returns Time.Sub(t).
+type fakeClock struct {
+	Time time.Time
+}
+
+var _ Clock = (*fakeClock)(nil)
+
+func (fc *fakeClock) Now() time.Time                  { return fc.Time }
+func (fc *fakeClock) Since(t time.Time) time.Duration { return fc.Time.Sub(t) }
+
+// newFakeClock returns a fakeClock pinned to testBaseTime.
+func newFakeClock() *fakeClock { return &fakeClock{Time: testBaseTime} }
+
+// ---------------------------------------------------------------------------
 // Call-recording types
 // ---------------------------------------------------------------------------
 

@@ -96,6 +96,7 @@ type ProjectReschedulerController struct {
 	projects ReschedulerProjectStore
 	nodes    ReschedulerNodeStore
 	bus      *event.Bus
+	clock    Clock
 }
 
 // NewProjectReschedulerController creates a ProjectReschedulerController.
@@ -105,12 +106,15 @@ func NewProjectReschedulerController(
 	projects ReschedulerProjectStore,
 	nodes ReschedulerNodeStore,
 	bus *event.Bus,
+	opts ...Option,
 ) *ProjectReschedulerController {
+	o := applyOptions(opts)
 	return &ProjectReschedulerController{
 		logger:   logger,
 		projects: projects,
 		nodes:    nodes,
 		bus:      bus,
+		clock:    o.clock,
 	}
 }
 
@@ -215,7 +219,7 @@ func (c *ProjectReschedulerController) handleTerminating(
 	if !found {
 		// First time we see this Terminating project on a NotReady node.
 		// Record the current time as the start of the timeout clock.
-		now := time.Now().UTC()
+		now := c.clock.Now().UTC()
 		log.Info("Recording TerminatingAt timestamp for stranded project", zap.Time("at", now))
 		if err := c.projects.SetTerminatingAt(ctx, p.Name, now); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
@@ -228,7 +232,7 @@ func (c *ProjectReschedulerController) handleTerminating(
 		return true, nil
 	}
 
-	elapsed := time.Since(terminatingAt)
+	elapsed := c.clock.Since(terminatingAt)
 	if elapsed < terminatingTimeout {
 		remaining := terminatingTimeout - elapsed
 		log.Info("Terminating project waiting for timeout",

@@ -12,12 +12,13 @@ import (
 
 func TestNodeHealthReconcile(t *testing.T) {
 	t.Run("fresh heartbeat stays Ready", func(t *testing.T) {
+		clk := newFakeClock()
 		s := newFakeNodeStore()
 		s.nodes["node-1"] = NodeStatusSnapshot{
-			LastHeartbeat: time.Now(),
+			LastHeartbeat: clk.Time.Add(-10 * time.Second), // well within 90 s
 			State:         NodeStateReady,
 		}
-		ctrl := NewNodeHealthController(zap.NewNop(), s, nil)
+		ctrl := NewNodeHealthController(zap.NewNop(), s, nil, WithClock(clk))
 
 		res, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
@@ -26,12 +27,13 @@ func TestNodeHealthReconcile(t *testing.T) {
 	})
 
 	t.Run("stale heartbeat transitions to NotReady", func(t *testing.T) {
+		clk := newFakeClock()
 		s := newFakeNodeStore()
 		s.nodes["node-1"] = NodeStatusSnapshot{
-			LastHeartbeat: time.Now().Add(-2 * NodeHeartbeatTimeout),
+			LastHeartbeat: clk.Time.Add(-2 * NodeHeartbeatTimeout), // 180 s ago
 			State:         NodeStateReady,
 		}
-		ctrl := NewNodeHealthController(zap.NewNop(), s, nil)
+		ctrl := NewNodeHealthController(zap.NewNop(), s, nil, WithClock(clk))
 
 		res, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
@@ -43,12 +45,13 @@ func TestNodeHealthReconcile(t *testing.T) {
 	})
 
 	t.Run("already NotReady with stale heartbeat is idempotent", func(t *testing.T) {
+		clk := newFakeClock()
 		s := newFakeNodeStore()
 		s.nodes["node-1"] = NodeStatusSnapshot{
-			LastHeartbeat: time.Now().Add(-2 * NodeHeartbeatTimeout),
+			LastHeartbeat: clk.Time.Add(-2 * NodeHeartbeatTimeout),
 			State:         NodeStateNotReady,
 		}
-		ctrl := NewNodeHealthController(zap.NewNop(), s, nil)
+		ctrl := NewNodeHealthController(zap.NewNop(), s, nil, WithClock(clk))
 
 		res, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
@@ -57,12 +60,13 @@ func TestNodeHealthReconcile(t *testing.T) {
 	})
 
 	t.Run("Draining node is skipped regardless of heartbeat", func(t *testing.T) {
+		clk := newFakeClock()
 		s := newFakeNodeStore()
 		s.nodes["node-1"] = NodeStatusSnapshot{
-			LastHeartbeat: time.Now().Add(-2 * NodeHeartbeatTimeout),
+			LastHeartbeat: clk.Time.Add(-2 * NodeHeartbeatTimeout),
 			State:         NodeStateDraining,
 		}
-		ctrl := NewNodeHealthController(zap.NewNop(), s, nil)
+		ctrl := NewNodeHealthController(zap.NewNop(), s, nil, WithClock(clk))
 
 		res, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
@@ -71,12 +75,13 @@ func TestNodeHealthReconcile(t *testing.T) {
 	})
 
 	t.Run("recovered heartbeat transitions back to Ready", func(t *testing.T) {
+		clk := newFakeClock()
 		s := newFakeNodeStore()
 		s.nodes["node-1"] = NodeStatusSnapshot{
-			LastHeartbeat: time.Now(), // fresh heartbeat
+			LastHeartbeat: clk.Time.Add(-10 * time.Second), // fresh heartbeat
 			State:         NodeStateNotReady,
 		}
-		ctrl := NewNodeHealthController(zap.NewNop(), s, nil)
+		ctrl := NewNodeHealthController(zap.NewNop(), s, nil, WithClock(clk))
 
 		res, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
