@@ -44,6 +44,18 @@ const (
 	NodeStateDraining NodeState = "Draining"
 )
 
+// IsValid reports whether s is one of the recognised NodeState constants.
+func (s NodeState) IsValid() bool {
+	switch s {
+	case NodeStateReady,
+		NodeStateNotReady,
+		NodeStateDraining:
+		return true
+	default:
+		return false
+	}
+}
+
 // NodeSpec contains the administrator-declared configuration of a Node.
 type NodeSpec struct {
 	// Hostname is the OS-level hostname of the machine.

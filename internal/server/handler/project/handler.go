@@ -57,6 +57,11 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := v1.ValidateName(project.Name); err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Validate spec: at least one service with a non-empty image is required.
 	if len(project.Spec.Services) == 0 {
 		h.writeError(w, http.StatusBadRequest, "spec.services must contain at least one service")

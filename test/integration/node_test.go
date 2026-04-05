@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -186,6 +187,196 @@ func TestNodeCRUD(t *testing.T) {
 	resp = doRequest(t, http.MethodGet, "/api/v1/nodes/"+nodeName, nil)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "get after delete: expected 404")
 	drainBody(resp)
+}
+
+// TestNodeHeartbeatStateValidation verifies that the heartbeat endpoint
+// rejects unrecognised state values with 400 and accepts valid ones with 204.
+func TestNodeHeartbeatStateValidation(t *testing.T) {
+	const nodeName = "e2e-heartbeat-state-val"
+
+	// Setup: create a node.
+	createBody := mustMarshal(t, v1.Node{
+		ObjectMeta: v1.ObjectMeta{Name: nodeName},
+		Spec:       v1.NodeSpec{Hostname: nodeName},
+	})
+	resp := doRequest(t, http.MethodPost, "/api/v1/nodes", createBody)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "create node: expected 201")
+	drainBody(resp)
+
+	type testCase struct {
+		name       string
+		state      string
+		wantStatus int
+		validate   func(t *testing.T, resp *http.Response)
+	}
+
+	testCases := []testCase{
+		{
+			name:       "Valid state Ready returns 204",
+			state:      "Ready",
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name:       "Valid state NotReady returns 204",
+			state:      "NotReady",
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name:       "Valid state Draining returns 204",
+			state:      "Draining",
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name:       "Invalid state returns 400 with descriptive error",
+			state:      "CompletelyBogusState",
+			wantStatus: http.StatusBadRequest,
+			validate: func(t *testing.T, resp *http.Response) {
+				var errResp struct {
+					Error string `json:"error"`
+				}
+				require.NoError(t, json.NewDecoder(resp.Body).Decode(&errResp))
+
+				assert.Contains(t, errResp.Error, "CompletelyBogusState",
+					"error message should mention the invalid value")
+				assert.Contains(t, errResp.Error, "Ready",
+					"error message should list valid states")
+			},
+		},
+		{
+			name:       "Another invalid state returns 400",
+			state:      "SomeOtherState",
+			wantStatus: http.StatusBadRequest,
+			validate: func(t *testing.T, resp *http.Response) {
+				var errResp struct {
+					Error string `json:"error"`
+				}
+				require.NoError(t, json.NewDecoder(resp.Body).Decode(&errResp))
+
+				assert.Contains(t, errResp.Error, "SomeOtherState",
+					"error message should mention the invalid value")
+			},
+		},
+		{
+			name:       "Empty body (timestamp-only heartbeat) returns 204",
+			state:      "",
+			wantStatus: http.StatusNoContent,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body []byte
+			if tc.state == "" {
+				// Empty body simulates a timestamp-only heartbeat.
+				body = nil
+			} else {
+				body = mustMarshal(t, map[string]string{"state": tc.state})
+			}
+			resp := doRequest(t, http.MethodPost, "/api/v1/nodes/"+nodeName+"/heartbeat", body)
+
+			require.Equal(t, tc.wantStatus, resp.StatusCode,
+				"state %q: expected %d", tc.state, tc.wantStatus)
+
+			if tc.validate != nil {
+				tc.validate(t, resp)
+			} else {
+				drainBody(resp)
+			}
+		})
+	}
+
+	// Verify invalid state was NOT persisted.
+	resp = doRequest(t, http.MethodGet, "/api/v1/nodes/"+nodeName, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var node v1.Node
+	mustDecodeBody(t, resp, &node)
+	assert.NotEqual(t, v1.NodeState("CompletelyBogusState"), node.Status.State,
+		"bogus state must not be persisted")
+
+	// Cleanup.
+	resp = doRequest(t, http.MethodDelete, "/api/v1/nodes/"+nodeName, nil)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+	drainBody(resp)
+}
+
+// TestNodeNameValidation verifies that node creation rejects names that violate
+// DNS subdomain naming rules and accepts valid names.
+func TestNodeNameValidation(t *testing.T) {
+	type testCase struct {
+		name       string
+		nodeName   string
+		wantStatus int
+	}
+
+	testCases := []testCase{
+		{
+			name:       "Valid DNS-style name returns 201",
+			nodeName:   "e2e-name-val-node-01",
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name:       "Single char name returns 201",
+			nodeName:   "a",
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name:       "Name with spaces returns 400",
+			nodeName:   "node with spaces",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Name with special characters returns 400",
+			nodeName:   "node&special!chars",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "1000-character name returns 400",
+			nodeName:   strings.Repeat("a", 1000),
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Uppercase name returns 400",
+			nodeName:   "MyNode",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Name starting with hyphen returns 400",
+			nodeName:   "-invalid-start",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Name ending with hyphen returns 400",
+			nodeName:   "invalid-end-",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Name with dots is valid returns 201",
+			nodeName:   "node.example.com",
+			wantStatus: http.StatusCreated,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := mustMarshal(t, v1.Node{
+				ObjectMeta: v1.ObjectMeta{Name: tc.nodeName},
+				Spec:       v1.NodeSpec{Hostname: "test-host"},
+			})
+			resp := doRequest(t, http.MethodPost, "/api/v1/nodes", body)
+
+			require.Equal(t, tc.wantStatus, resp.StatusCode,
+				"name %q: expected %d", tc.nodeName, tc.wantStatus)
+			drainBody(resp)
+		})
+	}
+
+	// Cleanup: delete successfully created nodes.
+	for _, name := range []string{"e2e-name-val-node-01", "a", "node.example.com"} {
+		resp := doRequest(t, http.MethodDelete, "/api/v1/nodes/"+name, nil)
+		assert.Equal(t, http.StatusNoContent, resp.StatusCode, "cleanup delete %q", name)
+		drainBody(resp)
+	}
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
