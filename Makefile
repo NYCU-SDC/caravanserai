@@ -40,6 +40,12 @@ test-integration:
 		&& echo -e "==> $(BLUE)All integration tests passed$(NC)" \
 		|| (echo -e "==> $(RED)Integration tests failed$(NC)" && exit 1)
 
+schemas:
+	@echo -e ":: $(GREEN)Generating JSON Schemas...$(NC)"
+	@go run ./cmd/schemagen \
+		&& echo -e "==> $(BLUE)Schemas generated successfully$(NC)" \
+		|| (echo -e "==> $(RED)Schema generation failed$(NC)" && exit 1)
+
 dev-up:
 	@echo -e ":: $(GREEN)Starting development PostgreSQL...$(NC)"
 	@docker compose up -d --wait \
@@ -65,5 +71,5 @@ dev-server: dev-up build
 dev-logs:
 	@docker compose logs -f
 
-.PHONY: all prepare build run-server run-agent run-cli test test-integration
+.PHONY: all prepare build run-server run-agent run-cli test test-integration schemas
 .PHONY: dev-up dev-down dev-reset dev-server dev-logs

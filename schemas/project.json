@@ -1,0 +1,332 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/Project",
+  "$defs": {
+    "Condition": {
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Type is a machine-readable identifier, e.g. \"Ready\", \"Phase\"."
+        },
+        "status": {
+          "type": "string",
+          "description": "Status is one of True, False, Unknown."
+        },
+        "lastHeartbeatTime": {
+          "type": "string",
+          "format": "date-time",
+          "description": "LastHeartbeatTime is when this condition was last sampled."
+        },
+        "lastTransitionTime": {
+          "type": "string",
+          "format": "date-time",
+          "description": "LastTransitionTime is when the Status last changed."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason is a CamelCase word summarising why the condition has this status."
+        },
+        "message": {
+          "type": "string",
+          "description": "Message is a human-readable explanation."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "type",
+        "status"
+      ],
+      "description": "Condition describes a single observable aspect of a resource's state."
+    },
+    "EnvVar": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "EnvVar is a single environment variable to inject into a container."
+    },
+    "IngressAccess": {
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/IngressScope"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "scope"
+      ],
+      "description": "IngressAccess defines visibility and auth rules for an ingress endpoint."
+    },
+    "IngressDef": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/IngressTarget"
+        },
+        "access": {
+          "$ref": "#/$defs/IngressAccess"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "target"
+      ],
+      "description": "IngressDef describes a single HTTP ingress rule for a Project."
+    },
+    "IngressScope": {
+      "type": "string",
+      "enum": [
+        "Internal"
+      ],
+      "description": "Controls whether a route is exposed to the public internet or only to the Headscale overlay network."
+    },
+    "IngressTarget": {
+      "properties": {
+        "service": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "service",
+        "port"
+      ],
+      "description": "IngressTarget is the backend service and port for an ingress rule."
+    },
+    "ObjectMeta": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the unique identifier within its Kind namespace."
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Labels are arbitrary key/value pairs used for selection and grouping."
+        },
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Annotations are non-identifying metadata (e.g. human-readable hints)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "CreatedAt is set by the server on first write."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "UpdatedAt is set by the server on every write."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "ObjectMeta holds identity and classification metadata common to all resources."
+    },
+    "Project": {
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "description": "APIVersion identifies the versioned schema this resource conforms to, e.g. \"caravanserai/v1\"."
+        },
+        "kind": {
+          "type": "string",
+          "description": "Kind is the resource type, e.g. \"Node\", \"Project\"."
+        },
+        "metadata": {
+          "$ref": "#/$defs/ObjectMeta"
+        },
+        "spec": {
+          "$ref": "#/$defs/ProjectSpec"
+        },
+        "status": {
+          "$ref": "#/$defs/ProjectStatus"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "apiVersion",
+        "kind",
+        "metadata"
+      ],
+      "title": "Project",
+      "description": "Project is the central workload resource."
+    },
+    "ProjectPhase": {
+      "type": "string",
+      "enum": [
+        "Pending",
+        "Scheduled",
+        "Running",
+        "Failed",
+        "Terminating",
+        "Terminated"
+      ],
+      "description": "Lifecycle state of a Project as maintained by the Controller Manager."
+    },
+    "ProjectSpec": {
+      "properties": {
+        "services": {
+          "items": {
+            "$ref": "#/$defs/ServiceDef"
+          },
+          "type": "array",
+          "description": "Services is the ordered list of containers to run."
+        },
+        "volumes": {
+          "items": {
+            "$ref": "#/$defs/VolumeDef"
+          },
+          "type": "array",
+          "description": "Volumes are named storage units shared across services."
+        },
+        "ingress": {
+          "items": {
+            "$ref": "#/$defs/IngressDef"
+          },
+          "type": "array",
+          "description": "Ingress defines public or internal HTTP routing rules."
+        },
+        "expireAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ExpireAt, when set, causes the GC controller to delete the Project\nafter this time. Useful for ephemeral preview environments."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "services"
+      ],
+      "description": "ProjectSpec is the desired state declared by the user."
+    },
+    "ProjectStatus": {
+      "properties": {
+        "phase": {
+          "$ref": "#/$defs/ProjectPhase",
+          "description": "Phase is the high-level lifecycle state."
+        },
+        "nodeRef": {
+          "type": "string",
+          "description": "NodeRef is the name of the Node the Scheduler chose. Empty while Pending."
+        },
+        "conditions": {
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array",
+          "description": "Conditions is a list of granular observable states."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ProjectStatus is written by the Controller Manager and Agent."
+    },
+    "ServiceDef": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name identifies the service within the Project (used as the DNS\nhostname inside the shared bridge network)."
+        },
+        "image": {
+          "type": "string",
+          "description": "Image is the Docker image reference, e.g. \"postgres:15\"."
+        },
+        "env": {
+          "items": {
+            "$ref": "#/$defs/EnvVar"
+          },
+          "type": "array",
+          "description": "Env are extra environment variables injected at runtime."
+        },
+        "volumeMounts": {
+          "items": {
+            "$ref": "#/$defs/VolumeMount"
+          },
+          "type": "array",
+          "description": "VolumeMounts lists volumes to attach to this container."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "image"
+      ],
+      "description": "ServiceDef describes a single container (analogous to a Compose service)."
+    },
+    "VolumeDef": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/VolumeType",
+          "description": "Type determines lifecycle and backup semantics."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "type"
+      ],
+      "description": "VolumeDef describes a named volume used by one or more services."
+    },
+    "VolumeMount": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "mountPath": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "mountPath"
+      ],
+      "description": "VolumeMount associates a named Volume with a container mount path."
+    },
+    "VolumeType": {
+      "type": "string",
+      "enum": [
+        "Ephemeral"
+      ],
+      "description": "Governs the lifecycle and backup behaviour of a Volume."
+    }
+  }
+}
