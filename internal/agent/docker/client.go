@@ -321,6 +321,47 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, projectName string,
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// InspectContainer returns the running state and bridge-network IP of the
+// container for the given project/service pair.  It satisfies the narrow
+// ContainerInspector interface consumed by the forward handler.
+func (r *DockerRuntime) InspectContainer(ctx context.Context, project, service string) (ContainerInspectResult, error) {
+	return r.containerInspectRaw(ctx, ContainerName(project, service))
+}
+
+// containerInspectRaw returns the running state and bridge-network IP of a
+// single container identified by name.
+func (r *DockerRuntime) containerInspectRaw(ctx context.Context, containerName string) (ContainerInspectResult, error) {
+	info, err := r.client.ContainerInspect(ctx, containerName)
+	if err != nil {
+		return ContainerInspectResult{}, fmt.Errorf("inspect container %q: %w", containerName, err)
+	}
+
+	// Find the container's IP on any attached network.  Prefer the project
+	// bridge network (cara-*) if multiple networks are attached.
+	var ip string
+	for netName, netInfo := range info.NetworkSettings.Networks {
+		if netInfo.IPAddress != "" {
+			ip = netInfo.IPAddress
+			// Prefer the cara-* network.
+			if len(netName) > 5 && netName[:5] == "cara-" {
+				break
+			}
+		}
+	}
+
+	return ContainerInspectResult{
+		Running:   info.State.Running,
+		NetworkIP: ip,
+	}, nil
+}
+
+// ContainerInspectResult holds the subset of Docker inspect data needed by
+// the port-forward handler.
+type ContainerInspectResult struct {
+	Running   bool
+	NetworkIP string
+}
+
 // pullOptions returns the options for ImagePull (no auth for now).
 func pullOptions() image.PullOptions {
 	return image.PullOptions{}

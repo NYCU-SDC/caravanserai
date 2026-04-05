@@ -36,7 +36,12 @@ curl -sf http://localhost:8080/api/healthz
 NODE_NAME=test-node ./bin/cara-agent > /tmp/cara-agent.log 2>&1 &
 echo "cara-agent PID: $!"
 
-# 6. Verify agent registered and node is Ready
+# 6. Verify agent HTTP server is ready (port-forward endpoint + healthz)
+sleep 2
+curl -sf http://localhost:9090/healthz
+# Success: exit code 0, body contains "OK"
+
+# 7. Verify agent registered and node is Ready
 sleep 5
 ./bin/caractl get nodes
 # Success: output contains "test-node" with state "Ready"
@@ -67,12 +72,13 @@ tail -30 /tmp/cara-agent.log
 - `NODE_NAME` — node name for registration (default: OS hostname)
 - `HEARTBEAT_INTERVAL` — heartbeat frequency (default: `30s`)
 - `DOCKER_HOST` — Docker daemon socket (default: `unix:///var/run/docker.sock`)
+- `AGENT_LISTEN_PORT` — Agent HTTP server port (default: `9090`); also settable via `--agent-port` flag
 
 ## Prerequisites
 
 - Docker daemon running (`docker ps` must succeed)
 - Go 1.22+
-- Ports 5432 and 8080 free
+- Ports 5432, 8080, and 9090 free
 - `.env` at project root contains:
   ```
   DEBUG=true
@@ -83,6 +89,7 @@ tail -30 /tmp/cara-agent.log
 
 - Port 5432 occupied → `docker compose down` then retry `make dev-up`
 - Port 8080 occupied → `kill $(lsof -ti :8080)` then restart cara-server
+- Port 9090 occupied → `kill $(lsof -ti :9090)` then restart cara-agent
 - Agent cannot reach Docker → verify `docker ps` succeeds; if non-default socket, set `DOCKER_HOST`
 - Agent fails to register → verify cara-server is running (`curl -sf http://localhost:8080/api/healthz`); check `/tmp/cara-server.log`
 - Database migration errors after branch switch → `make dev-reset`

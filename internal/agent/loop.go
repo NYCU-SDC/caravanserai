@@ -26,7 +26,7 @@ import (
 // The initial registration is retried with a fixed 5-second back-off until it
 // succeeds or ctx is cancelled, so that the agent can start before the server
 // is ready.
-func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatInterval time.Duration, logger *zap.Logger) {
+func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatInterval time.Duration, agentPort int, logger *zap.Logger) {
 	const pollInterval = 10 * time.Second
 
 	spec := v1.NodeSpec{
@@ -63,6 +63,9 @@ func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatI
 		case <-heartbeatTicker.C:
 			status := v1.NodeStatus{
 				State: v1.NodeStateReady,
+				Network: v1.NodeNetworkStatus{
+					AgentPort: agentPort,
+				},
 			}
 			if err := client.Heartbeat(ctx, status); err != nil {
 				if errors.Is(err, ErrNodeNotFound) {

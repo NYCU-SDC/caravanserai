@@ -22,6 +22,10 @@ type NodeNetworkStatus struct {
 	// Mode is Direct when a peer-to-peer path exists, DERP otherwise.
 	Mode NetworkMode `json:"mode,omitempty" yaml:"mode,omitempty"`
 
+	// AgentPort is the TCP port the Agent's HTTP server listens on.
+	// Used by caractl to construct the Agent address for port-forward tunnels.
+	AgentPort int `json:"agentPort,omitempty" yaml:"agentPort,omitempty"`
+
 	// Throughput is measured by the Agent at startup and periodically.
 	Throughput NodeThroughput `json:"throughput,omitempty" yaml:"throughput,omitempty"`
 }
