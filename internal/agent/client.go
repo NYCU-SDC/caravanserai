@@ -3,7 +3,7 @@
 // The Client talks to the cara-server REST API to:
 //   - Register this node
 //   - Send periodic heartbeats
-//   - Poll for Scheduled and Terminating Projects assigned to this node
+//   - Poll for Scheduled, Running, and Terminating Projects assigned to this node
 //   - Report project status (Running / Failed / Terminated) back to the server
 package agent
 
@@ -167,12 +167,12 @@ func (c *Client) ListScheduledProjects(ctx context.Context) ([]*v1.Project, erro
 	return projects, nil
 }
 
-// ListProjectsForReconcile calls GET /api/v1/projects with phase=Scheduled and
-// phase=Terminating filters, restricted to this node via nodeRef.  The result
-// includes both projects that need to be started and those that need to be torn
-// down.
+// ListProjectsForReconcile calls GET /api/v1/projects with phase=Scheduled,
+// phase=Running, and phase=Terminating filters, restricted to this node via
+// nodeRef.  The result includes projects that need to be started, health-checked,
+// or torn down.
 func (c *Client) ListProjectsForReconcile(ctx context.Context) ([]*v1.Project, error) {
-	url := fmt.Sprintf("%s/api/v1/projects?phase=Scheduled&phase=Terminating&nodeRef=%s",
+	url := fmt.Sprintf("%s/api/v1/projects?phase=Scheduled&phase=Running&phase=Terminating&nodeRef=%s",
 		c.serverURL, c.nodeName)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
