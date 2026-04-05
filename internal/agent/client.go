@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -19,6 +20,10 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// ErrNodeNotFound is returned by Heartbeat when the server responds with 404,
+// indicating the node no longer exists and should re-register.
+var ErrNodeNotFound = errors.New("node not found")
 
 // Client is an HTTP client for the cara-server node API.
 type Client struct {
@@ -118,12 +123,15 @@ func (c *Client) Heartbeat(ctx context.Context, status v1.NodeStatus) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusNoContent {
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		c.logger.Debug("Heartbeat sent", zap.String("node", c.nodeName))
+		return nil
+	case http.StatusNotFound:
+		return ErrNodeNotFound
+	default:
 		return fmt.Errorf("heartbeat: unexpected status %s", resp.Status)
 	}
-
-	c.logger.Debug("Heartbeat sent", zap.String("node", c.nodeName))
-	return nil
 }
 
 // ListScheduledProjects calls GET /api/v1/projects?phase=Scheduled&nodeRef=<nodeName>

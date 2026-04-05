@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -64,12 +65,52 @@ func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatI
 				State: v1.NodeStateReady,
 			}
 			if err := client.Heartbeat(ctx, status); err != nil {
-				logger.Warn("Heartbeat failed", zap.Error(err))
+				if errors.Is(err, ErrNodeNotFound) {
+					logger.Info("Node not found on server (404), initiating re-registration")
+					if err := reRegister(ctx, client, spec, logger); err != nil {
+						return // context cancelled
+					}
+				} else {
+					logger.Warn("Heartbeat failed", zap.Error(err))
+				}
 			}
 
 		case <-pollTicker.C:
 			reconcileProjects(ctx, client, runtime, logger)
 		}
+	}
+}
+
+// reRegister attempts to re-register the node with exponential backoff.
+// It starts at 5s and doubles up to a 60s cap. Returns nil on success or a
+// non-nil error only when ctx is cancelled.
+func reRegister(ctx context.Context, client *Client, spec v1.NodeSpec, logger *zap.Logger) error {
+	const (
+		initialBackoff = 5 * time.Second
+		maxBackoff     = 60 * time.Second
+	)
+	backoff := initialBackoff
+
+	for {
+		if err := client.Register(ctx, spec); err != nil {
+			logger.Warn("Re-registration failed, retrying",
+				zap.Error(err),
+				zap.Duration("backoff", backoff),
+			)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				continue
+			}
+		}
+
+		logger.Info("Node re-registered successfully")
+		return nil
 	}
 }
 
