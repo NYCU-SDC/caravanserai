@@ -161,6 +161,31 @@ docker volume ls --filter "name=cara-wordpress-mysql-data" --format '{{.Name}}'
 sleep 15
 ```
 
+### Port-forward E2E test
+
+Requires a Running project with a service that listens on a TCP port.
+
+```bash
+# With explicit agent address
+./bin/caractl port-forward wordpress/db 13306:3306 --node localhost:9090
+
+# Auto-resolve agent address via server (project → nodeRef → node IP + agentPort)
+./bin/caractl port-forward wordpress/db 13306:3306
+
+# Same local and remote port (shorthand)
+./bin/caractl port-forward wordpress/db 3306
+```
+
+Verify in a separate terminal:
+
+```bash
+nc -zv 127.0.0.1 13306
+# or with a MySQL client:
+mysql -h 127.0.0.1 -P 13306 -u root -psecret -e "SELECT 1;"
+```
+
+`Ctrl+C` to stop. Clean up with `./bin/caractl delete project wordpress`.
+
 ### Success criteria
 
 All of these must be true for a passing E2E test:
