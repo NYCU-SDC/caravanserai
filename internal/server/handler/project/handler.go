@@ -12,26 +12,38 @@ package project
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/store"
 
+	handlerutil "github.com/NYCU-SDC/summer/pkg/handler"
+	logutil "github.com/NYCU-SDC/summer/pkg/log"
 	"github.com/NYCU-SDC/summer/pkg/middleware"
+	"github.com/NYCU-SDC/summer/pkg/problem"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
 // Handler implements apiserver.RouteRegistrar for Project endpoints.
 type Handler struct {
-	logger *zap.Logger
-	store  store.ProjectStore
+	logger        *zap.Logger
+	store         store.ProjectStore
+	tracer        trace.Tracer
+	problemWriter *problem.HttpWriter
 }
 
 // NewHandler creates a Project Handler.
-func NewHandler(logger *zap.Logger, s store.ProjectStore) *Handler {
-	return &Handler{logger: logger, store: s}
+func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter) *Handler {
+	return &Handler{
+		logger:        logger,
+		store:         s,
+		tracer:        otel.Tracer("project/handler"),
+		problemWriter: pw,
+	}
 }
 
 // RegisterRoutes satisfies apiserver.RouteRegistrar.
@@ -46,34 +58,44 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 // ── handlers ──────────────────────────────────────────────────────────────────
 
 func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "createProject")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
 	var project v1.Project
 	if err := json.NewDecoder(r.Body).Decode(&project); err != nil {
-		h.writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
 		return
 	}
 
 	if project.Name == "" {
-		h.writeError(w, http.StatusBadRequest, "metadata.name is required")
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.name", nil, "metadata.name is required"), logger)
 		return
 	}
 
 	if err := v1.ValidateName(project.Name); err != nil {
-		h.writeError(w, http.StatusBadRequest, err.Error())
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.name", project.Name, err.Error()), logger)
 		return
 	}
 
 	// Validate spec: at least one service with a non-empty image is required.
 	if len(project.Spec.Services) == 0 {
-		h.writeError(w, http.StatusBadRequest, "spec.services must contain at least one service")
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("spec.services", nil, "spec.services must contain at least one service"), logger)
 		return
 	}
 	for _, svc := range project.Spec.Services {
 		if svc.Name == "" {
-			h.writeError(w, http.StatusBadRequest, "each service must have a non-empty name")
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError("spec.services[].name", nil, "each service must have a non-empty name"), logger)
 			return
 		}
 		if svc.Image == "" {
-			h.writeError(w, http.StatusBadRequest, "service "+svc.Name+": image is required")
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError("spec.services[].image", svc.Name, "service "+svc.Name+": image is required"), logger)
 			return
 		}
 	}
@@ -83,18 +105,19 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		project.Status.Phase = v1.ProjectPhasePending
 	}
 
-	if err := h.store.CreateProject(r.Context(), &project); err != nil {
+	if err := h.store.CreateProject(traceCtx, &project); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
-			h.writeError(w, http.StatusConflict, "project already exists: "+project.Name)
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project already exists: %s: %w", project.Name, store.ErrAlreadyExists), logger)
 			return
 		}
-		h.logger.Error("CreateProject failed", zap.String("name", project.Name), zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		logger.Error("CreateProject failed", zap.String("name", project.Name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 
 	project.TypeMeta = v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"}
-	h.writeJSON(w, http.StatusCreated, &project)
+	handlerutil.WriteJSONResponse(w, http.StatusCreated, &project)
 }
 
 // listProjects handles GET /api/v1/projects.
@@ -109,6 +132,10 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 // values are ORed. Because the store nodeRef filtering is applied in-process
 // after the store call, this is acceptable for MVP scale.
 func (h *Handler) listProjects(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "listProjects")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
 	phaseValues := r.URL.Query()["phase"]
 	nodeRefFilter := r.URL.Query().Get("nodeRef")
 
@@ -119,19 +146,19 @@ func (h *Handler) listProjects(w http.ResponseWriter, r *http.Request) {
 
 	switch len(phaseValues) {
 	case 0:
-		projects, err = h.store.ListProjects(r.Context())
+		projects, err = h.store.ListProjects(traceCtx)
 	case 1:
-		projects, err = h.store.ListProjectsByPhase(r.Context(), v1.ProjectPhase(phaseValues[0]))
+		projects, err = h.store.ListProjectsByPhase(traceCtx, v1.ProjectPhase(phaseValues[0]))
 	default:
 		phases := make([]v1.ProjectPhase, len(phaseValues))
 		for i, p := range phaseValues {
 			phases[i] = v1.ProjectPhase(p)
 		}
-		projects, err = h.store.ListProjectsByPhases(r.Context(), phases)
+		projects, err = h.store.ListProjectsByPhases(traceCtx, phases)
 	}
 	if err != nil {
-		h.logger.Error("ListProjects failed", zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		logger.Error("ListProjects failed", zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 
@@ -153,22 +180,27 @@ func (h *Handler) listProjects(w http.ResponseWriter, r *http.Request) {
 	for i, p := range projects {
 		list.Items[i] = *p
 	}
-	h.writeJSON(w, http.StatusOK, list)
+	handlerutil.WriteJSONResponse(w, http.StatusOK, list)
 }
 
 func (h *Handler) getProject(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "getProject")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
 	name := r.PathValue("name")
-	project, err := h.store.GetProject(r.Context(), name)
+	project, err := h.store.GetProject(traceCtx, name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			h.writeError(w, http.StatusNotFound, "project not found: "+name)
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
 			return
 		}
-		h.logger.Error("GetProject failed", zap.String("name", name), zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		logger.Error("GetProject failed", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
-	h.writeJSON(w, http.StatusOK, project)
+	handlerutil.WriteJSONResponse(w, http.StatusOK, project)
 }
 
 // deleteProject handles DELETE /api/v1/projects/{name}.
@@ -188,54 +220,61 @@ func (h *Handler) getProject(w http.ResponseWriter, r *http.Request) {
 //
 // Calling DELETE on an already-Terminating project is idempotent (202).
 func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "deleteProject")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
 	name := r.PathValue("name")
 
-	project, err := h.store.GetProject(r.Context(), name)
+	project, err := h.store.GetProject(traceCtx, name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			h.writeError(w, http.StatusNotFound, "project not found: "+name)
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
 			return
 		}
-		h.logger.Error("GetProject failed during delete", zap.String("name", name), zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		logger.Error("GetProject failed during delete", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 
 	switch project.Status.Phase {
 	case v1.ProjectPhasePending, v1.ProjectPhaseFailed:
 		// No Docker resources exist; safe to delete immediately.
-		if err := h.store.DeleteProject(r.Context(), name); err != nil {
+		if err := h.store.DeleteProject(traceCtx, name); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				h.writeError(w, http.StatusNotFound, "project not found: "+name)
+				h.problemWriter.WriteError(traceCtx, w,
+					fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
 				return
 			}
-			h.logger.Error("DeleteProject failed", zap.String("name", name), zap.Error(err))
-			h.writeError(w, http.StatusInternalServerError, "internal server error")
+			logger.Error("DeleteProject failed", zap.String("name", name), zap.Error(err))
+			h.problemWriter.WriteError(traceCtx, w, err, logger)
 			return
 		}
-		h.logger.Info("Project deleted immediately", zap.String("project", name),
+		logger.Info("Project deleted immediately", zap.String("project", name),
 			zap.String("phase", string(project.Status.Phase)))
 		w.WriteHeader(http.StatusNoContent)
 
 	case v1.ProjectPhaseTerminating:
 		// Already in progress; idempotent.
-		h.logger.Info("Project already terminating", zap.String("project", name))
+		logger.Info("Project already terminating", zap.String("project", name))
 		w.WriteHeader(http.StatusAccepted)
 
 	default:
 		// Scheduled, Running, or any future active phase: transition to Terminating.
 		status := project.Status
 		status.Phase = v1.ProjectPhaseTerminating
-		if err := h.store.UpdateProjectStatus(r.Context(), name, status); err != nil {
+		if err := h.store.UpdateProjectStatus(traceCtx, name, status); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				h.writeError(w, http.StatusNotFound, "project not found: "+name)
+				h.problemWriter.WriteError(traceCtx, w,
+					fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
 				return
 			}
-			h.logger.Error("UpdateProjectStatus (Terminating) failed", zap.String("name", name), zap.Error(err))
-			h.writeError(w, http.StatusInternalServerError, "internal server error")
+			logger.Error("UpdateProjectStatus (Terminating) failed", zap.String("name", name), zap.Error(err))
+			h.problemWriter.WriteError(traceCtx, w, err, logger)
 			return
 		}
-		h.logger.Info("Project marked as Terminating", zap.String("project", name),
+		logger.Info("Project marked as Terminating", zap.String("project", name),
 			zap.String("previous_phase", string(project.Status.Phase)))
 		w.WriteHeader(http.StatusAccepted)
 	}
@@ -255,34 +294,42 @@ type statusPatchRequest struct {
 // (or Failed).  Only the Agent should call this; the API server does not
 // validate the caller identity in the MVP.
 func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "patchStatus")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
 	name := r.PathValue("name")
 
 	var req statusPatchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
 		return
 	}
 
 	if req.Phase == "" {
-		h.writeError(w, http.StatusBadRequest, "phase is required")
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("phase", nil, "phase is required"), logger)
 		return
 	}
 
 	if !req.Phase.IsValid() {
-		h.writeError(w, http.StatusBadRequest,
-			"invalid phase "+string(req.Phase)+": must be one of Pending, Scheduled, Running, Failed, Terminating, Terminated")
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("phase", req.Phase,
+				"invalid phase "+string(req.Phase)+": must be one of Pending, Scheduled, Running, Failed, Terminating, Terminated"), logger)
 		return
 	}
 
 	// Fetch existing status to preserve fields we do not overwrite (nodeRef, etc.).
-	existing, err := h.store.GetProject(r.Context(), name)
+	existing, err := h.store.GetProject(traceCtx, name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			h.writeError(w, http.StatusNotFound, "project not found: "+name)
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
 			return
 		}
-		h.logger.Error("GetProject failed during status patch", zap.String("name", name), zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		logger.Error("GetProject failed during status patch", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 
@@ -312,37 +359,20 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.store.UpdateProjectStatus(r.Context(), name, status); err != nil {
+	if err := h.store.UpdateProjectStatus(traceCtx, name, status); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			h.writeError(w, http.StatusNotFound, "project not found: "+name)
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
 			return
 		}
-		h.logger.Error("UpdateProjectStatus failed", zap.String("name", name), zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		logger.Error("UpdateProjectStatus failed", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 
-	h.logger.Info("Project status patched",
+	logger.Info("Project status patched",
 		zap.String("project", name),
 		zap.String("phase", string(req.Phase)),
 	)
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-type errorResponse struct {
-	Error string `json:"error"`
-}
-
-func (h *Handler) writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		h.logger.Error("Failed to encode JSON response", zap.Error(err))
-	}
-}
-
-func (h *Handler) writeError(w http.ResponseWriter, code int, msg string) {
-	h.writeJSON(w, code, errorResponse{Error: strings.TrimSpace(msg)})
 }

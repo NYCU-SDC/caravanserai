@@ -15,21 +15,27 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/store"
 
+	handlerutil "github.com/NYCU-SDC/summer/pkg/handler"
+	logutil "github.com/NYCU-SDC/summer/pkg/log"
 	"github.com/NYCU-SDC/summer/pkg/middleware"
+	"github.com/NYCU-SDC/summer/pkg/problem"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
 // Handler implements apiserver.RouteRegistrar for Node endpoints.
 type Handler struct {
-	logger       *zap.Logger
-	store        store.NodeStore
-	projectStore ProjectLister
+	logger        *zap.Logger
+	store         store.NodeStore
+	projectStore  ProjectLister
+	tracer        trace.Tracer
+	problemWriter *problem.HttpWriter
 }
 
 // ProjectLister is the narrow interface the node handler needs to check
@@ -39,8 +45,14 @@ type ProjectLister interface {
 }
 
 // NewHandler creates a Node Handler.
-func NewHandler(logger *zap.Logger, s store.NodeStore, ps ProjectLister) *Handler {
-	return &Handler{logger: logger, store: s, projectStore: ps}
+func NewHandler(logger *zap.Logger, s store.NodeStore, ps ProjectLister, pw *problem.HttpWriter) *Handler {
+	return &Handler{
+		logger:        logger,
+		store:         s,
+		projectStore:  ps,
+		tracer:        otel.Tracer("node/handler"),
+		problemWriter: pw,
+	}
 }
 
 // RegisterRoutes satisfies apiserver.RouteRegistrar.
@@ -55,19 +67,26 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 // ── handlers ──────────────────────────────────────────────────────────────────
 
 func (h *Handler) createNode(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "createNode")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
 	var node v1.Node
 	if err := json.NewDecoder(r.Body).Decode(&node); err != nil {
-		h.writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
 		return
 	}
 
 	if node.Name == "" {
-		h.writeError(w, http.StatusBadRequest, "metadata.name is required")
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.name", nil, "metadata.name is required"), logger)
 		return
 	}
 
 	if err := v1.ValidateName(node.Name); err != nil {
-		h.writeError(w, http.StatusBadRequest, err.Error())
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.name", node.Name, err.Error()), logger)
 		return
 	}
 
@@ -77,25 +96,30 @@ func (h *Handler) createNode(w http.ResponseWriter, r *http.Request) {
 		node.Status.State = v1.NodeStateNotReady
 	}
 
-	if err := h.store.CreateNode(r.Context(), &node); err != nil {
+	if err := h.store.CreateNode(traceCtx, &node); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
-			h.writeError(w, http.StatusConflict, "node already exists: "+node.Name)
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("node already exists: %s: %w", node.Name, store.ErrAlreadyExists), logger)
 			return
 		}
-		h.logger.Error("CreateNode failed", zap.String("name", node.Name), zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		logger.Error("CreateNode failed", zap.String("name", node.Name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 
 	node.TypeMeta = v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Node"}
-	h.writeJSON(w, http.StatusCreated, &node)
+	handlerutil.WriteJSONResponse(w, http.StatusCreated, &node)
 }
 
 func (h *Handler) listNodes(w http.ResponseWriter, r *http.Request) {
-	nodes, err := h.store.ListNodes(r.Context())
+	traceCtx, span := h.tracer.Start(r.Context(), "listNodes")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
+	nodes, err := h.store.ListNodes(traceCtx)
 	if err != nil {
-		h.logger.Error("ListNodes failed", zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		logger.Error("ListNodes failed", zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 
@@ -106,25 +130,34 @@ func (h *Handler) listNodes(w http.ResponseWriter, r *http.Request) {
 	for i, n := range nodes {
 		list.Items[i] = *n
 	}
-	h.writeJSON(w, http.StatusOK, list)
+	handlerutil.WriteJSONResponse(w, http.StatusOK, list)
 }
 
 func (h *Handler) getNode(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "getNode")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
 	name := r.PathValue("name")
-	node, err := h.store.GetNode(r.Context(), name)
+	node, err := h.store.GetNode(traceCtx, name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			h.writeError(w, http.StatusNotFound, "node not found: "+name)
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("node not found: %s: %w", name, store.ErrNotFound), logger)
 			return
 		}
-		h.logger.Error("GetNode failed", zap.String("name", name), zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		logger.Error("GetNode failed", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
-	h.writeJSON(w, http.StatusOK, node)
+	handlerutil.WriteJSONResponse(w, http.StatusOK, node)
 }
 
 func (h *Handler) deleteNode(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "deleteNode")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
 	name := r.PathValue("name")
 
 	// Guard: reject deletion when projects are still assigned to this node.
@@ -133,26 +166,28 @@ func (h *Handler) deleteNode(w http.ResponseWriter, r *http.Request) {
 		v1.ProjectPhaseRunning,
 		v1.ProjectPhaseTerminating,
 	}
-	projects, err := h.projectStore.ListProjectsByNodeRef(r.Context(), name, activePhases)
+	projects, err := h.projectStore.ListProjectsByNodeRef(traceCtx, name, activePhases)
 	if err != nil {
-		h.logger.Error("ListProjectsByNodeRef failed during node delete",
+		logger.Error("ListProjectsByNodeRef failed during node delete",
 			zap.String("name", name), zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 	if len(projects) > 0 {
-		h.writeError(w, http.StatusConflict,
-			fmt.Sprintf("cannot delete node %q: %d project(s) still assigned", name, len(projects)))
+		h.problemWriter.WriteError(traceCtx, w,
+			fmt.Errorf("cannot delete node %q: %d project(s) still assigned: %w",
+				name, len(projects), store.ErrAlreadyExists), logger)
 		return
 	}
 
-	if err := h.store.DeleteNode(r.Context(), name); err != nil {
+	if err := h.store.DeleteNode(traceCtx, name); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			h.writeError(w, http.StatusNotFound, "node not found: "+name)
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("node not found: %s: %w", name, store.ErrNotFound), logger)
 			return
 		}
-		h.logger.Error("DeleteNode failed", zap.String("name", name), zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		logger.Error("DeleteNode failed", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -169,17 +204,22 @@ type heartbeatRequest struct {
 }
 
 func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "heartbeat")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
 	name := r.PathValue("name")
 
 	// Fetch existing status so we can merge rather than overwrite.
-	existing, err := h.store.GetNode(r.Context(), name)
+	existing, err := h.store.GetNode(traceCtx, name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			h.writeError(w, http.StatusNotFound, "node not found: "+name)
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("node not found: %s: %w", name, store.ErrNotFound), logger)
 			return
 		}
-		h.logger.Error("GetNode failed during heartbeat", zap.String("name", name), zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		logger.Error("GetNode failed during heartbeat", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 
@@ -187,15 +227,17 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 	// Body is optional; an empty / missing body is a pure timestamp update.
 	if r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			h.writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
 			return
 		}
 	}
 
 	// Validate state before persisting.
 	if req.State != "" && !req.State.IsValid() {
-		h.writeError(w, http.StatusBadRequest,
-			"invalid state "+string(req.State)+": must be one of Ready, NotReady, Draining")
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("state", req.State,
+				"invalid state "+string(req.State)+": must be one of Ready, NotReady, Draining"), logger)
 		return
 	}
 
@@ -215,34 +257,17 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 		status.Allocatable = req.Allocatable
 	}
 
-	if err := h.store.UpdateNodeStatus(r.Context(), name, status); err != nil {
+	if err := h.store.UpdateNodeStatus(traceCtx, name, status); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			h.writeError(w, http.StatusNotFound, "node not found: "+name)
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("node not found: %s: %w", name, store.ErrNotFound), logger)
 			return
 		}
-		h.logger.Error("UpdateNodeStatus failed", zap.String("name", name), zap.Error(err))
-		h.writeError(w, http.StatusInternalServerError, "internal server error")
+		logger.Error("UpdateNodeStatus failed", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 
-	h.logger.Debug("Heartbeat received", zap.String("node", name))
+	logger.Debug("Heartbeat received", zap.String("node", name))
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-type errorResponse struct {
-	Error string `json:"error"`
-}
-
-func (h *Handler) writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		h.logger.Error("Failed to encode JSON response", zap.Error(err))
-	}
-}
-
-func (h *Handler) writeError(w http.ResponseWriter, code int, msg string) {
-	h.writeJSON(w, code, errorResponse{Error: strings.TrimSpace(msg)})
 }
