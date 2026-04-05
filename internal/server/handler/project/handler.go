@@ -263,6 +263,12 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !req.Phase.IsValid() {
+		h.writeError(w, http.StatusBadRequest,
+			"invalid phase "+string(req.Phase)+": must be one of Pending, Scheduled, Running, Failed, Terminating, Terminated")
+		return
+	}
+
 	// Fetch existing status to preserve fields we do not overwrite (nodeRef, etc.).
 	existing, err := h.store.GetProject(r.Context(), name)
 	if err != nil {
