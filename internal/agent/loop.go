@@ -47,6 +47,13 @@ func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatI
 		break
 	}
 
+	// ── Bootstrap: health-check Running projects ──────────────────────────
+	// After a restart, the Agent has no memory of Running projects. Fetch
+	// them from the server and verify containers are still alive so that
+	// failures are detected immediately rather than waiting for the first
+	// poll tick.
+	bootstrapRunningProjects(ctx, client, runtime, logger)
+
 	// ── Heartbeat loop ────────────────────────────────────────────────────
 	heartbeatTicker := time.NewTicker(heartbeatInterval)
 	defer heartbeatTicker.Stop()
@@ -117,8 +124,32 @@ func reRegister(ctx context.Context, client *Client, spec v1.NodeSpec, logger *z
 	}
 }
 
-// reconcileProjects fetches all Scheduled and Terminating Projects assigned to
-// this node and reconciles each one using the container runtime.
+// bootstrapRunningProjects fetches all projects (including Running) from the
+// server and runs healthCheckOne on each Running project to rebuild the Agent's
+// awareness after a restart.
+func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docker.Runtime, logger *zap.Logger) {
+	projects, err := client.ListProjectsForReconcile(ctx)
+	if err != nil {
+		logger.Warn("Bootstrap: failed to list projects", zap.Error(err))
+		return
+	}
+
+	var running int
+	for _, p := range projects {
+		if p.Status.Phase == v1.ProjectPhaseRunning {
+			running++
+			healthCheckOne(ctx, client, runtime, p, logger)
+		}
+	}
+
+	logger.Info("Bootstrap: found running projects on this node", zap.Int("count", running))
+}
+
+// reconcileProjects fetches all Scheduled, Running, and Terminating Projects
+// assigned to this node and processes each one:
+//   - Terminating → tear down containers
+//   - Running → health-check containers
+//   - Scheduled → reconcile (create/start) containers
 func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, logger *zap.Logger) {
 	projects, err := client.ListProjectsForReconcile(ctx)
 	if err != nil {
@@ -133,9 +164,12 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 	logger.Info("Reconciling projects", zap.Int("count", len(projects)))
 
 	for _, p := range projects {
-		if p.Status.Phase == v1.ProjectPhaseTerminating {
+		switch p.Status.Phase {
+		case v1.ProjectPhaseTerminating:
 			terminateOne(ctx, client, runtime, p, logger)
-		} else {
+		case v1.ProjectPhaseRunning:
+			healthCheckOne(ctx, client, runtime, p, logger)
+		default:
 			reconcileOne(ctx, client, runtime, p, logger)
 		}
 	}
@@ -239,4 +273,75 @@ func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, p
 	); err != nil {
 		log.Warn("Failed to update project status to Terminated", zap.Error(err))
 	}
+}
+
+// healthCheckOne inspects a Running project's containers and reports Failed if
+// any container has crashed, exited, or is missing.  It does NOT attempt to
+// restart containers — it only reports the observed state.  A future
+// ProjectRecoveryController will handle automated recovery.
+func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime, p *v1.Project, logger *zap.Logger) {
+	log := logger.With(zap.String("project", p.Name))
+
+	states, err := runtime.InspectProject(ctx, p)
+	if err != nil {
+		log.Warn("Failed to inspect project containers", zap.Error(err))
+		_ = client.UpdateProjectStatus(ctx, p.Name,
+			v1.ProjectPhaseFailed,
+			"InspectError",
+			err.Error(),
+		)
+		return
+	}
+
+	// Check for containers that exited with a non-zero exit code (crash).
+	var crashedSvcs []string
+	for _, s := range states {
+		if s.Status == "exited" && s.ExitCode != 0 {
+			crashedSvcs = append(crashedSvcs, fmt.Sprintf("%s(exit=%d)", s.ServiceName, s.ExitCode))
+		}
+	}
+	if len(crashedSvcs) > 0 {
+		msg := "Containers crashed: " + strings.Join(crashedSvcs, ", ")
+		log.Warn("Project has crashed containers", zap.String("detail", msg))
+		_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "ContainerCrashed", msg)
+		return
+	}
+
+	// Check for missing containers (fewer than expected).
+	if len(states) < len(p.Spec.Services) {
+		// Build the list of services that have containers.
+		have := make(map[string]bool, len(states))
+		for _, s := range states {
+			have[s.ServiceName] = true
+		}
+		var missingSvcs []string
+		for _, svc := range p.Spec.Services {
+			if !have[svc.Name] {
+				missingSvcs = append(missingSvcs, svc.Name)
+			}
+		}
+		msg := fmt.Sprintf("Missing containers for services: %s (expected %d, found %d)",
+			strings.Join(missingSvcs, ", "), len(p.Spec.Services), len(states))
+		log.Warn("Project has missing containers", zap.String("detail", msg))
+		_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "ContainerMissing", msg)
+		return
+	}
+
+	// Check for containers that exited cleanly (exit code 0) — ambiguous but
+	// treated as Failed for safety. The user can investigate.
+	var exitedSvcs []string
+	for _, s := range states {
+		if s.Status == "exited" && s.ExitCode == 0 {
+			exitedSvcs = append(exitedSvcs, fmt.Sprintf("%s(exit=0)", s.ServiceName))
+		}
+	}
+	if len(exitedSvcs) > 0 {
+		msg := "Containers exited cleanly: " + strings.Join(exitedSvcs, ", ")
+		log.Warn("Project has exited containers", zap.String("detail", msg))
+		_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "ContainerExited", msg)
+		return
+	}
+
+	// All containers are running — healthy, nothing to do.
+	log.Debug("All containers healthy, nothing to do")
 }
