@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -187,10 +188,9 @@ func handleConnection(ctx context.Context, conn net.Conn, agentAddr, project, se
 	wsConn, resp, err := dialer.DialContext(ctx, wsURL.String(), nil)
 	if err != nil {
 		if resp != nil {
-			// Read error body for a more descriptive message.
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			fmt.Fprintf(os.Stderr, "WebSocket dial failed (%s): %s\n", resp.Status, strings.TrimSpace(string(body)))
+			fmt.Fprintf(os.Stderr, "Error: %s\n", extractProblemDetail(body, resp.Status))
 		} else {
 			fmt.Fprintf(os.Stderr, "WebSocket dial failed: %v\n", err)
 		}
@@ -242,4 +242,19 @@ func handleConnection(ctx context.Context, conn net.Conn, agentAddr, project, se
 	<-done
 
 	fmt.Fprintf(os.Stderr, "Connection from %s closed\n", conn.RemoteAddr())
+}
+
+// extractProblemDetail attempts to parse an RFC 7807 problem+json body and
+// return the human-readable detail field. Falls back to the raw body if
+// parsing fails.
+func extractProblemDetail(body []byte, httpStatus string) string {
+	var p struct {
+		Detail string `json:"detail"`
+		Title  string `json:"title"`
+	}
+	if err := json.Unmarshal(body, &p); err == nil && p.Detail != "" {
+		return p.Detail
+	}
+	// Fallback: return raw body with HTTP status.
+	return fmt.Sprintf("%s: %s", httpStatus, strings.TrimSpace(string(body)))
 }

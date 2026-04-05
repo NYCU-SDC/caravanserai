@@ -7,6 +7,7 @@ package forward
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,9 +15,53 @@ import (
 
 	"NYCU-SDC/caravanserai/internal/agent/docker"
 
+	handlerutil "github.com/NYCU-SDC/summer/pkg/handler"
+	"github.com/NYCU-SDC/summer/pkg/problem"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )
+
+// Sentinel errors for container-level problems. These are mapped to HTTP
+// status codes by NewProblemMapping.
+var (
+	// ErrContainerNotFound indicates the requested container does not exist.
+	ErrContainerNotFound = errors.New("container not found")
+	// ErrContainerNotRunning indicates the container exists but is stopped.
+	ErrContainerNotRunning = errors.New("container not running")
+	// ErrPortUnreachable indicates the container is running but the target
+	// port could not be dialled.
+	ErrPortUnreachable = errors.New("port unreachable")
+)
+
+// NewProblemMapping returns the error→Problem mapping for the forward handler.
+// Pass the result to problem.NewWithMapping.
+func NewProblemMapping() func(error) problem.Problem {
+	return func(err error) problem.Problem {
+		switch {
+		case errors.Is(err, ErrContainerNotFound):
+			return problem.NewNotFoundProblem(err.Error())
+
+		case errors.Is(err, ErrContainerNotRunning):
+			return problem.Problem{
+				Title:  "Service Unavailable",
+				Status: http.StatusServiceUnavailable,
+				Type:   "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503",
+				Detail: err.Error(),
+			}
+
+		case errors.Is(err, ErrPortUnreachable):
+			return problem.Problem{
+				Title:  "Bad Gateway",
+				Status: http.StatusBadGateway,
+				Type:   "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/502",
+				Detail: err.Error(),
+			}
+
+		default:
+			return problem.Problem{} // fall through to summer built-in (400/500)
+		}
+	}
+}
 
 // ContainerInfo holds the information needed to connect to a container's port.
 type ContainerInfo struct {
@@ -36,16 +81,18 @@ type ContainerInspector interface {
 
 // Handler serves the WebSocket port-forward tunnel endpoint.
 type Handler struct {
-	logger    *zap.Logger
-	inspector ContainerInspector
-	upgrader  websocket.Upgrader
+	logger        *zap.Logger
+	inspector     ContainerInspector
+	problemWriter *problem.HttpWriter
+	upgrader      websocket.Upgrader
 }
 
 // NewHandler creates a Handler.
-func NewHandler(logger *zap.Logger, inspector ContainerInspector) *Handler {
+func NewHandler(logger *zap.Logger, inspector ContainerInspector, pw *problem.HttpWriter) *Handler {
 	return &Handler{
-		logger:    logger,
-		inspector: inspector,
+		logger:        logger,
+		inspector:     inspector,
+		problemWriter: pw,
 		upgrader: websocket.Upgrader{
 			// Allow all origins — the Agent is not a public-facing server.
 			CheckOrigin: func(r *http.Request) bool { return true },
@@ -71,19 +118,22 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request) {
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
-		http.Error(w, fmt.Sprintf("invalid port: %s", portStr), http.StatusBadRequest)
+		h.problemWriter.WriteError(r.Context(), w,
+			handlerutil.NewValidationError("port", portStr, fmt.Sprintf("invalid port: %s", portStr)), log)
 		return
 	}
 
 	info, err := h.inspector.InspectContainer(r.Context(), project, service)
 	if err != nil {
 		log.Warn("Container inspect failed", zap.Error(err))
-		http.Error(w, fmt.Sprintf("container %s-%s not found", project, service), http.StatusNotFound)
+		h.problemWriter.WriteError(r.Context(), w,
+			fmt.Errorf("container %s-%s: %w", project, service, ErrContainerNotFound), log)
 		return
 	}
 
 	if !info.Running {
-		http.Error(w, fmt.Sprintf("container %s-%s is not running", project, service), http.StatusConflict)
+		h.problemWriter.WriteError(r.Context(), w,
+			fmt.Errorf("container %s-%s: %w", project, service, ErrContainerNotRunning), log)
 		return
 	}
 
@@ -93,7 +143,8 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request) {
 	tcpConn, err := net.Dial("tcp", target)
 	if err != nil {
 		log.Warn("Failed to dial container port", zap.String("target", target), zap.Error(err))
-		http.Error(w, fmt.Sprintf("cannot reach %s: %v", target, err), http.StatusBadGateway)
+		h.problemWriter.WriteError(r.Context(), w,
+			fmt.Errorf("cannot reach %s: %v: %w", target, err, ErrPortUnreachable), log)
 		return
 	}
 

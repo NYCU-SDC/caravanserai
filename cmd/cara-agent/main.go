@@ -19,6 +19,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/config"
 	"NYCU-SDC/caravanserai/internal/trace"
 
+	"github.com/NYCU-SDC/summer/pkg/problem"
 	"go.uber.org/zap"
 )
 
@@ -99,7 +100,8 @@ func main() {
 	// ── Agent HTTP server ────────────────────────────────────────────────
 	apiSrv := agentapiserver.New(logger)
 	inspector := forwardhandler.NewDockerInspector(dockerRuntime)
-	apiSrv.Register(forwardhandler.NewHandler(logger, inspector))
+	problemWriter := problem.NewWithMapping(forwardhandler.NewProblemMapping())
+	apiSrv.Register(forwardhandler.NewHandler(logger, inspector, problemWriter))
 
 	httpServer := &http.Server{
 		Addr:    net.JoinHostPort("0.0.0.0", cfg.ListenPort),
