@@ -321,10 +321,16 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, projectName string,
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-// ContainerInspectRaw returns the running state and bridge-network IP of a
-// single container identified by name.  It is used by the port-forward handler
-// to locate a container's address without needing the full Runtime interface.
-func (r *DockerRuntime) ContainerInspectRaw(ctx context.Context, containerName string) (ContainerInspectResult, error) {
+// InspectContainer returns the running state and bridge-network IP of the
+// container for the given project/service pair.  It satisfies the narrow
+// ContainerInspector interface consumed by the forward handler.
+func (r *DockerRuntime) InspectContainer(ctx context.Context, project, service string) (ContainerInspectResult, error) {
+	return r.containerInspectRaw(ctx, ContainerName(project, service))
+}
+
+// containerInspectRaw returns the running state and bridge-network IP of a
+// single container identified by name.
+func (r *DockerRuntime) containerInspectRaw(ctx context.Context, containerName string) (ContainerInspectResult, error) {
 	info, err := r.client.ContainerInspect(ctx, containerName)
 	if err != nil {
 		return ContainerInspectResult{}, fmt.Errorf("inspect container %q: %w", containerName, err)

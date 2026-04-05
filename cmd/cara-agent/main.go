@@ -99,9 +99,8 @@ func main() {
 
 	// ── Agent HTTP server ────────────────────────────────────────────────
 	apiSrv := agentapiserver.New(logger)
-	inspector := forwardhandler.NewDockerInspector(dockerRuntime)
 	problemWriter := problem.NewWithMapping(forwardhandler.NewProblemMapping())
-	apiSrv.Register(forwardhandler.NewHandler(logger, inspector, problemWriter))
+	apiSrv.Register(forwardhandler.NewHandler(logger, dockerRuntime, problemWriter))
 
 	httpServer := &http.Server{
 		Addr:    net.JoinHostPort("0.0.0.0", cfg.ListenPort),

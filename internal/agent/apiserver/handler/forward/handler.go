@@ -63,20 +63,12 @@ func NewProblemMapping() func(error) problem.Problem {
 	}
 }
 
-// ContainerInfo holds the information needed to connect to a container's port.
-type ContainerInfo struct {
-	// IP is the container's IP on the project bridge network.
-	IP string
-	// Running indicates whether the container is currently running.
-	Running bool
-}
-
 // ContainerInspector is the narrow interface the forward handler needs to
 // locate a container and obtain its network address.
 type ContainerInspector interface {
 	// InspectContainer returns the container's network info for the given
 	// project and service. Returns an error if the container does not exist.
-	InspectContainer(ctx context.Context, project, service string) (ContainerInfo, error)
+	InspectContainer(ctx context.Context, project, service string) (docker.ContainerInspectResult, error)
 }
 
 // Handler serves the WebSocket port-forward tunnel endpoint.
@@ -139,7 +131,7 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request) {
 
 	// Dial the container's port on the bridge network before upgrading so we
 	// can return a proper HTTP error if the port is unreachable.
-	target := net.JoinHostPort(info.IP, portStr)
+	target := net.JoinHostPort(info.NetworkIP, portStr)
 	tcpConn, err := net.Dial("tcp", target)
 	if err != nil {
 		log.Warn("Failed to dial container port", zap.String("target", target), zap.Error(err))
@@ -204,30 +196,5 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request) {
 	log.Info("Port-forward tunnel closed", zap.String("target", target))
 }
 
-// DockerInspector adapts docker.DockerRuntime to the ContainerInspector
-// interface used by the forward handler.
-type DockerInspector struct {
-	runtime *docker.DockerRuntime
-}
-
-// NewDockerInspector creates a ContainerInspector backed by the Docker API.
-func NewDockerInspector(runtime *docker.DockerRuntime) *DockerInspector {
-	return &DockerInspector{runtime: runtime}
-}
-
-// InspectContainer implements ContainerInspector.
-func (d *DockerInspector) InspectContainer(ctx context.Context, project, service string) (ContainerInfo, error) {
-	containerName := docker.ContainerName(project, service)
-	result, err := d.runtime.ContainerInspectRaw(ctx, containerName)
-	if err != nil {
-		return ContainerInfo{}, err
-	}
-
-	return ContainerInfo{
-		IP:      result.NetworkIP,
-		Running: result.Running,
-	}, nil
-}
-
-// Ensure DockerInspector implements ContainerInspector at compile time.
-var _ ContainerInspector = (*DockerInspector)(nil)
+// Ensure DockerRuntime implements ContainerInspector at compile time.
+var _ ContainerInspector = (*docker.DockerRuntime)(nil)
