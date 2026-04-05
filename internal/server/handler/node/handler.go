@@ -66,6 +66,11 @@ func (h *Handler) createNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := v1.ValidateName(node.Name); err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Initialise status to NotReady on creation; the Agent will push heartbeats
 	// to transition it to Ready once the connection is confirmed.
 	if node.Status.State == "" {
@@ -185,6 +190,13 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 			return
 		}
+	}
+
+	// Validate state before persisting.
+	if req.State != "" && !req.State.IsValid() {
+		h.writeError(w, http.StatusBadRequest,
+			"invalid state "+string(req.State)+": must be one of Ready, NotReady, Draining")
+		return
 	}
 
 	// Merge incoming fields into existing status.
