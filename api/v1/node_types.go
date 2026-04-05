@@ -1,6 +1,10 @@
 package v1
 
-import "time"
+import (
+	"time"
+
+	"github.com/invopop/jsonschema"
+)
 
 // NetworkMode describes the connectivity mode reported by the Tailscale/Headscale
 // overlay network.
@@ -10,6 +14,15 @@ const (
 	NetworkModeDirect NetworkMode = "Direct"
 	NetworkModeDERP   NetworkMode = "DERP"
 )
+
+// JSONSchema returns a JSON Schema with the allowed NetworkMode values.
+func (NetworkMode) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Enum:        []any{string(NetworkModeDirect), string(NetworkModeDERP)},
+		Description: "Connectivity mode reported by the Tailscale/Headscale overlay network.",
+	}
+}
 
 // NodeNetworkStatus reports the overlay-network state of a Node.
 type NodeNetworkStatus struct {
@@ -47,6 +60,15 @@ const (
 	NodeStateNotReady NodeState = "NotReady"
 	NodeStateDraining NodeState = "Draining"
 )
+
+// JSONSchema returns a JSON Schema with the allowed NodeState values.
+func (NodeState) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Enum:        []any{string(NodeStateReady), string(NodeStateNotReady), string(NodeStateDraining)},
+		Description: "Top-level health summary computed by the Controller Manager.",
+	}
+}
 
 // IsValid reports whether s is one of the recognised NodeState constants.
 func (s NodeState) IsValid() bool {
@@ -116,6 +138,11 @@ type Node struct {
 	ObjectMeta `json:"metadata"   yaml:"metadata"`
 	Spec       NodeSpec   `json:"spec,omitempty"   yaml:"spec,omitempty"`
 	Status     NodeStatus `json:"status,omitempty" yaml:"status,omitempty"`
+}
+
+// JSONSchemaExtend sets the top-level title for the Node schema.
+func (Node) JSONSchemaExtend(s *jsonschema.Schema) {
+	s.Title = "Node"
 }
 
 // NodeList is a collection of Node objects returned by list operations.

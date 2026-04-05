@@ -1,6 +1,10 @@
 package v1
 
-import "time"
+import (
+	"time"
+
+	"github.com/invopop/jsonschema"
+)
 
 // ProjectPhase is the lifecycle state of a Project as maintained by the
 // Controller Manager.
@@ -44,6 +48,22 @@ func (p ProjectPhase) IsValid() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// JSONSchema returns a JSON Schema with the allowed ProjectPhase values.
+func (ProjectPhase) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type: "string",
+		Enum: []any{
+			string(ProjectPhasePending),
+			string(ProjectPhaseScheduled),
+			string(ProjectPhaseRunning),
+			string(ProjectPhaseFailed),
+			string(ProjectPhaseTerminating),
+			string(ProjectPhaseTerminated),
+		},
+		Description: "Lifecycle state of a Project as maintained by the Controller Manager.",
 	}
 }
 
@@ -92,6 +112,15 @@ const (
 	//VolumeTypeHostPath VolumeType = "HostPath"
 )
 
+// JSONSchema returns a JSON Schema with the allowed VolumeType values.
+func (VolumeType) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Enum:        []any{string(VolumeTypeEphemeral)},
+		Description: "Governs the lifecycle and backup behaviour of a Volume.",
+	}
+}
+
 // VolumeDef describes a named volume used by one or more services.
 type VolumeDef struct {
 	Name string `json:"name" yaml:"name"`
@@ -110,6 +139,15 @@ const (
 
 	IngressScopeInternal IngressScope = "Internal"
 )
+
+// JSONSchema returns a JSON Schema with the allowed IngressScope values.
+func (IngressScope) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Enum:        []any{string(IngressScopeInternal)},
+		Description: "Controls whether a route is exposed to the public internet or only to the Headscale overlay network.",
+	}
+}
 
 // IngressTarget is the backend service and port for an ingress rule.
 type IngressTarget struct {
@@ -184,6 +222,11 @@ type Project struct {
 	ObjectMeta `json:"metadata"   yaml:"metadata"`
 	Spec       ProjectSpec   `json:"spec,omitempty"   yaml:"spec,omitempty"`
 	Status     ProjectStatus `json:"status,omitempty" yaml:"status,omitempty"`
+}
+
+// JSONSchemaExtend sets the top-level title for the Project schema.
+func (Project) JSONSchemaExtend(s *jsonschema.Schema) {
+	s.Title = "Project"
 }
 
 // ProjectList is a collection of Project objects returned by list operations.

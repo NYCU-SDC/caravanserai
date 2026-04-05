@@ -7,8 +7,11 @@ const APIVersion = "caravanserai/v1"
 
 // TypeMeta holds the Kind and APIVersion fields present in every resource.
 type TypeMeta struct {
+	// APIVersion identifies the versioned schema this resource conforms to, e.g. "caravanserai/v1".
 	APIVersion string `json:"apiVersion" yaml:"apiVersion"`
-	Kind       string `json:"kind"       yaml:"kind"`
+
+	// Kind is the resource type, e.g. "Node", "Project".
+	Kind string `json:"kind" yaml:"kind"`
 }
 
 // ObjectMeta holds identity and classification metadata common to all resources.
@@ -29,6 +32,5 @@ type ObjectMeta struct {
 	UpdatedAt time.Time `json:"updatedAt,omitempty" yaml:"updatedAt,omitempty"`
 }
 
-// ResourceList is a named set of resource quantities, e.g. cpu, memory, disk.
-// Values follow the same string format as Kubernetes: "500m", "4Gi", "100Mbps".
+// ResourceList is a named set of resource quantities — cpu, memory, disk — whose values follow the same string format as Kubernetes: "500m", "4Gi", "100Mbps".
 type ResourceList map[string]string
