@@ -20,11 +20,13 @@ import (
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/server/apiserver"
+	"NYCU-SDC/caravanserai/internal/server/handler"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
 	projecthandler "NYCU-SDC/caravanserai/internal/server/handler/project"
 	pgstore "NYCU-SDC/caravanserai/internal/store/postgres"
 
 	"github.com/NYCU-SDC/summer/pkg/middleware"
+	"github.com/NYCU-SDC/summer/pkg/problem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -38,6 +40,15 @@ var verbose = flag.Bool("verbose", false, "enable verbose infrastructure logging
 var suite struct {
 	serverURL string
 	client    *http.Client
+}
+
+// problemResponse is the RFC 9457 Problem Details structure returned by
+// the summer problem.HttpWriter. Used in test assertions.
+type problemResponse struct {
+	Title  string `json:"title"`
+	Status int    `json:"status"`
+	Detail string `json:"detail"`
+	Type   string `json:"type"`
 }
 
 // TestMain starts a PostgreSQL container, runs migrations via pgstore.New,
@@ -95,8 +106,10 @@ func run(m *testing.M) int {
 	// Assemble apiserver with a minimal middleware set (no tracing overhead).
 	basicMiddleware := middleware.NewSet()
 	apiSrv := apiserver.New(logger, basicMiddleware)
-	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore))
-	apiSrv.Register(projecthandler.NewHandler(logger, pgStore))
+
+	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
+	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, problemWriter))
+	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter))
 
 	ts := httptest.NewServer(apiSrv.Handler())
 	defer ts.Close()
@@ -231,15 +244,14 @@ func TestNodeHeartbeatStateValidation(t *testing.T) {
 			state:      "CompletelyBogusState",
 			wantStatus: http.StatusBadRequest,
 			validate: func(t *testing.T, resp *http.Response) {
-				var errResp struct {
-					Error string `json:"error"`
-				}
-				require.NoError(t, json.NewDecoder(resp.Body).Decode(&errResp))
+				var p problemResponse
+				require.NoError(t, json.NewDecoder(resp.Body).Decode(&p))
 
-				assert.Contains(t, errResp.Error, "CompletelyBogusState",
-					"error message should mention the invalid value")
-				assert.Contains(t, errResp.Error, "Ready",
-					"error message should list valid states")
+				assert.Equal(t, http.StatusBadRequest, p.Status, "problem status must be 400")
+				assert.Contains(t, p.Detail, "CompletelyBogusState",
+					"detail should mention the invalid value")
+				assert.Contains(t, p.Detail, "Ready",
+					"detail should list valid states")
 			},
 		},
 		{
@@ -247,13 +259,12 @@ func TestNodeHeartbeatStateValidation(t *testing.T) {
 			state:      "SomeOtherState",
 			wantStatus: http.StatusBadRequest,
 			validate: func(t *testing.T, resp *http.Response) {
-				var errResp struct {
-					Error string `json:"error"`
-				}
-				require.NoError(t, json.NewDecoder(resp.Body).Decode(&errResp))
+				var p problemResponse
+				require.NoError(t, json.NewDecoder(resp.Body).Decode(&p))
 
-				assert.Contains(t, errResp.Error, "SomeOtherState",
-					"error message should mention the invalid value")
+				assert.Equal(t, http.StatusBadRequest, p.Status, "problem status must be 400")
+				assert.Contains(t, p.Detail, "SomeOtherState",
+					"detail should mention the invalid value")
 			},
 		},
 		{

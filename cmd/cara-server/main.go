@@ -16,12 +16,14 @@ import (
 	"NYCU-SDC/caravanserai/internal/server/adapter"
 	"NYCU-SDC/caravanserai/internal/server/apiserver"
 	"NYCU-SDC/caravanserai/internal/server/controller"
+	"NYCU-SDC/caravanserai/internal/server/handler"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
 	projecthandler "NYCU-SDC/caravanserai/internal/server/handler/project"
 	pgstore "NYCU-SDC/caravanserai/internal/store/postgres"
 	"NYCU-SDC/caravanserai/internal/trace"
 
 	"github.com/NYCU-SDC/summer/pkg/middleware"
+	"github.com/NYCU-SDC/summer/pkg/problem"
 	"go.uber.org/zap"
 )
 
@@ -99,7 +101,7 @@ func main() {
 	traceMiddleware := trace.NewMiddleware(logger, cfg.Debug)
 
 	basicMiddleware := middleware.NewSet(traceMiddleware.RecoverMiddleware)
-	//basicMiddleware = basicMiddleware.Append(traceMiddleware.TraceMiddleware)
+	basicMiddleware = basicMiddleware.Append(traceMiddleware.TraceMiddleware)
 
 	// ============================================
 	// API Server
@@ -107,8 +109,9 @@ func main() {
 
 	apiSrv := apiserver.New(logger, basicMiddleware)
 
-	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore))
-	apiSrv.Register(projecthandler.NewHandler(logger, pgStore))
+	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
+	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, problemWriter))
+	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter))
 
 	// ============================================
 	// Controller Manager

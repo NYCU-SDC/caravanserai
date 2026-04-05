@@ -47,15 +47,14 @@ func TestProjectStatusPatch(t *testing.T) {
 			phase:      "ClearlyBogusPhase",
 			wantStatus: http.StatusBadRequest,
 			validate: func(t *testing.T, resp *http.Response) {
-				var errResp struct {
-					Error string `json:"error"`
-				}
-				require.NoError(t, json.NewDecoder(resp.Body).Decode(&errResp))
+				var p problemResponse
+				require.NoError(t, json.NewDecoder(resp.Body).Decode(&p))
 
-				assert.Contains(t, errResp.Error, "ClearlyBogusPhase",
-					"error message should mention the invalid value")
-				assert.Contains(t, errResp.Error, "Pending",
-					"error message should list valid phases")
+				assert.Equal(t, http.StatusBadRequest, p.Status, "problem status must be 400")
+				assert.Contains(t, p.Detail, "ClearlyBogusPhase",
+					"detail should mention the invalid value")
+				assert.Contains(t, p.Detail, "Pending",
+					"detail should list valid phases")
 			},
 		},
 		{
@@ -63,13 +62,12 @@ func TestProjectStatusPatch(t *testing.T) {
 			phase:      "NotAPhase",
 			wantStatus: http.StatusBadRequest,
 			validate: func(t *testing.T, resp *http.Response) {
-				var errResp struct {
-					Error string `json:"error"`
-				}
-				require.NoError(t, json.NewDecoder(resp.Body).Decode(&errResp))
+				var p problemResponse
+				require.NoError(t, json.NewDecoder(resp.Body).Decode(&p))
 
-				assert.Contains(t, errResp.Error, "NotAPhase",
-					"error message should mention the invalid value")
+				assert.Equal(t, http.StatusBadRequest, p.Status, "problem status must be 400")
+				assert.Contains(t, p.Detail, "NotAPhase",
+					"detail should mention the invalid value")
 			},
 		},
 		{
