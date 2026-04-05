@@ -40,6 +40,7 @@ func init() {
 	rootCmd.AddCommand(cli.NewGetCmd())
 	rootCmd.AddCommand(cli.NewDeleteCmd())
 	rootCmd.AddCommand(cli.NewApplyCmd())
+	rootCmd.AddCommand(cli.NewPortForwardCmd())
 }
 
 func main() {

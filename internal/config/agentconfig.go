@@ -23,6 +23,10 @@ type AgentConfig struct {
 	// containers.  Defaults to the Unix socket path on Linux/macOS.
 	// Can be overridden with a tcp:// URL for remote Docker daemons.
 	DockerHost string `yaml:"docker_host" envconfig:"DOCKER_HOST"`
+	// ListenPort is the TCP port the Agent's HTTP server listens on.
+	// The server exposes the port-forward WebSocket endpoint and a health
+	// probe.  Defaults to "9090".
+	ListenPort string `yaml:"listen_port" envconfig:"AGENT_LISTEN_PORT"`
 }
 
 // LoadAgent reads cara-agent config from file → env → flags.
@@ -37,6 +41,7 @@ func LoadAgent() (AgentConfig, *LogBuffer) {
 		NodeName:          hostname,
 		HeartbeatInterval: 30 * time.Second,
 		DockerHost:        "unix:///var/run/docker.sock",
+		ListenPort:        "9090",
 	}
 
 	var err error
@@ -93,6 +98,7 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 		OtelCollectorUrl: os.Getenv("OTEL_COLLECTOR_URL"),
 		NodeName:         os.Getenv("NODE_NAME"),
 		DockerHost:       os.Getenv("DOCKER_HOST"),
+		ListenPort:       os.Getenv("AGENT_LISTEN_PORT"),
 	}
 
 	if raw := os.Getenv("HEARTBEAT_INTERVAL"); raw != "" {
@@ -114,6 +120,7 @@ func AgentFromFlags(cfg *AgentConfig) (*AgentConfig, error) {
 	flag.StringVar(&flagConfig.NodeName, "node-name", "", "node name to register with the control plane (default: hostname)")
 	flag.DurationVar(&flagConfig.HeartbeatInterval, "heartbeat-interval", 0, "interval between heartbeats (default: 30s)")
 	flag.StringVar(&flagConfig.DockerHost, "docker-host", "", "Docker daemon endpoint (default: unix:///var/run/docker.sock)")
+	flag.StringVar(&flagConfig.ListenPort, "agent-port", "", "Agent HTTP server port (default: 9090)")
 	flag.Parse()
 	return configutil.Merge[AgentConfig](cfg, flagConfig)
 }

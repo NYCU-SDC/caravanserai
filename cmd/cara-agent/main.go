@@ -1,17 +1,23 @@
 package main
 
 import (
+	"context"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
 	"NYCU-SDC/caravanserai/internal/agent"
+	agentapiserver "NYCU-SDC/caravanserai/internal/agent/apiserver"
+	forwardhandler "NYCU-SDC/caravanserai/internal/agent/apiserver/handler/forward"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
 	"NYCU-SDC/caravanserai/internal/appinit"
 	"NYCU-SDC/caravanserai/internal/config"
 	"NYCU-SDC/caravanserai/internal/trace"
-	"context"
-	"log"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
 	"go.uber.org/zap"
 )
@@ -82,12 +88,42 @@ func main() {
 		}
 	}()
 
-	go agent.Run(ctx, agentClient, dockerRuntime, cfg.HeartbeatInterval, logger)
+	// Parse agent port for heartbeat reporting.
+	agentPort, err := strconv.Atoi(cfg.ListenPort)
+	if err != nil {
+		logger.Fatal("Invalid agent port", zap.String("port", cfg.ListenPort), zap.Error(err))
+	}
+
+	go agent.Run(ctx, agentClient, dockerRuntime, cfg.HeartbeatInterval, agentPort, logger)
+
+	// ── Agent HTTP server ────────────────────────────────────────────────
+	apiSrv := agentapiserver.New(logger)
+	inspector := forwardhandler.NewDockerInspector(dockerRuntime)
+	apiSrv.Register(forwardhandler.NewHandler(logger, inspector))
+
+	httpServer := &http.Server{
+		Addr:    net.JoinHostPort("0.0.0.0", cfg.ListenPort),
+		Handler: apiSrv.Handler(),
+	}
+
+	go func() {
+		logger.Info("Agent HTTP server listening", zap.String("addr", httpServer.Addr))
+		if srvErr := httpServer.ListenAndServe(); srvErr != nil && srvErr != http.ErrServerClosed {
+			logger.Fatal("Agent HTTP server failed", zap.Error(srvErr))
+		}
+	}()
 
 	logger.Info("Agent running, waiting for shutdown signal...")
 
 	<-ctx.Done()
 	logger.Info("Shutting down cara-agent...")
+
+	// Gracefully shut down the HTTP server.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error("Agent HTTP server forced to shutdown", zap.Error(err))
+	}
 
 	otelCtx, otelCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer otelCancel()
