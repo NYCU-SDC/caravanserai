@@ -32,6 +32,21 @@ const (
 	ProjectPhaseTerminated ProjectPhase = "Terminated"
 )
 
+// IsValid reports whether p is one of the recognised ProjectPhase constants.
+func (p ProjectPhase) IsValid() bool {
+	switch p {
+	case ProjectPhasePending,
+		ProjectPhaseScheduled,
+		ProjectPhaseRunning,
+		ProjectPhaseFailed,
+		ProjectPhaseTerminating,
+		ProjectPhaseTerminated:
+		return true
+	default:
+		return false
+	}
+}
+
 // EnvVar is a single environment variable to inject into a container.
 type EnvVar struct {
 	Name  string `json:"name"            yaml:"name"`

@@ -20,6 +20,7 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/server/apiserver"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
+	projecthandler "NYCU-SDC/caravanserai/internal/server/handler/project"
 	pgstore "NYCU-SDC/caravanserai/internal/store/postgres"
 
 	"github.com/NYCU-SDC/summer/pkg/middleware"
@@ -94,6 +95,7 @@ func run(m *testing.M) int {
 	basicMiddleware := middleware.NewSet()
 	apiSrv := apiserver.New(logger, basicMiddleware)
 	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore))
+	apiSrv.Register(projecthandler.NewHandler(logger, pgStore))
 
 	ts := httptest.NewServer(apiSrv.Handler())
 	defer ts.Close()
