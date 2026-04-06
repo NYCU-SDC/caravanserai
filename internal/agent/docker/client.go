@@ -344,6 +344,56 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, projectName string,
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// ContainerLogResult holds a log stream from a Docker container together with
+// its TTY flag, which the caller needs to decide whether to demultiplex the
+// stream (non-TTY containers use Docker's 8-byte header framing).
+type ContainerLogResult struct {
+	// Reader is the raw log stream.  The caller must close it.
+	Reader io.ReadCloser
+	// TTY is true when the container was started with a pseudo-terminal.
+	// When false the stream is multiplexed (stdout + stderr with 8-byte
+	// headers) and must be processed with stdcopy.StdCopy.
+	TTY bool
+}
+
+// ContainerLogs returns a streaming reader of the container logs for the
+// given project/service pair.  It satisfies the narrow ContainerLogger
+// interface consumed by the logs handler.
+//
+// If the container does not exist an error wrapping isNotFound is returned.
+// If the container exists but is not running an error is still returned so
+// the handler can map it to the appropriate HTTP status.
+func (r *DockerRuntime) ContainerLogs(ctx context.Context, project, service string, follow bool, tail string, timestamps bool) (ContainerLogResult, error) {
+	cName := ContainerName(project, service)
+
+	// Inspect to verify the container exists and check its TTY flag.
+	info, err := r.client.ContainerInspect(ctx, cName)
+	if err != nil {
+		if isNotFound(err) {
+			return ContainerLogResult{}, fmt.Errorf("container %q: %w", cName, err)
+		}
+		return ContainerLogResult{}, fmt.Errorf("inspect container %q: %w", cName, err)
+	}
+
+	if !info.State.Running && follow {
+		// For follow mode, the container must be running.
+		return ContainerLogResult{}, fmt.Errorf("container %q is not running", cName)
+	}
+
+	rc, err := r.client.ContainerLogs(ctx, cName, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     follow,
+		Tail:       tail,
+		Timestamps: timestamps,
+	})
+	if err != nil {
+		return ContainerLogResult{}, fmt.Errorf("container logs %q: %w", cName, err)
+	}
+
+	return ContainerLogResult{Reader: rc, TTY: info.Config.Tty}, nil
+}
+
 // InspectContainer returns the running state and bridge-network IP of the
 // container for the given project/service pair.  It satisfies the narrow
 // ContainerInspector interface consumed by the forward handler.
