@@ -39,6 +39,9 @@ Examples:
   # Forward local port 15432 to remote port 5432
   caractrl port-forward my-app/db 15432:5432
 
+  # Specify Agent by node name (resolved via server API)
+  caractrl port-forward my-app/db 5432 --node main
+
   # Specify Agent address explicitly
   caractrl port-forward my-app/db 5432 --node 192.168.1.100:9090`,
 		Args: cobra.ExactArgs(2),
@@ -47,7 +50,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&nodeAddr, "node", "", "Agent address (host:port); auto-resolved from server if omitted")
+	cmd.Flags().StringVar(&nodeAddr, "node", "", "Node name or agent address (host:port); auto-resolved from server if omitted")
 	return cmd
 }
 
@@ -67,13 +70,23 @@ func runPortForward(cmd *cobra.Command, args []string, nodeAddr string) error {
 
 	// Resolve agent address.
 	if nodeAddr == "" {
+		// Auto-resolve from project's nodeRef.
 		serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
 		resolved, resolveErr := resolveAgentAddr(serverURL, project)
 		if resolveErr != nil {
 			return resolveErr
 		}
 		nodeAddr = resolved
+	} else if !strings.Contains(nodeAddr, ":") {
+		// Treat as a node name — resolve via the server API.
+		serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
+		resolved, resolveErr := resolveNodeAddr(serverURL, nodeAddr)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		nodeAddr = resolved
 	}
+	// else: treat as raw host:port
 
 	// Set up signal handling.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -138,6 +151,31 @@ func parsePorts(spec string) (int, int, error) {
 	return local, remote, nil
 }
 
+// resolveNodeAddr queries the cara-server to find the agent address for the
+// given node name.  It returns "host:port" suitable for dialling the agent.
+func resolveNodeAddr(serverURL, nodeName string) (string, error) {
+	client := NewClient(serverURL)
+	ctx := context.Background()
+
+	node, err := client.GetNode(ctx, nodeName)
+	if err != nil {
+		return "", fmt.Errorf("get node %q: %w", nodeName, err)
+	}
+
+	ip := node.Status.Network.IP
+	if ip == "" {
+		return "", fmt.Errorf("node %q has no IP address; use --node host:port to specify the agent address directly", nodeName)
+	}
+
+	agentPort := node.Status.Network.AgentPort
+	if agentPort == 0 {
+		agentPort = 9090 // default
+		fmt.Fprintf(os.Stderr, "Warning: node %q has no agentPort set, defaulting to %d\n", nodeName, agentPort)
+	}
+
+	return net.JoinHostPort(ip, strconv.Itoa(agentPort)), nil
+}
+
 // resolveAgentAddr queries the cara-server to find the agent address for the
 // project's node.
 func resolveAgentAddr(serverURL, project string) (string, error) {
@@ -153,24 +191,8 @@ func resolveAgentAddr(serverURL, project string) (string, error) {
 		return "", fmt.Errorf("project %q has no nodeRef (not scheduled); use --node to specify the agent address", project)
 	}
 
-	// 2. Get the node to find IP and agent port.
-	node, err := client.GetNode(ctx, p.Status.NodeRef)
-	if err != nil {
-		return "", fmt.Errorf("get node %q: %w", p.Status.NodeRef, err)
-	}
-
-	ip := node.Status.Network.IP
-	if ip == "" {
-		return "", fmt.Errorf("node %q has no IP address; use --node to specify the agent address", p.Status.NodeRef)
-	}
-
-	agentPort := node.Status.Network.AgentPort
-	if agentPort == 0 {
-		agentPort = 9090 // default
-		fmt.Fprintf(os.Stderr, "Warning: node %q has no agentPort set, defaulting to %d\n", p.Status.NodeRef, agentPort)
-	}
-
-	return net.JoinHostPort(ip, strconv.Itoa(agentPort)), nil
+	// 2. Resolve the node's agent address.
+	return resolveNodeAddr(serverURL, p.Status.NodeRef)
 }
 
 // handleConnection tunnels a single local TCP connection through a WebSocket

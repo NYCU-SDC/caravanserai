@@ -247,8 +247,22 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 	if req.State != "" {
 		status.State = req.State
 	}
-	if req.Network != (v1.NodeNetworkStatus{}) {
-		status.Network = req.Network
+	// Merge Network field-by-field so that a heartbeat sending only AgentPort
+	// does not clobber a previously-set IP (or vice versa).
+	if req.Network.IP != "" {
+		status.Network.IP = req.Network.IP
+	}
+	if req.Network.DNSName != "" {
+		status.Network.DNSName = req.Network.DNSName
+	}
+	if req.Network.Mode != "" {
+		status.Network.Mode = req.Network.Mode
+	}
+	if req.Network.AgentPort != 0 {
+		status.Network.AgentPort = req.Network.AgentPort
+	}
+	if req.Network.Throughput != (v1.NodeThroughput{}) {
+		status.Network.Throughput = req.Network.Throughput
 	}
 	if len(req.Capacity) > 0 {
 		status.Capacity = req.Capacity

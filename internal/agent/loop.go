@@ -40,7 +40,7 @@ type RouteUpdater interface {
 //
 // If routes is non-nil, the agent will maintain proxy routes for projects that
 // have ingress definitions.
-func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatInterval time.Duration, agentPort int, routes RouteUpdater, logger *zap.Logger) {
+func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatInterval time.Duration, agentPort int, advertiseIP string, routes RouteUpdater, logger *zap.Logger) {
 	const pollInterval = 10 * time.Second
 
 	spec := v1.NodeSpec{
@@ -85,6 +85,7 @@ func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatI
 			status := v1.NodeStatus{
 				State: v1.NodeStateReady,
 				Network: v1.NodeNetworkStatus{
+					IP:        advertiseIP,
 					AgentPort: agentPort,
 				},
 			}

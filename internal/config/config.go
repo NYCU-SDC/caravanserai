@@ -52,5 +52,8 @@ func (c *AgentConfig) Validate() error {
 	if c.ServerURL == "" {
 		return errors.New("server_url is required")
 	}
+	if c.AdvertiseIP == "" {
+		return errors.New("advertise_ip is required (set AGENT_ADVERTISE_IP or --advertise-ip)")
+	}
 	return nil
 }
