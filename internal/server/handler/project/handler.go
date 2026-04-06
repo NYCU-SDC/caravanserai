@@ -100,6 +100,52 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Validate ingress rules (if present).
+	if len(project.Spec.Ingress) > 0 {
+		// Build a set of valid service names for target reference validation.
+		serviceNames := make(map[string]bool, len(project.Spec.Services))
+		for _, svc := range project.Spec.Services {
+			serviceNames[svc.Name] = true
+		}
+
+		ingressNames := make(map[string]bool, len(project.Spec.Ingress))
+		for _, ing := range project.Spec.Ingress {
+			if ing.Name == "" {
+				h.problemWriter.WriteError(traceCtx, w,
+					handlerutil.NewValidationError("spec.ingress[].name", nil, "each ingress entry must have a non-empty name"), logger)
+				return
+			}
+
+			if ingressNames[ing.Name] {
+				h.problemWriter.WriteError(traceCtx, w,
+					handlerutil.NewValidationError("spec.ingress[].name", ing.Name, "duplicate ingress name: "+ing.Name), logger)
+				return
+			}
+			ingressNames[ing.Name] = true
+
+			if !serviceNames[ing.Target.Service] {
+				h.problemWriter.WriteError(traceCtx, w,
+					handlerutil.NewValidationError("spec.ingress[].target.service", ing.Target.Service,
+						"ingress "+ing.Name+": target service "+ing.Target.Service+" does not exist in spec.services"), logger)
+				return
+			}
+
+			if ing.Target.Port <= 0 {
+				h.problemWriter.WriteError(traceCtx, w,
+					handlerutil.NewValidationError("spec.ingress[].target.port", ing.Target.Port,
+						fmt.Sprintf("ingress %s: target port must be greater than 0", ing.Name)), logger)
+				return
+			}
+
+			if ing.Access.Scope != "" && ing.Access.Scope != v1.IngressScopeInternal {
+				h.problemWriter.WriteError(traceCtx, w,
+					handlerutil.NewValidationError("spec.ingress[].access.scope", ing.Access.Scope,
+						"ingress "+ing.Name+": only \"Internal\" scope is supported"), logger)
+				return
+			}
+		}
+	}
+
 	// New projects start in Pending phase; the Scheduler will assign a node.
 	if project.Status.Phase == "" {
 		project.Status.Phase = v1.ProjectPhasePending

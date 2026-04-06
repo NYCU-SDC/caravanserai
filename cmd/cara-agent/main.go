@@ -15,6 +15,7 @@ import (
 	agentapiserver "NYCU-SDC/caravanserai/internal/agent/apiserver"
 	forwardhandler "NYCU-SDC/caravanserai/internal/agent/apiserver/handler/forward"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/proxy"
 	"NYCU-SDC/caravanserai/internal/appinit"
 	"NYCU-SDC/caravanserai/internal/config"
 	"NYCU-SDC/caravanserai/internal/trace"
@@ -95,7 +96,17 @@ func main() {
 		logger.Fatal("Invalid agent port", zap.String("port", cfg.ListenPort), zap.Error(err))
 	}
 
-	go agent.Run(ctx, agentClient, dockerRuntime, cfg.HeartbeatInterval, agentPort, logger)
+	// ── Ingress reverse proxy ───────────────────────────────────────────
+	routeTable := proxy.NewRouteTable(logger)
+	proxyServer := proxy.NewServer(logger, cfg.ProxyListenAddr, routeTable)
+
+	go func() {
+		if proxyErr := proxyServer.ListenAndServe(); proxyErr != nil {
+			logger.Fatal("Proxy server failed", zap.Error(proxyErr))
+		}
+	}()
+
+	go agent.Run(ctx, agentClient, dockerRuntime, cfg.HeartbeatInterval, agentPort, routeTable, logger)
 
 	// ── Agent HTTP server ────────────────────────────────────────────────
 	apiSrv := agentapiserver.New(logger)
@@ -118,6 +129,13 @@ func main() {
 
 	<-ctx.Done()
 	logger.Info("Shutting down cara-agent...")
+
+	// Gracefully shut down the proxy server.
+	proxyShutdownCtx, proxyShutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer proxyShutdownCancel()
+	if err := proxyServer.Shutdown(proxyShutdownCtx); err != nil {
+		logger.Error("Proxy server forced to shutdown", zap.Error(err))
+	}
 
 	// Gracefully shut down the HTTP server.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)

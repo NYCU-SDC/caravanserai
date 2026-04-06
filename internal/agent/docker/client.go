@@ -167,6 +167,29 @@ func (r *DockerRuntime) InspectProject(ctx context.Context, project *v1.Project)
 	return states, nil
 }
 
+// GetContainerIPs implements Runtime.
+func (r *DockerRuntime) GetContainerIPs(ctx context.Context, project *v1.Project) (map[string]string, error) {
+	netName := NetworkName(project.Name)
+	ips := make(map[string]string, len(project.Spec.Services))
+
+	for _, svc := range project.Spec.Services {
+		cName := ContainerName(project.Name, svc.Name)
+		info, err := r.client.ContainerInspect(ctx, cName)
+		if err != nil {
+			if dockerclient.IsErrNotFound(err) {
+				continue // container not created yet
+			}
+			return nil, fmt.Errorf("inspect container %q: %w", cName, err)
+		}
+
+		if net, ok := info.NetworkSettings.Networks[netName]; ok && net.IPAddress != "" {
+			ips[svc.Name] = net.IPAddress
+		}
+	}
+
+	return ips, nil
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
 // ensureNetwork creates the project's bridge network if it does not yet exist.

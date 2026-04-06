@@ -26,3 +26,18 @@ spec:
   volumes:
     - name: mysql-data
       type: Ephemeral
+  ingress:
+    - name: web
+      host: blog.example.com        # FQDN — used as-is
+      target:
+        service: app
+        port: 80
+      access:
+        scope: Internal
+    - name: admin
+      host: admin                    # short name — resolved to admin.wordpress.local
+      target:
+        service: app
+        port: 80
+      access:
+        scope: Internal
