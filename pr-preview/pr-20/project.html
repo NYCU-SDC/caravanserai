@@ -1,0 +1,1235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Project Schema — Caravanserai</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      max-width: 960px;
+      margin: 2rem auto;
+      padding: 0 1.5rem;
+      color: #24292e;
+      line-height: 1.6;
+    }
+    nav { margin-bottom: 1.5rem; font-size: 0.9rem; }
+    nav a { color: #0366d6; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    h1, h2, h3 { margin-top: 1.5em; }
+    h1 { border-bottom: 1px solid #e1e4e8; padding-bottom: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.75rem; text-align: left; }
+    th { background: #f6f8fa; }
+    code { background: #f6f8fa; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+    pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    pre code { background: none; padding: 0; }
+    a { color: #0366d6; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    blockquote { border-left: 4px solid #dfe2e5; margin: 0; padding: 0.5rem 1rem; color: #6a737d; }
+  </style>
+</head>
+<body>
+  <nav><a href="index.html">&larr; Back to index</a></nav>
+<h1>Project Schema</h1>
+<pre><code class="language-txt">project.json
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Abstract</th>
+<th align="left">Extensible</th>
+<th align="left">Status</th>
+<th align="left">Identifiable</th>
+<th align="left">Custom Properties</th>
+<th align="left">Additional Properties</th>
+<th align="left">Access Restrictions</th>
+<th align="left">Defined In</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left">Can be instantiated</td>
+<td align="left">No</td>
+<td align="left">Unknown status</td>
+<td align="left">Unknown identifiability</td>
+<td align="left">Forbidden</td>
+<td align="left">Allowed</td>
+<td align="left">none</td>
+<td align="left"><a href="../../schemas/project.json" title="open original schema">project.json</a></td>
+</tr>
+</tbody></table>
+<h2>Project Type</h2>
+<p>unknown (<a href="project.html">Project</a>)</p>
+<h1>Project Definitions</h1>
+<h2>Definitions group Condition</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/Condition&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#type">type</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-condition-properties-type.html" title="project.json#/$defs/Condition/properties/type">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#status">status</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-condition-properties-status.html" title="project.json#/$defs/Condition/properties/status">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#lastheartbeattime">lastHeartbeatTime</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-condition-properties-lastheartbeattime.html" title="project.json#/$defs/Condition/properties/lastHeartbeatTime">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#lasttransitiontime">lastTransitionTime</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-condition-properties-lasttransitiontime.html" title="project.json#/$defs/Condition/properties/lastTransitionTime">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#reason">reason</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-condition-properties-reason.html" title="project.json#/$defs/Condition/properties/reason">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#message">message</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-condition-properties-message.html" title="project.json#/$defs/Condition/properties/message">Project</a></td>
+</tr>
+</tbody></table>
+<h3>type</h3>
+<p>Type is a machine-readable identifier, e.g. &quot;Ready&quot;, &quot;Phase&quot;.</p>
+<p><code>type</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-condition-properties-type.html" title="project.json#/$defs/Condition/properties/type">Project</a></p>
+</li>
+</ul>
+<h4>type Type</h4>
+<p><code>string</code></p>
+<h3>status</h3>
+<p>Status is one of True, False, Unknown.</p>
+<p><code>status</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-condition-properties-status.html" title="project.json#/$defs/Condition/properties/status">Project</a></p>
+</li>
+</ul>
+<h4>status Type</h4>
+<p><code>string</code></p>
+<h3>lastHeartbeatTime</h3>
+<p>LastHeartbeatTime is when this condition was last sampled.</p>
+<p><code>lastHeartbeatTime</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-condition-properties-lastheartbeattime.html" title="project.json#/$defs/Condition/properties/lastHeartbeatTime">Project</a></p>
+</li>
+</ul>
+<h4>lastHeartbeatTime Type</h4>
+<p><code>string</code></p>
+<h4>lastHeartbeatTime Constraints</h4>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h3>lastTransitionTime</h3>
+<p>LastTransitionTime is when the Status last changed.</p>
+<p><code>lastTransitionTime</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-condition-properties-lasttransitiontime.html" title="project.json#/$defs/Condition/properties/lastTransitionTime">Project</a></p>
+</li>
+</ul>
+<h4>lastTransitionTime Type</h4>
+<p><code>string</code></p>
+<h4>lastTransitionTime Constraints</h4>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h3>reason</h3>
+<p>Reason is a CamelCase word summarising why the condition has this status.</p>
+<p><code>reason</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-condition-properties-reason.html" title="project.json#/$defs/Condition/properties/reason">Project</a></p>
+</li>
+</ul>
+<h4>reason Type</h4>
+<p><code>string</code></p>
+<h3>message</h3>
+<p>Message is a human-readable explanation.</p>
+<p><code>message</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-condition-properties-message.html" title="project.json#/$defs/Condition/properties/message">Project</a></p>
+</li>
+</ul>
+<h4>message Type</h4>
+<p><code>string</code></p>
+<h2>Definitions group EnvVar</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/EnvVar&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#name">name</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-envvar-properties-name.html" title="project.json#/$defs/EnvVar/properties/name">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#value">value</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-envvar-properties-value.html" title="project.json#/$defs/EnvVar/properties/value">Project</a></td>
+</tr>
+</tbody></table>
+<h3>name</h3>
+<p><code>name</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-envvar-properties-name.html" title="project.json#/$defs/EnvVar/properties/name">Project</a></p>
+</li>
+</ul>
+<h4>name Type</h4>
+<p><code>string</code></p>
+<h3>value</h3>
+<p><code>value</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-envvar-properties-value.html" title="project.json#/$defs/EnvVar/properties/value">Project</a></p>
+</li>
+</ul>
+<h4>value Type</h4>
+<p><code>string</code></p>
+<h2>Definitions group IngressAccess</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/IngressAccess&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#scope">scope</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-ingressaccess-properties-scope.html" title="project.json#/$defs/IngressAccess/properties/scope">Project</a></td>
+</tr>
+</tbody></table>
+<h3>scope</h3>
+<p>Controls whether a route is exposed to the public internet or only to the Headscale overlay network.</p>
+<p><code>scope</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-ingressaccess-properties-scope.html" title="project.json#/$defs/IngressAccess/properties/scope">Project</a></p>
+</li>
+</ul>
+<h4>scope Type</h4>
+<p><code>string</code></p>
+<h4>scope Constraints</h4>
+<p><strong>enum</strong>: the value of this property must be equal to one of the following values:</p>
+<table>
+<thead>
+<tr>
+<th align="left">Value</th>
+<th align="left">Explanation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><code>&quot;Internal&quot;</code></td>
+<td align="left"></td>
+</tr>
+</tbody></table>
+<h2>Definitions group IngressDef</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/IngressDef&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#name-1">name</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-ingressdef-properties-name.html" title="project.json#/$defs/IngressDef/properties/name">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#host">host</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-ingressdef-properties-host.html" title="project.json#/$defs/IngressDef/properties/host">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#target">target</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-ingressdef-properties-target.html" title="project.json#/$defs/IngressDef/properties/target">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#access">access</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-ingressaccess.html" title="project.json#/$defs/IngressDef/properties/access">Project</a></td>
+</tr>
+</tbody></table>
+<h3>name</h3>
+<p><code>name</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-ingressdef-properties-name.html" title="project.json#/$defs/IngressDef/properties/name">Project</a></p>
+</li>
+</ul>
+<h4>name Type</h4>
+<p><code>string</code></p>
+<h3>host</h3>
+<p><code>host</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-ingressdef-properties-host.html" title="project.json#/$defs/IngressDef/properties/host">Project</a></p>
+</li>
+</ul>
+<h4>host Type</h4>
+<p><code>string</code></p>
+<h3>target</h3>
+<p>IngressTarget is the backend service and port for an ingress rule.</p>
+<p><code>target</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="project-defs-ingressdef-properties-target.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-ingressdef-properties-target.html" title="project.json#/$defs/IngressDef/properties/target">Project</a></p>
+</li>
+</ul>
+<h4>target Type</h4>
+<p><code>object</code> (<a href="project-defs-ingressdef-properties-target.html">Details</a>)</p>
+<h3>access</h3>
+<p>IngressAccess defines visibility and auth rules for an ingress endpoint.</p>
+<p><code>access</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="project-defs-ingressaccess.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-ingressaccess.html" title="project.json#/$defs/IngressDef/properties/access">Project</a></p>
+</li>
+</ul>
+<h4>access Type</h4>
+<p><code>object</code> (<a href="project-defs-ingressaccess.html">Details</a>)</p>
+<h2>Definitions group IngressScope</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/IngressScope&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+</table>
+<h2>Definitions group IngressTarget</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/IngressTarget&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#service">service</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-ingresstarget-properties-service.html" title="project.json#/$defs/IngressTarget/properties/service">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#port">port</a></td>
+<td align="left"><code>integer</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-ingresstarget-properties-port.html" title="project.json#/$defs/IngressTarget/properties/port">Project</a></td>
+</tr>
+</tbody></table>
+<h3>service</h3>
+<p><code>service</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-ingresstarget-properties-service.html" title="project.json#/$defs/IngressTarget/properties/service">Project</a></p>
+</li>
+</ul>
+<h4>service Type</h4>
+<p><code>string</code></p>
+<h3>port</h3>
+<p><code>port</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>integer</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-ingresstarget-properties-port.html" title="project.json#/$defs/IngressTarget/properties/port">Project</a></p>
+</li>
+</ul>
+<h4>port Type</h4>
+<p><code>integer</code></p>
+<h2>Definitions group ObjectMeta</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/ObjectMeta&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#name-2">name</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-objectmeta-properties-name.html" title="project.json#/$defs/ObjectMeta/properties/name">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#labels">labels</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-objectmeta-properties-labels.html" title="project.json#/$defs/ObjectMeta/properties/labels">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#annotations">annotations</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-objectmeta-properties-annotations.html" title="project.json#/$defs/ObjectMeta/properties/annotations">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#createdat">createdAt</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-objectmeta-properties-createdat.html" title="project.json#/$defs/ObjectMeta/properties/createdAt">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#updatedat">updatedAt</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-objectmeta-properties-updatedat.html" title="project.json#/$defs/ObjectMeta/properties/updatedAt">Project</a></td>
+</tr>
+</tbody></table>
+<h3>name</h3>
+<p>Name is the unique identifier within its Kind namespace.</p>
+<p><code>name</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-objectmeta-properties-name.html" title="project.json#/$defs/ObjectMeta/properties/name">Project</a></p>
+</li>
+</ul>
+<h4>name Type</h4>
+<p><code>string</code></p>
+<h3>labels</h3>
+<p>Labels are arbitrary key/value pairs used for selection and grouping.</p>
+<p><code>labels</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="project-defs-objectmeta-properties-labels.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-objectmeta-properties-labels.html" title="project.json#/$defs/ObjectMeta/properties/labels">Project</a></p>
+</li>
+</ul>
+<h4>labels Type</h4>
+<p><code>object</code> (<a href="project-defs-objectmeta-properties-labels.html">Details</a>)</p>
+<h3>annotations</h3>
+<p>Annotations are non-identifying metadata (e.g. human-readable hints).</p>
+<p><code>annotations</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="project-defs-objectmeta-properties-annotations.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-objectmeta-properties-annotations.html" title="project.json#/$defs/ObjectMeta/properties/annotations">Project</a></p>
+</li>
+</ul>
+<h4>annotations Type</h4>
+<p><code>object</code> (<a href="project-defs-objectmeta-properties-annotations.html">Details</a>)</p>
+<h3>createdAt</h3>
+<p>CreatedAt is set by the server on first write.</p>
+<p><code>createdAt</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-objectmeta-properties-createdat.html" title="project.json#/$defs/ObjectMeta/properties/createdAt">Project</a></p>
+</li>
+</ul>
+<h4>createdAt Type</h4>
+<p><code>string</code></p>
+<h4>createdAt Constraints</h4>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h3>updatedAt</h3>
+<p>UpdatedAt is set by the server on every write.</p>
+<p><code>updatedAt</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-objectmeta-properties-updatedat.html" title="project.json#/$defs/ObjectMeta/properties/updatedAt">Project</a></p>
+</li>
+</ul>
+<h4>updatedAt Type</h4>
+<p><code>string</code></p>
+<h4>updatedAt Constraints</h4>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h2>Definitions group Project</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/Project&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#apiversion">apiVersion</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-project-properties-apiversion.html" title="project.json#/$defs/Project/properties/apiVersion">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#kind">kind</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-project-properties-kind.html" title="project.json#/$defs/Project/properties/kind">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#metadata">metadata</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-objectmeta.html" title="project.json#/$defs/Project/properties/metadata">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#spec">spec</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-project-properties-spec.html" title="project.json#/$defs/Project/properties/spec">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#status-1">status</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-project-properties-status.html" title="project.json#/$defs/Project/properties/status">Project</a></td>
+</tr>
+</tbody></table>
+<h3>apiVersion</h3>
+<p>APIVersion identifies the versioned schema this resource conforms to, e.g. &quot;caravanserai/v1&quot;.</p>
+<p><code>apiVersion</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-project-properties-apiversion.html" title="project.json#/$defs/Project/properties/apiVersion">Project</a></p>
+</li>
+</ul>
+<h4>apiVersion Type</h4>
+<p><code>string</code></p>
+<h3>kind</h3>
+<p>Kind is the resource type, e.g. &quot;Node&quot;, &quot;Project&quot;.</p>
+<p><code>kind</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-project-properties-kind.html" title="project.json#/$defs/Project/properties/kind">Project</a></p>
+</li>
+</ul>
+<h4>kind Type</h4>
+<p><code>string</code></p>
+<h3>metadata</h3>
+<p>ObjectMeta holds identity and classification metadata common to all resources.</p>
+<p><code>metadata</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="project-defs-objectmeta.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-objectmeta.html" title="project.json#/$defs/Project/properties/metadata">Project</a></p>
+</li>
+</ul>
+<h4>metadata Type</h4>
+<p><code>object</code> (<a href="project-defs-objectmeta.html">Details</a>)</p>
+<h3>spec</h3>
+<p>ProjectSpec is the desired state declared by the user.</p>
+<p><code>spec</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="project-defs-project-properties-spec.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-project-properties-spec.html" title="project.json#/$defs/Project/properties/spec">Project</a></p>
+</li>
+</ul>
+<h4>spec Type</h4>
+<p><code>object</code> (<a href="project-defs-project-properties-spec.html">Details</a>)</p>
+<h3>status</h3>
+<p>ProjectStatus is written by the Controller Manager and Agent.</p>
+<p><code>status</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="project-defs-project-properties-status.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-project-properties-status.html" title="project.json#/$defs/Project/properties/status">Project</a></p>
+</li>
+</ul>
+<h4>status Type</h4>
+<p><code>object</code> (<a href="project-defs-project-properties-status.html">Details</a>)</p>
+<h2>Definitions group ProjectPhase</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/ProjectPhase&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+</table>
+<h2>Definitions group ProjectSpec</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/ProjectSpec&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#services">services</a></td>
+<td align="left"><code>array</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-projectspec-properties-services.html" title="project.json#/$defs/ProjectSpec/properties/services">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#volumes">volumes</a></td>
+<td align="left"><code>array</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-projectspec-properties-volumes.html" title="project.json#/$defs/ProjectSpec/properties/volumes">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#ingress">ingress</a></td>
+<td align="left"><code>array</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-projectspec-properties-ingress.html" title="project.json#/$defs/ProjectSpec/properties/ingress">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#expireat">expireAt</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-projectspec-properties-expireat.html" title="project.json#/$defs/ProjectSpec/properties/expireAt">Project</a></td>
+</tr>
+</tbody></table>
+<h3>services</h3>
+<p>Services is the ordered list of containers to run.</p>
+<p><code>services</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>object[]</code> (<a href="project-defs-projectspec-properties-services-items.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-projectspec-properties-services.html" title="project.json#/$defs/ProjectSpec/properties/services">Project</a></p>
+</li>
+</ul>
+<h4>services Type</h4>
+<p><code>object[]</code> (<a href="project-defs-projectspec-properties-services-items.html">Details</a>)</p>
+<h3>volumes</h3>
+<p>Volumes are named storage units shared across services.</p>
+<p><code>volumes</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object[]</code> (<a href="project-defs-projectspec-properties-volumes-items.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-projectspec-properties-volumes.html" title="project.json#/$defs/ProjectSpec/properties/volumes">Project</a></p>
+</li>
+</ul>
+<h4>volumes Type</h4>
+<p><code>object[]</code> (<a href="project-defs-projectspec-properties-volumes-items.html">Details</a>)</p>
+<h3>ingress</h3>
+<p>Ingress defines public or internal HTTP routing rules.</p>
+<p><code>ingress</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object[]</code> (<a href="project-defs-ingressdef.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-projectspec-properties-ingress.html" title="project.json#/$defs/ProjectSpec/properties/ingress">Project</a></p>
+</li>
+</ul>
+<h4>ingress Type</h4>
+<p><code>object[]</code> (<a href="project-defs-ingressdef.html">Details</a>)</p>
+<h3>expireAt</h3>
+<p>ExpireAt, when set, causes the GC controller to delete the Project
+after this time. Useful for ephemeral preview environments.</p>
+<p><code>expireAt</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-projectspec-properties-expireat.html" title="project.json#/$defs/ProjectSpec/properties/expireAt">Project</a></p>
+</li>
+</ul>
+<h4>expireAt Type</h4>
+<p><code>string</code></p>
+<h4>expireAt Constraints</h4>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h2>Definitions group ProjectStatus</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/ProjectStatus&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#phase">phase</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-projectstatus-properties-phase.html" title="project.json#/$defs/ProjectStatus/properties/phase">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#noderef">nodeRef</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-projectstatus-properties-noderef.html" title="project.json#/$defs/ProjectStatus/properties/nodeRef">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#conditions">conditions</a></td>
+<td align="left"><code>array</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-projectstatus-properties-conditions.html" title="project.json#/$defs/ProjectStatus/properties/conditions">Project</a></td>
+</tr>
+</tbody></table>
+<h3>phase</h3>
+<p>Lifecycle state of a Project as maintained by the Controller Manager.</p>
+<p><code>phase</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-projectstatus-properties-phase.html" title="project.json#/$defs/ProjectStatus/properties/phase">Project</a></p>
+</li>
+</ul>
+<h4>phase Type</h4>
+<p><code>string</code></p>
+<h4>phase Constraints</h4>
+<p><strong>enum</strong>: the value of this property must be equal to one of the following values:</p>
+<table>
+<thead>
+<tr>
+<th align="left">Value</th>
+<th align="left">Explanation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><code>&quot;Pending&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;Scheduled&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;Running&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;Failed&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;Terminating&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;Terminated&quot;</code></td>
+<td align="left"></td>
+</tr>
+</tbody></table>
+<h3>nodeRef</h3>
+<p>NodeRef is the name of the Node the Scheduler chose. Empty while Pending.</p>
+<p><code>nodeRef</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-projectstatus-properties-noderef.html" title="project.json#/$defs/ProjectStatus/properties/nodeRef">Project</a></p>
+</li>
+</ul>
+<h4>nodeRef Type</h4>
+<p><code>string</code></p>
+<h3>conditions</h3>
+<p>Conditions is a list of granular observable states.</p>
+<p><code>conditions</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object[]</code> (<a href="project-defs-condition.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-projectstatus-properties-conditions.html" title="project.json#/$defs/ProjectStatus/properties/conditions">Project</a></p>
+</li>
+</ul>
+<h4>conditions Type</h4>
+<p><code>object[]</code> (<a href="project-defs-condition.html">Details</a>)</p>
+<h2>Definitions group ServiceDef</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/ServiceDef&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#name-3">name</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-servicedef-properties-name.html" title="project.json#/$defs/ServiceDef/properties/name">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#image">image</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-servicedef-properties-image.html" title="project.json#/$defs/ServiceDef/properties/image">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#env">env</a></td>
+<td align="left"><code>array</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-servicedef-properties-env.html" title="project.json#/$defs/ServiceDef/properties/env">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#volumemounts">volumeMounts</a></td>
+<td align="left"><code>array</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-servicedef-properties-volumemounts.html" title="project.json#/$defs/ServiceDef/properties/volumeMounts">Project</a></td>
+</tr>
+</tbody></table>
+<h3>name</h3>
+<p>Name identifies the service within the Project (used as the DNS
+hostname inside the shared bridge network).</p>
+<p><code>name</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-servicedef-properties-name.html" title="project.json#/$defs/ServiceDef/properties/name">Project</a></p>
+</li>
+</ul>
+<h4>name Type</h4>
+<p><code>string</code></p>
+<h3>image</h3>
+<p>Image is the Docker image reference, e.g. &quot;postgres:15&quot;.</p>
+<p><code>image</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-servicedef-properties-image.html" title="project.json#/$defs/ServiceDef/properties/image">Project</a></p>
+</li>
+</ul>
+<h4>image Type</h4>
+<p><code>string</code></p>
+<h3>env</h3>
+<p>Env are extra environment variables injected at runtime.</p>
+<p><code>env</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object[]</code> (<a href="project-defs-envvar.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-servicedef-properties-env.html" title="project.json#/$defs/ServiceDef/properties/env">Project</a></p>
+</li>
+</ul>
+<h4>env Type</h4>
+<p><code>object[]</code> (<a href="project-defs-envvar.html">Details</a>)</p>
+<h3>volumeMounts</h3>
+<p>VolumeMounts lists volumes to attach to this container.</p>
+<p><code>volumeMounts</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object[]</code> (<a href="project-defs-servicedef-properties-volumemounts-items.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-servicedef-properties-volumemounts.html" title="project.json#/$defs/ServiceDef/properties/volumeMounts">Project</a></p>
+</li>
+</ul>
+<h4>volumeMounts Type</h4>
+<p><code>object[]</code> (<a href="project-defs-servicedef-properties-volumemounts-items.html">Details</a>)</p>
+<h2>Definitions group VolumeDef</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/VolumeDef&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#name-4">name</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-volumedef-properties-name.html" title="project.json#/$defs/VolumeDef/properties/name">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#type-1">type</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-volumedef-properties-type.html" title="project.json#/$defs/VolumeDef/properties/type">Project</a></td>
+</tr>
+</tbody></table>
+<h3>name</h3>
+<p><code>name</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-volumedef-properties-name.html" title="project.json#/$defs/VolumeDef/properties/name">Project</a></p>
+</li>
+</ul>
+<h4>name Type</h4>
+<p><code>string</code></p>
+<h3>type</h3>
+<p>Governs the lifecycle and backup behaviour of a Volume.</p>
+<p><code>type</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-volumedef-properties-type.html" title="project.json#/$defs/VolumeDef/properties/type">Project</a></p>
+</li>
+</ul>
+<h4>type Type</h4>
+<p><code>string</code></p>
+<h4>type Constraints</h4>
+<p><strong>enum</strong>: the value of this property must be equal to one of the following values:</p>
+<table>
+<thead>
+<tr>
+<th align="left">Value</th>
+<th align="left">Explanation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><code>&quot;Ephemeral&quot;</code></td>
+<td align="left"></td>
+</tr>
+</tbody></table>
+<h2>Definitions group VolumeMount</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/VolumeMount&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#name-5">name</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-volumemount-properties-name.html" title="project.json#/$defs/VolumeMount/properties/name">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#mountpath">mountPath</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-volumemount-properties-mountpath.html" title="project.json#/$defs/VolumeMount/properties/mountPath">Project</a></td>
+</tr>
+</tbody></table>
+<h3>name</h3>
+<p><code>name</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-volumemount-properties-name.html" title="project.json#/$defs/VolumeMount/properties/name">Project</a></p>
+</li>
+</ul>
+<h4>name Type</h4>
+<p><code>string</code></p>
+<h3>mountPath</h3>
+<p><code>mountPath</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-volumemount-properties-mountpath.html" title="project.json#/$defs/VolumeMount/properties/mountPath">Project</a></p>
+</li>
+</ul>
+<h4>mountPath Type</h4>
+<p><code>string</code></p>
+<h2>Definitions group VolumeType</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;project.json#/$defs/VolumeType&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+</table>
+</body>
+</html>

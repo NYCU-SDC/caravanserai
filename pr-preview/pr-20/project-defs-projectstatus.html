@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Untitled object in Project Schema — Caravanserai</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      max-width: 960px;
+      margin: 2rem auto;
+      padding: 0 1.5rem;
+      color: #24292e;
+      line-height: 1.6;
+    }
+    nav { margin-bottom: 1.5rem; font-size: 0.9rem; }
+    nav a { color: #0366d6; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    h1, h2, h3 { margin-top: 1.5em; }
+    h1 { border-bottom: 1px solid #e1e4e8; padding-bottom: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.75rem; text-align: left; }
+    th { background: #f6f8fa; }
+    code { background: #f6f8fa; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+    pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    pre code { background: none; padding: 0; }
+    a { color: #0366d6; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    blockquote { border-left: 4px solid #dfe2e5; margin: 0; padding: 0.5rem 1rem; color: #6a737d; }
+  </style>
+</head>
+<body>
+  <nav><a href="index.html">&larr; Back to index</a></nav>
+<h1>Untitled object in Project Schema</h1>
+<pre><code class="language-txt">project.json#/$defs/ProjectStatus
+</code></pre>
+<p>ProjectStatus is written by the Controller Manager and Agent.</p>
+<table>
+<thead>
+<tr>
+<th align="left">Abstract</th>
+<th align="left">Extensible</th>
+<th align="left">Status</th>
+<th align="left">Identifiable</th>
+<th align="left">Custom Properties</th>
+<th align="left">Additional Properties</th>
+<th align="left">Access Restrictions</th>
+<th align="left">Defined In</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left">Can be instantiated</td>
+<td align="left">No</td>
+<td align="left">Unknown status</td>
+<td align="left">No</td>
+<td align="left">Forbidden</td>
+<td align="left">Forbidden</td>
+<td align="left">none</td>
+<td align="left"><a href="../../schemas/project.json" title="open original schema">project.json*</a></td>
+</tr>
+</tbody></table>
+<h2>ProjectStatus Type</h2>
+<p><code>object</code> (<a href="project-defs-projectstatus.html">Details</a>)</p>
+<h1>ProjectStatus Properties</h1>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#phase">phase</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-projectphase.html" title="project.json#/$defs/ProjectStatus/properties/phase">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#noderef">nodeRef</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-projectstatus-properties-noderef.html" title="project.json#/$defs/ProjectStatus/properties/nodeRef">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#conditions">conditions</a></td>
+<td align="left"><code>array</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-projectstatus-properties-conditions.html" title="project.json#/$defs/ProjectStatus/properties/conditions">Project</a></td>
+</tr>
+</tbody></table>
+<h2>phase</h2>
+<p>Lifecycle state of a Project as maintained by the Controller Manager.</p>
+<p><code>phase</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-projectphase.html" title="project.json#/$defs/ProjectStatus/properties/phase">Project</a></p>
+</li>
+</ul>
+<h3>phase Type</h3>
+<p><code>string</code></p>
+<h3>phase Constraints</h3>
+<p><strong>enum</strong>: the value of this property must be equal to one of the following values:</p>
+<table>
+<thead>
+<tr>
+<th align="left">Value</th>
+<th align="left">Explanation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><code>&quot;Pending&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;Scheduled&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;Running&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;Failed&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;Terminating&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;Terminated&quot;</code></td>
+<td align="left"></td>
+</tr>
+</tbody></table>
+<h2>nodeRef</h2>
+<p>NodeRef is the name of the Node the Scheduler chose. Empty while Pending.</p>
+<p><code>nodeRef</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-projectstatus-properties-noderef.html" title="project.json#/$defs/ProjectStatus/properties/nodeRef">Project</a></p>
+</li>
+</ul>
+<h3>nodeRef Type</h3>
+<p><code>string</code></p>
+<h2>conditions</h2>
+<p>Conditions is a list of granular observable states.</p>
+<p><code>conditions</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object[]</code> (<a href="project-defs-condition.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-projectstatus-properties-conditions.html" title="project.json#/$defs/ProjectStatus/properties/conditions">Project</a></p>
+</li>
+</ul>
+<h3>conditions Type</h3>
+<p><code>object[]</code> (<a href="project-defs-condition.html">Details</a>)</p>
+</body>
+</html>

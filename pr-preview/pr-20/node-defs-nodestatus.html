@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Untitled object in Node Schema — Caravanserai</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      max-width: 960px;
+      margin: 2rem auto;
+      padding: 0 1.5rem;
+      color: #24292e;
+      line-height: 1.6;
+    }
+    nav { margin-bottom: 1.5rem; font-size: 0.9rem; }
+    nav a { color: #0366d6; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    h1, h2, h3 { margin-top: 1.5em; }
+    h1 { border-bottom: 1px solid #e1e4e8; padding-bottom: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.75rem; text-align: left; }
+    th { background: #f6f8fa; }
+    code { background: #f6f8fa; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+    pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    pre code { background: none; padding: 0; }
+    a { color: #0366d6; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    blockquote { border-left: 4px solid #dfe2e5; margin: 0; padding: 0.5rem 1rem; color: #6a737d; }
+  </style>
+</head>
+<body>
+  <nav><a href="index.html">&larr; Back to index</a></nav>
+<h1>Untitled object in Node Schema</h1>
+<pre><code class="language-txt">node.json#/$defs/NodeStatus
+</code></pre>
+<p>NodeStatus is written by the Agent (heartbeat fields) and the Controller Manager (aggregated state, injected taints).</p>
+<table>
+<thead>
+<tr>
+<th align="left">Abstract</th>
+<th align="left">Extensible</th>
+<th align="left">Status</th>
+<th align="left">Identifiable</th>
+<th align="left">Custom Properties</th>
+<th align="left">Additional Properties</th>
+<th align="left">Access Restrictions</th>
+<th align="left">Defined In</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left">Can be instantiated</td>
+<td align="left">No</td>
+<td align="left">Unknown status</td>
+<td align="left">No</td>
+<td align="left">Forbidden</td>
+<td align="left">Forbidden</td>
+<td align="left">none</td>
+<td align="left"><a href="../../schemas/node.json" title="open original schema">node.json*</a></td>
+</tr>
+</tbody></table>
+<h2>NodeStatus Type</h2>
+<p><code>object</code> (<a href="node-defs-nodestatus.html">Details</a>)</p>
+<h1>NodeStatus Properties</h1>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#state">state</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodestate.html" title="node.json#/$defs/NodeStatus/properties/state">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#network">network</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodenetworkstatus.html" title="node.json#/$defs/NodeStatus/properties/network">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#capacity">capacity</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-resourcelist.html" title="node.json#/$defs/NodeStatus/properties/capacity">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#allocatable">allocatable</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-resourcelist.html" title="node.json#/$defs/NodeStatus/properties/allocatable">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#lastheartbeat">lastHeartbeat</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodestatus-properties-lastheartbeat.html" title="node.json#/$defs/NodeStatus/properties/lastHeartbeat">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#conditions">conditions</a></td>
+<td align="left"><code>array</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodestatus-properties-conditions.html" title="node.json#/$defs/NodeStatus/properties/conditions">Node</a></td>
+</tr>
+</tbody></table>
+<h2>state</h2>
+<p>Top-level health summary computed by the Controller Manager.</p>
+<p><code>state</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodestate.html" title="node.json#/$defs/NodeStatus/properties/state">Node</a></p>
+</li>
+</ul>
+<h3>state Type</h3>
+<p><code>string</code></p>
+<h3>state Constraints</h3>
+<p><strong>enum</strong>: the value of this property must be equal to one of the following values:</p>
+<table>
+<thead>
+<tr>
+<th align="left">Value</th>
+<th align="left">Explanation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><code>&quot;Ready&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;NotReady&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;Draining&quot;</code></td>
+<td align="left"></td>
+</tr>
+</tbody></table>
+<h2>network</h2>
+<p>NodeNetworkStatus reports the overlay-network state of a Node.</p>
+<p><code>network</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="node-defs-nodenetworkstatus.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodenetworkstatus.html" title="node.json#/$defs/NodeStatus/properties/network">Node</a></p>
+</li>
+</ul>
+<h3>network Type</h3>
+<p><code>object</code> (<a href="node-defs-nodenetworkstatus.html">Details</a>)</p>
+<h2>capacity</h2>
+<p>ResourceList is a named set of resource quantities — cpu, memory, disk — whose values follow the same string format as Kubernetes: &quot;500m&quot;, &quot;4Gi&quot;, &quot;100Mbps&quot;.</p>
+<p><code>capacity</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="node-defs-resourcelist.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-resourcelist.html" title="node.json#/$defs/NodeStatus/properties/capacity">Node</a></p>
+</li>
+</ul>
+<h3>capacity Type</h3>
+<p><code>object</code> (<a href="node-defs-resourcelist.html">Details</a>)</p>
+<h2>allocatable</h2>
+<p>ResourceList is a named set of resource quantities — cpu, memory, disk — whose values follow the same string format as Kubernetes: &quot;500m&quot;, &quot;4Gi&quot;, &quot;100Mbps&quot;.</p>
+<p><code>allocatable</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="node-defs-resourcelist.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-resourcelist.html" title="node.json#/$defs/NodeStatus/properties/allocatable">Node</a></p>
+</li>
+</ul>
+<h3>allocatable Type</h3>
+<p><code>object</code> (<a href="node-defs-resourcelist.html">Details</a>)</p>
+<h2>lastHeartbeat</h2>
+<p>LastHeartbeat is the timestamp of the most recent heartbeat received
+from the Agent. The NodeController uses this to detect timeouts.</p>
+<p><code>lastHeartbeat</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodestatus-properties-lastheartbeat.html" title="node.json#/$defs/NodeStatus/properties/lastHeartbeat">Node</a></p>
+</li>
+</ul>
+<h3>lastHeartbeat Type</h3>
+<p><code>string</code></p>
+<h3>lastHeartbeat Constraints</h3>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h2>conditions</h2>
+<p>Conditions is a list of observable Node conditions.</p>
+<p><code>conditions</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object[]</code> (<a href="node-defs-condition.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodestatus-properties-conditions.html" title="node.json#/$defs/NodeStatus/properties/conditions">Node</a></p>
+</li>
+</ul>
+<h3>conditions Type</h3>
+<p><code>object[]</code> (<a href="node-defs-condition.html">Details</a>)</p>
+</body>
+</html>

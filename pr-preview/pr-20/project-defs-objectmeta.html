@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Untitled object in Project Schema — Caravanserai</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      max-width: 960px;
+      margin: 2rem auto;
+      padding: 0 1.5rem;
+      color: #24292e;
+      line-height: 1.6;
+    }
+    nav { margin-bottom: 1.5rem; font-size: 0.9rem; }
+    nav a { color: #0366d6; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    h1, h2, h3 { margin-top: 1.5em; }
+    h1 { border-bottom: 1px solid #e1e4e8; padding-bottom: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.75rem; text-align: left; }
+    th { background: #f6f8fa; }
+    code { background: #f6f8fa; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+    pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    pre code { background: none; padding: 0; }
+    a { color: #0366d6; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    blockquote { border-left: 4px solid #dfe2e5; margin: 0; padding: 0.5rem 1rem; color: #6a737d; }
+  </style>
+</head>
+<body>
+  <nav><a href="index.html">&larr; Back to index</a></nav>
+<h1>Untitled object in Project Schema</h1>
+<pre><code class="language-txt">project.json#/$defs/Project/properties/metadata
+</code></pre>
+<p>ObjectMeta holds identity and classification metadata common to all resources.</p>
+<table>
+<thead>
+<tr>
+<th align="left">Abstract</th>
+<th align="left">Extensible</th>
+<th align="left">Status</th>
+<th align="left">Identifiable</th>
+<th align="left">Custom Properties</th>
+<th align="left">Additional Properties</th>
+<th align="left">Access Restrictions</th>
+<th align="left">Defined In</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left">Can be instantiated</td>
+<td align="left">No</td>
+<td align="left">Unknown status</td>
+<td align="left">No</td>
+<td align="left">Forbidden</td>
+<td align="left">Forbidden</td>
+<td align="left">none</td>
+<td align="left"><a href="../../schemas/project.json" title="open original schema">project.json*</a></td>
+</tr>
+</tbody></table>
+<h2>metadata Type</h2>
+<p><code>object</code> (<a href="project-defs-objectmeta.html">Details</a>)</p>
+<h1>metadata Properties</h1>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#name">name</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-objectmeta-properties-name.html" title="project.json#/$defs/ObjectMeta/properties/name">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#labels">labels</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-objectmeta-properties-labels.html" title="project.json#/$defs/ObjectMeta/properties/labels">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#annotations">annotations</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-objectmeta-properties-annotations.html" title="project.json#/$defs/ObjectMeta/properties/annotations">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#createdat">createdAt</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-objectmeta-properties-createdat.html" title="project.json#/$defs/ObjectMeta/properties/createdAt">Project</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#updatedat">updatedAt</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="project-defs-objectmeta-properties-updatedat.html" title="project.json#/$defs/ObjectMeta/properties/updatedAt">Project</a></td>
+</tr>
+</tbody></table>
+<h2>name</h2>
+<p>Name is the unique identifier within its Kind namespace.</p>
+<p><code>name</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-objectmeta-properties-name.html" title="project.json#/$defs/ObjectMeta/properties/name">Project</a></p>
+</li>
+</ul>
+<h3>name Type</h3>
+<p><code>string</code></p>
+<h2>labels</h2>
+<p>Labels are arbitrary key/value pairs used for selection and grouping.</p>
+<p><code>labels</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="project-defs-objectmeta-properties-labels.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-objectmeta-properties-labels.html" title="project.json#/$defs/ObjectMeta/properties/labels">Project</a></p>
+</li>
+</ul>
+<h3>labels Type</h3>
+<p><code>object</code> (<a href="project-defs-objectmeta-properties-labels.html">Details</a>)</p>
+<h2>annotations</h2>
+<p>Annotations are non-identifying metadata (e.g. human-readable hints).</p>
+<p><code>annotations</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="project-defs-objectmeta-properties-annotations.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-objectmeta-properties-annotations.html" title="project.json#/$defs/ObjectMeta/properties/annotations">Project</a></p>
+</li>
+</ul>
+<h3>annotations Type</h3>
+<p><code>object</code> (<a href="project-defs-objectmeta-properties-annotations.html">Details</a>)</p>
+<h2>createdAt</h2>
+<p>CreatedAt is set by the server on first write.</p>
+<p><code>createdAt</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-objectmeta-properties-createdat.html" title="project.json#/$defs/ObjectMeta/properties/createdAt">Project</a></p>
+</li>
+</ul>
+<h3>createdAt Type</h3>
+<p><code>string</code></p>
+<h3>createdAt Constraints</h3>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h2>updatedAt</h2>
+<p>UpdatedAt is set by the server on every write.</p>
+<p><code>updatedAt</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="project-defs-objectmeta-properties-updatedat.html" title="project.json#/$defs/ObjectMeta/properties/updatedAt">Project</a></p>
+</li>
+</ul>
+<h3>updatedAt Type</h3>
+<p><code>string</code></p>
+<h3>updatedAt Constraints</h3>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+</body>
+</html>

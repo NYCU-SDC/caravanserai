@@ -1,0 +1,993 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Node Schema — Caravanserai</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      max-width: 960px;
+      margin: 2rem auto;
+      padding: 0 1.5rem;
+      color: #24292e;
+      line-height: 1.6;
+    }
+    nav { margin-bottom: 1.5rem; font-size: 0.9rem; }
+    nav a { color: #0366d6; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    h1, h2, h3 { margin-top: 1.5em; }
+    h1 { border-bottom: 1px solid #e1e4e8; padding-bottom: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.75rem; text-align: left; }
+    th { background: #f6f8fa; }
+    code { background: #f6f8fa; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+    pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    pre code { background: none; padding: 0; }
+    a { color: #0366d6; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    blockquote { border-left: 4px solid #dfe2e5; margin: 0; padding: 0.5rem 1rem; color: #6a737d; }
+  </style>
+</head>
+<body>
+  <nav><a href="index.html">&larr; Back to index</a></nav>
+<h1>Node Schema</h1>
+<pre><code class="language-txt">node.json
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Abstract</th>
+<th align="left">Extensible</th>
+<th align="left">Status</th>
+<th align="left">Identifiable</th>
+<th align="left">Custom Properties</th>
+<th align="left">Additional Properties</th>
+<th align="left">Access Restrictions</th>
+<th align="left">Defined In</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left">Can be instantiated</td>
+<td align="left">No</td>
+<td align="left">Unknown status</td>
+<td align="left">Unknown identifiability</td>
+<td align="left">Forbidden</td>
+<td align="left">Allowed</td>
+<td align="left">none</td>
+<td align="left"><a href="../../schemas/node.json" title="open original schema">node.json</a></td>
+</tr>
+</tbody></table>
+<h2>Node Type</h2>
+<p>unknown (<a href="node.html">Node</a>)</p>
+<h1>Node Definitions</h1>
+<h2>Definitions group Condition</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;node.json#/$defs/Condition&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#type">type</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-condition-properties-type.html" title="node.json#/$defs/Condition/properties/type">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#status">status</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-condition-properties-status.html" title="node.json#/$defs/Condition/properties/status">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#lastheartbeattime">lastHeartbeatTime</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-condition-properties-lastheartbeattime.html" title="node.json#/$defs/Condition/properties/lastHeartbeatTime">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#lasttransitiontime">lastTransitionTime</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-condition-properties-lasttransitiontime.html" title="node.json#/$defs/Condition/properties/lastTransitionTime">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#reason">reason</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-condition-properties-reason.html" title="node.json#/$defs/Condition/properties/reason">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#message">message</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-condition-properties-message.html" title="node.json#/$defs/Condition/properties/message">Node</a></td>
+</tr>
+</tbody></table>
+<h3>type</h3>
+<p>Type is a machine-readable identifier, e.g. &quot;Ready&quot;, &quot;Phase&quot;.</p>
+<p><code>type</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-condition-properties-type.html" title="node.json#/$defs/Condition/properties/type">Node</a></p>
+</li>
+</ul>
+<h4>type Type</h4>
+<p><code>string</code></p>
+<h3>status</h3>
+<p>Status is one of True, False, Unknown.</p>
+<p><code>status</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-condition-properties-status.html" title="node.json#/$defs/Condition/properties/status">Node</a></p>
+</li>
+</ul>
+<h4>status Type</h4>
+<p><code>string</code></p>
+<h3>lastHeartbeatTime</h3>
+<p>LastHeartbeatTime is when this condition was last sampled.</p>
+<p><code>lastHeartbeatTime</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-condition-properties-lastheartbeattime.html" title="node.json#/$defs/Condition/properties/lastHeartbeatTime">Node</a></p>
+</li>
+</ul>
+<h4>lastHeartbeatTime Type</h4>
+<p><code>string</code></p>
+<h4>lastHeartbeatTime Constraints</h4>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h3>lastTransitionTime</h3>
+<p>LastTransitionTime is when the Status last changed.</p>
+<p><code>lastTransitionTime</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-condition-properties-lasttransitiontime.html" title="node.json#/$defs/Condition/properties/lastTransitionTime">Node</a></p>
+</li>
+</ul>
+<h4>lastTransitionTime Type</h4>
+<p><code>string</code></p>
+<h4>lastTransitionTime Constraints</h4>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h3>reason</h3>
+<p>Reason is a CamelCase word summarising why the condition has this status.</p>
+<p><code>reason</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-condition-properties-reason.html" title="node.json#/$defs/Condition/properties/reason">Node</a></p>
+</li>
+</ul>
+<h4>reason Type</h4>
+<p><code>string</code></p>
+<h3>message</h3>
+<p>Message is a human-readable explanation.</p>
+<p><code>message</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-condition-properties-message.html" title="node.json#/$defs/Condition/properties/message">Node</a></p>
+</li>
+</ul>
+<h4>message Type</h4>
+<p><code>string</code></p>
+<h2>Definitions group NetworkMode</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;node.json#/$defs/NetworkMode&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+</table>
+<h2>Definitions group Node</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;node.json#/$defs/Node&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#apiversion">apiVersion</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-node-properties-apiversion.html" title="node.json#/$defs/Node/properties/apiVersion">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#kind">kind</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-node-properties-kind.html" title="node.json#/$defs/Node/properties/kind">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#metadata">metadata</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-node-properties-metadata.html" title="node.json#/$defs/Node/properties/metadata">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#spec">spec</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-node-properties-spec.html" title="node.json#/$defs/Node/properties/spec">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#status-1">status</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-node-properties-status.html" title="node.json#/$defs/Node/properties/status">Node</a></td>
+</tr>
+</tbody></table>
+<h3>apiVersion</h3>
+<p>APIVersion identifies the versioned schema this resource conforms to, e.g. &quot;caravanserai/v1&quot;.</p>
+<p><code>apiVersion</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-node-properties-apiversion.html" title="node.json#/$defs/Node/properties/apiVersion">Node</a></p>
+</li>
+</ul>
+<h4>apiVersion Type</h4>
+<p><code>string</code></p>
+<h3>kind</h3>
+<p>Kind is the resource type, e.g. &quot;Node&quot;, &quot;Project&quot;.</p>
+<p><code>kind</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-node-properties-kind.html" title="node.json#/$defs/Node/properties/kind">Node</a></p>
+</li>
+</ul>
+<h4>kind Type</h4>
+<p><code>string</code></p>
+<h3>metadata</h3>
+<p>ObjectMeta holds identity and classification metadata common to all resources.</p>
+<p><code>metadata</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="node-defs-node-properties-metadata.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-node-properties-metadata.html" title="node.json#/$defs/Node/properties/metadata">Node</a></p>
+</li>
+</ul>
+<h4>metadata Type</h4>
+<p><code>object</code> (<a href="node-defs-node-properties-metadata.html">Details</a>)</p>
+<h3>spec</h3>
+<p>NodeSpec contains the administrator-declared configuration of a Node.</p>
+<p><code>spec</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="node-defs-node-properties-spec.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-node-properties-spec.html" title="node.json#/$defs/Node/properties/spec">Node</a></p>
+</li>
+</ul>
+<h4>spec Type</h4>
+<p><code>object</code> (<a href="node-defs-node-properties-spec.html">Details</a>)</p>
+<h3>status</h3>
+<p>NodeStatus is written by the Agent (heartbeat fields) and the Controller Manager (aggregated state, injected taints).</p>
+<p><code>status</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="node-defs-node-properties-status.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-node-properties-status.html" title="node.json#/$defs/Node/properties/status">Node</a></p>
+</li>
+</ul>
+<h4>status Type</h4>
+<p><code>object</code> (<a href="node-defs-node-properties-status.html">Details</a>)</p>
+<h2>Definitions group NodeNetworkStatus</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;node.json#/$defs/NodeNetworkStatus&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#ip">ip</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodenetworkstatus-properties-ip.html" title="node.json#/$defs/NodeNetworkStatus/properties/ip">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#dnsname">dnsName</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodenetworkstatus-properties-dnsname.html" title="node.json#/$defs/NodeNetworkStatus/properties/dnsName">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#mode">mode</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodenetworkstatus-properties-mode.html" title="node.json#/$defs/NodeNetworkStatus/properties/mode">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#agentport">agentPort</a></td>
+<td align="left"><code>integer</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodenetworkstatus-properties-agentport.html" title="node.json#/$defs/NodeNetworkStatus/properties/agentPort">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#throughput">throughput</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodenetworkstatus-properties-throughput.html" title="node.json#/$defs/NodeNetworkStatus/properties/throughput">Node</a></td>
+</tr>
+</tbody></table>
+<h3>ip</h3>
+<p>IP is the Headscale-assigned overlay IP (e.g. &quot;100.64.0.5&quot;).</p>
+<p><code>ip</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodenetworkstatus-properties-ip.html" title="node.json#/$defs/NodeNetworkStatus/properties/ip">Node</a></p>
+</li>
+</ul>
+<h4>ip Type</h4>
+<p><code>string</code></p>
+<h3>dnsName</h3>
+<p>DNSName is the MagicDNS FQDN for service discovery.</p>
+<p><code>dnsName</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodenetworkstatus-properties-dnsname.html" title="node.json#/$defs/NodeNetworkStatus/properties/dnsName">Node</a></p>
+</li>
+</ul>
+<h4>dnsName Type</h4>
+<p><code>string</code></p>
+<h3>mode</h3>
+<p>Connectivity mode reported by the Tailscale/Headscale overlay network.</p>
+<p><code>mode</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodenetworkstatus-properties-mode.html" title="node.json#/$defs/NodeNetworkStatus/properties/mode">Node</a></p>
+</li>
+</ul>
+<h4>mode Type</h4>
+<p><code>string</code></p>
+<h4>mode Constraints</h4>
+<p><strong>enum</strong>: the value of this property must be equal to one of the following values:</p>
+<table>
+<thead>
+<tr>
+<th align="left">Value</th>
+<th align="left">Explanation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><code>&quot;Direct&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;DERP&quot;</code></td>
+<td align="left"></td>
+</tr>
+</tbody></table>
+<h3>agentPort</h3>
+<p>AgentPort is the TCP port the Agent&#39;s HTTP server listens on.
+Used by caractl to construct the Agent address for port-forward tunnels.</p>
+<p><code>agentPort</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>integer</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodenetworkstatus-properties-agentport.html" title="node.json#/$defs/NodeNetworkStatus/properties/agentPort">Node</a></p>
+</li>
+</ul>
+<h4>agentPort Type</h4>
+<p><code>integer</code></p>
+<h3>throughput</h3>
+<p>NodeThroughput holds the last measured upload/download speeds of a Node.</p>
+<p><code>throughput</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="node-defs-nodenetworkstatus-properties-throughput.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodenetworkstatus-properties-throughput.html" title="node.json#/$defs/NodeNetworkStatus/properties/throughput">Node</a></p>
+</li>
+</ul>
+<h4>throughput Type</h4>
+<p><code>object</code> (<a href="node-defs-nodenetworkstatus-properties-throughput.html">Details</a>)</p>
+<h2>Definitions group NodeSpec</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;node.json#/$defs/NodeSpec&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#hostname">hostname</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodespec-properties-hostname.html" title="node.json#/$defs/NodeSpec/properties/hostname">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#unschedulable">unschedulable</a></td>
+<td align="left"><code>boolean</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodespec-properties-unschedulable.html" title="node.json#/$defs/NodeSpec/properties/unschedulable">Node</a></td>
+</tr>
+</tbody></table>
+<h3>hostname</h3>
+<p>Hostname is the OS-level hostname of the machine.</p>
+<p><code>hostname</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodespec-properties-hostname.html" title="node.json#/$defs/NodeSpec/properties/hostname">Node</a></p>
+</li>
+</ul>
+<h4>hostname Type</h4>
+<p><code>string</code></p>
+<h3>unschedulable</h3>
+<p>Unschedulable, when true, prevents new Projects from being scheduled
+onto this Node. The TaintsController will automatically add a
+NoSchedule Taint when this field is true.</p>
+<p><code>unschedulable</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>boolean</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodespec-properties-unschedulable.html" title="node.json#/$defs/NodeSpec/properties/unschedulable">Node</a></p>
+</li>
+</ul>
+<h4>unschedulable Type</h4>
+<p><code>boolean</code></p>
+<h2>Definitions group NodeState</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;node.json#/$defs/NodeState&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+</table>
+<h2>Definitions group NodeStatus</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;node.json#/$defs/NodeStatus&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#state">state</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodestatus-properties-state.html" title="node.json#/$defs/NodeStatus/properties/state">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#network">network</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodenetworkstatus.html" title="node.json#/$defs/NodeStatus/properties/network">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#capacity">capacity</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodestatus-properties-capacity.html" title="node.json#/$defs/NodeStatus/properties/capacity">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#allocatable">allocatable</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodestatus-properties-allocatable.html" title="node.json#/$defs/NodeStatus/properties/allocatable">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#lastheartbeat">lastHeartbeat</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodestatus-properties-lastheartbeat.html" title="node.json#/$defs/NodeStatus/properties/lastHeartbeat">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#conditions">conditions</a></td>
+<td align="left"><code>array</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodestatus-properties-conditions.html" title="node.json#/$defs/NodeStatus/properties/conditions">Node</a></td>
+</tr>
+</tbody></table>
+<h3>state</h3>
+<p>Top-level health summary computed by the Controller Manager.</p>
+<p><code>state</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodestatus-properties-state.html" title="node.json#/$defs/NodeStatus/properties/state">Node</a></p>
+</li>
+</ul>
+<h4>state Type</h4>
+<p><code>string</code></p>
+<h4>state Constraints</h4>
+<p><strong>enum</strong>: the value of this property must be equal to one of the following values:</p>
+<table>
+<thead>
+<tr>
+<th align="left">Value</th>
+<th align="left">Explanation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><code>&quot;Ready&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;NotReady&quot;</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>&quot;Draining&quot;</code></td>
+<td align="left"></td>
+</tr>
+</tbody></table>
+<h3>network</h3>
+<p>NodeNetworkStatus reports the overlay-network state of a Node.</p>
+<p><code>network</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="node-defs-nodenetworkstatus.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodenetworkstatus.html" title="node.json#/$defs/NodeStatus/properties/network">Node</a></p>
+</li>
+</ul>
+<h4>network Type</h4>
+<p><code>object</code> (<a href="node-defs-nodenetworkstatus.html">Details</a>)</p>
+<h3>capacity</h3>
+<p>ResourceList is a named set of resource quantities — cpu, memory, disk — whose values follow the same string format as Kubernetes: &quot;500m&quot;, &quot;4Gi&quot;, &quot;100Mbps&quot;.</p>
+<p><code>capacity</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="node-defs-nodestatus-properties-capacity.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodestatus-properties-capacity.html" title="node.json#/$defs/NodeStatus/properties/capacity">Node</a></p>
+</li>
+</ul>
+<h4>capacity Type</h4>
+<p><code>object</code> (<a href="node-defs-nodestatus-properties-capacity.html">Details</a>)</p>
+<h3>allocatable</h3>
+<p>ResourceList is a named set of resource quantities — cpu, memory, disk — whose values follow the same string format as Kubernetes: &quot;500m&quot;, &quot;4Gi&quot;, &quot;100Mbps&quot;.</p>
+<p><code>allocatable</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="node-defs-nodestatus-properties-allocatable.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodestatus-properties-allocatable.html" title="node.json#/$defs/NodeStatus/properties/allocatable">Node</a></p>
+</li>
+</ul>
+<h4>allocatable Type</h4>
+<p><code>object</code> (<a href="node-defs-nodestatus-properties-allocatable.html">Details</a>)</p>
+<h3>lastHeartbeat</h3>
+<p>LastHeartbeat is the timestamp of the most recent heartbeat received
+from the Agent. The NodeController uses this to detect timeouts.</p>
+<p><code>lastHeartbeat</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodestatus-properties-lastheartbeat.html" title="node.json#/$defs/NodeStatus/properties/lastHeartbeat">Node</a></p>
+</li>
+</ul>
+<h4>lastHeartbeat Type</h4>
+<p><code>string</code></p>
+<h4>lastHeartbeat Constraints</h4>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h3>conditions</h3>
+<p>Conditions is a list of observable Node conditions.</p>
+<p><code>conditions</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object[]</code> (<a href="node-defs-condition.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodestatus-properties-conditions.html" title="node.json#/$defs/NodeStatus/properties/conditions">Node</a></p>
+</li>
+</ul>
+<h4>conditions Type</h4>
+<p><code>object[]</code> (<a href="node-defs-condition.html">Details</a>)</p>
+<h2>Definitions group NodeThroughput</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;node.json#/$defs/NodeThroughput&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#download">download</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodethroughput-properties-download.html" title="node.json#/$defs/NodeThroughput/properties/download">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#upload">upload</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodethroughput-properties-upload.html" title="node.json#/$defs/NodeThroughput/properties/upload">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#lasttesttime">lastTestTime</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-nodethroughput-properties-lasttesttime.html" title="node.json#/$defs/NodeThroughput/properties/lastTestTime">Node</a></td>
+</tr>
+</tbody></table>
+<h3>download</h3>
+<p><code>download</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodethroughput-properties-download.html" title="node.json#/$defs/NodeThroughput/properties/download">Node</a></p>
+</li>
+</ul>
+<h4>download Type</h4>
+<p><code>string</code></p>
+<h3>upload</h3>
+<p><code>upload</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodethroughput-properties-upload.html" title="node.json#/$defs/NodeThroughput/properties/upload">Node</a></p>
+</li>
+</ul>
+<h4>upload Type</h4>
+<p><code>string</code></p>
+<h3>lastTestTime</h3>
+<p><code>lastTestTime</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-nodethroughput-properties-lasttesttime.html" title="node.json#/$defs/NodeThroughput/properties/lastTestTime">Node</a></p>
+</li>
+</ul>
+<h4>lastTestTime Type</h4>
+<p><code>string</code></p>
+<h4>lastTestTime Constraints</h4>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h2>Definitions group ObjectMeta</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;node.json#/$defs/ObjectMeta&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><a href="#name">name</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Required</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-objectmeta-properties-name.html" title="node.json#/$defs/ObjectMeta/properties/name">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#labels">labels</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-objectmeta-properties-labels.html" title="node.json#/$defs/ObjectMeta/properties/labels">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#annotations">annotations</a></td>
+<td align="left"><code>object</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-objectmeta-properties-annotations.html" title="node.json#/$defs/ObjectMeta/properties/annotations">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#createdat">createdAt</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-objectmeta-properties-createdat.html" title="node.json#/$defs/ObjectMeta/properties/createdAt">Node</a></td>
+</tr>
+<tr>
+<td align="left"><a href="#updatedat">updatedAt</a></td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-objectmeta-properties-updatedat.html" title="node.json#/$defs/ObjectMeta/properties/updatedAt">Node</a></td>
+</tr>
+</tbody></table>
+<h3>name</h3>
+<p>Name is the unique identifier within its Kind namespace.</p>
+<p><code>name</code></p>
+<ul>
+<li><p>is required</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-objectmeta-properties-name.html" title="node.json#/$defs/ObjectMeta/properties/name">Node</a></p>
+</li>
+</ul>
+<h4>name Type</h4>
+<p><code>string</code></p>
+<h3>labels</h3>
+<p>Labels are arbitrary key/value pairs used for selection and grouping.</p>
+<p><code>labels</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="node-defs-objectmeta-properties-labels.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-objectmeta-properties-labels.html" title="node.json#/$defs/ObjectMeta/properties/labels">Node</a></p>
+</li>
+</ul>
+<h4>labels Type</h4>
+<p><code>object</code> (<a href="node-defs-objectmeta-properties-labels.html">Details</a>)</p>
+<h3>annotations</h3>
+<p>Annotations are non-identifying metadata (e.g. human-readable hints).</p>
+<p><code>annotations</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>object</code> (<a href="node-defs-objectmeta-properties-annotations.html">Details</a>)</p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-objectmeta-properties-annotations.html" title="node.json#/$defs/ObjectMeta/properties/annotations">Node</a></p>
+</li>
+</ul>
+<h4>annotations Type</h4>
+<p><code>object</code> (<a href="node-defs-objectmeta-properties-annotations.html">Details</a>)</p>
+<h3>createdAt</h3>
+<p>CreatedAt is set by the server on first write.</p>
+<p><code>createdAt</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-objectmeta-properties-createdat.html" title="node.json#/$defs/ObjectMeta/properties/createdAt">Node</a></p>
+</li>
+</ul>
+<h4>createdAt Type</h4>
+<p><code>string</code></p>
+<h4>createdAt Constraints</h4>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h3>updatedAt</h3>
+<p>UpdatedAt is set by the server on every write.</p>
+<p><code>updatedAt</code></p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-objectmeta-properties-updatedat.html" title="node.json#/$defs/ObjectMeta/properties/updatedAt">Node</a></p>
+</li>
+</ul>
+<h4>updatedAt Type</h4>
+<p><code>string</code></p>
+<h4>updatedAt Constraints</h4>
+<p><strong>date time</strong>: the string must be a date time string, according to <a href="https://tools.ietf.org/html/rfc3339" title="check the specification">RFC 3339, section 5.6</a></p>
+<h2>Definitions group ResourceList</h2>
+<p>Reference this group by using</p>
+<pre><code class="language-json">{&quot;$ref&quot;:&quot;node.json#/$defs/ResourceList&quot;}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th align="left">Property</th>
+<th align="left">Type</th>
+<th align="left">Required</th>
+<th align="left">Nullable</th>
+<th align="left">Defined by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left">Additional Properties</td>
+<td align="left"><code>string</code></td>
+<td align="left">Optional</td>
+<td align="left">cannot be null</td>
+<td align="left"><a href="node-defs-resourcelist-additionalproperties.html" title="node.json#/$defs/ResourceList/additionalProperties">Node</a></td>
+</tr>
+</tbody></table>
+<h3>Additional Properties</h3>
+<p>Additional properties are allowed, as long as they follow this schema:</p>
+<ul>
+<li><p>is optional</p>
+</li>
+<li><p>Type: <code>string</code></p>
+</li>
+<li><p>cannot be null</p>
+</li>
+<li><p>defined in: <a href="node-defs-resourcelist-additionalproperties.html" title="node.json#/$defs/ResourceList/additionalProperties">Node</a></p>
+</li>
+</ul>
+<h4>additionalProperties Type</h4>
+<p><code>string</code></p>
+</body>
+</html>
