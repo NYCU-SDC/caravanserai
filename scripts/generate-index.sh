@@ -4,6 +4,9 @@
 #
 # Usage: scripts/generate-index.sh <output-dir>
 #   e.g.  scripts/generate-index.sh website/out
+#
+# Only top-level schema pages (e.g. node.md, project.md) are linked.
+# Sub-definition pages (e.g. node-defs-condition.md) are excluded.
 
 set -euo pipefail
 
@@ -50,10 +53,12 @@ cat > "${OUT_DIR}/index.html" <<'HTML_HEAD'
   <ul>
 HTML_HEAD
 
-for page in "${OUT_DIR}"/*.html; do
+# Only include top-level schema pages (no hyphens in basename = not a sub-definition)
+for page in "${OUT_DIR}"/*.md; do
   filename="$(basename "$page")"
-  [ "$filename" = "index.html" ] && continue
-  name="${filename%.html}"
+  # Skip sub-definition pages like node-defs-condition.md
+  case "$filename" in *-*) continue ;; esac
+  name="${filename%.md}"
   title="$(echo "$name" | sed 's/.*/\u&/')"
   echo "    <li><a href=\"${filename}\">${title}</a></li>" >> "${OUT_DIR}/index.html"
 done
@@ -62,7 +67,7 @@ cat >> "${OUT_DIR}/index.html" <<'HTML_TAIL'
   </ul>
   <footer>
     Generated from <a href="https://github.com/NYCU-SDC/caravanserai/tree/main/schemas">JSON Schema sources</a>
-    by <a href="https://github.com/coveooss/json-schema-for-humans">json-schema-for-humans</a>.
+    by <a href="https://github.com/adobe/jsonschema2md">jsonschema2md</a>.
   </footer>
 </body>
 </html>

@@ -6,11 +6,13 @@ on:
     paths:
       - 'schemas/**'
       - 'api/v1/**'
+      - 'cmd/schemagen/**'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'schemas/**'
       - 'api/v1/**'
+      - 'cmd/schemagen/**'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -29,21 +31,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          python-version: '3.11'
+          go-version-file: go.mod
 
-      - name: Install json-schema-for-humans
-        run: pip install json-schema-for-humans
+      - name: Generate JSON Schemas
+        run: make schemas
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Generate schema docs
         run: |
           mkdir -p website/out
-          generate-schema-doc \
-            --config expand_buttons=true \
-            --config template_name=js \
-            schemas/ website/out/
+          npx @adobe/jsonschema2md -d schemas -o website/out -e json -x - -n
 
       - name: Generate index page
         run: scripts/generate-index.sh website/out

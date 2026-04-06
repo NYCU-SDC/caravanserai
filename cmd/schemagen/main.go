@@ -13,16 +13,17 @@ import (
 	"github.com/invopop/jsonschema"
 )
 
-// resource pairs a Go type with its output filename.
+// resource pairs a Go type with its output filename and display title.
 type resource struct {
 	instance any
 	filename string
+	title    string
 }
 
 func main() {
 	resources := []resource{
-		{instance: &v1.Node{}, filename: "node.json"},
-		{instance: &v1.Project{}, filename: "project.json"},
+		{instance: &v1.Node{}, filename: "node.json", title: "Node"},
+		{instance: &v1.Project{}, filename: "project.json", title: "Project"},
 	}
 
 	r := new(jsonschema.Reflector)
@@ -39,6 +40,8 @@ func main() {
 
 	for _, res := range resources {
 		schema := r.Reflect(res.instance)
+		schema.ID = jsonschema.ID(res.filename)
+		schema.Title = res.title
 
 		data, err := json.MarshalIndent(schema, "", "  ")
 		if err != nil {
