@@ -106,7 +106,7 @@ func main() {
 		}
 	}()
 
-	go agent.Run(ctx, agentClient, dockerRuntime, cfg.HeartbeatInterval, agentPort, routeTable, logger)
+	go agent.Run(ctx, agentClient, dockerRuntime, cfg.HeartbeatInterval, agentPort, cfg.AdvertiseIP, routeTable, logger)
 
 	// ── Agent HTTP server ────────────────────────────────────────────────
 	apiSrv := agentapiserver.New(logger)
