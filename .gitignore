@@ -122,5 +122,3 @@ fabric.properties
 # Generated documentation site output (CI artifact only)
 website/out/
 
-# Generated Markdown docs (for future Mintlify integration)
-docs/schemas/
