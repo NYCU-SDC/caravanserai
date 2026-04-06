@@ -55,4 +55,10 @@ type Runtime interface {
 	// omitted from the returned slice (the caller can detect this by comparing
 	// len(result) with len(project.Spec.Services)).
 	InspectProject(ctx context.Context, project *v1.Project) ([]ContainerState, error)
+
+	// GetContainerIPs returns a map of serviceName → IP address for each
+	// service container in the project. The IP is read from the container's
+	// attachment to the project bridge network (cara-{projectName}).
+	// Services whose containers do not exist or have no IP are omitted.
+	GetContainerIPs(ctx context.Context, project *v1.Project) (map[string]string, error)
 }

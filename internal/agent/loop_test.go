@@ -20,9 +20,10 @@ import (
 
 // mockRuntime implements docker.Runtime for testing.
 type mockRuntime struct {
-	inspectFn   func(ctx context.Context, project *v1.Project) ([]docker.ContainerState, error)
-	reconcileFn func(ctx context.Context, project *v1.Project) error
-	removeFn    func(ctx context.Context, name string, spec v1.ProjectSpec) error
+	inspectFn       func(ctx context.Context, project *v1.Project) ([]docker.ContainerState, error)
+	reconcileFn     func(ctx context.Context, project *v1.Project) error
+	removeFn        func(ctx context.Context, name string, spec v1.ProjectSpec) error
+	getContainerIPs func(ctx context.Context, project *v1.Project) (map[string]string, error)
 }
 
 func (m *mockRuntime) InspectProject(ctx context.Context, project *v1.Project) ([]docker.ContainerState, error) {
@@ -44,6 +45,13 @@ func (m *mockRuntime) RemoveProject(ctx context.Context, name string, spec v1.Pr
 		return m.removeFn(ctx, name, spec)
 	}
 	return nil
+}
+
+func (m *mockRuntime) GetContainerIPs(ctx context.Context, project *v1.Project) (map[string]string, error) {
+	if m.getContainerIPs != nil {
+		return m.getContainerIPs(ctx, project)
+	}
+	return nil, nil
 }
 
 // statusUpdate records a single call to PATCH /api/v1/projects/{name}/status.
@@ -167,7 +175,7 @@ func TestHealthCheckOne(t *testing.T) {
 				},
 			}
 
-			healthCheckOne(context.Background(), client, rt, tt.project, zap.NewNop())
+			healthCheckOne(context.Background(), client, rt, nil, tt.project, zap.NewNop())
 
 			require.Len(t, *updates, tt.wantCount)
 			if tt.wantCount > 0 {
@@ -198,7 +206,7 @@ func TestHealthCheckOne_InspectError(t *testing.T) {
 		},
 	}
 
-	healthCheckOne(context.Background(), client, rt, project, zap.NewNop())
+	healthCheckOne(context.Background(), client, rt, nil, project, zap.NewNop())
 
 	require.Len(t, *updates, 1)
 	u := (*updates)[0]
@@ -232,7 +240,7 @@ func TestHealthCheckOne_CrashedBeforeMissing(t *testing.T) {
 		},
 	}
 
-	healthCheckOne(context.Background(), client, rt, project, zap.NewNop())
+	healthCheckOne(context.Background(), client, rt, nil, project, zap.NewNop())
 
 	require.Len(t, *updates, 1)
 	u := (*updates)[0]
@@ -325,7 +333,7 @@ func TestBootstrapRunningProjects(t *testing.T) {
 		},
 	}
 
-	bootstrapRunningProjects(context.Background(), client, rt, zap.NewNop())
+	bootstrapRunningProjects(context.Background(), client, rt, nil, zap.NewNop())
 
 	// Only "running-crashed" should have generated a status update (Failed).
 	// "running-healthy" is healthy (no-op). "scheduled-new" is skipped

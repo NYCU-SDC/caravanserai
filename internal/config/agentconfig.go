@@ -27,6 +27,10 @@ type AgentConfig struct {
 	// The server exposes the port-forward WebSocket endpoint and a health
 	// probe.  Defaults to "9090".
 	ListenPort string `yaml:"listen_port" envconfig:"AGENT_LISTEN_PORT"`
+	// ProxyListenAddr is the address the ingress reverse proxy listens on.
+	// The proxy routes incoming HTTP requests to containers based on the
+	// Host header using ingress rules from project specs.  Defaults to ":8081".
+	ProxyListenAddr string `yaml:"proxy_listen_addr" envconfig:"PROXY_LISTEN_ADDR"`
 }
 
 // LoadAgent reads cara-agent config from file → env → flags.
@@ -42,6 +46,7 @@ func LoadAgent() (AgentConfig, *LogBuffer) {
 		HeartbeatInterval: 30 * time.Second,
 		DockerHost:        "unix:///var/run/docker.sock",
 		ListenPort:        "9090",
+		ProxyListenAddr:   ":8081",
 	}
 
 	var err error
@@ -99,6 +104,7 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 		NodeName:         os.Getenv("NODE_NAME"),
 		DockerHost:       os.Getenv("DOCKER_HOST"),
 		ListenPort:       os.Getenv("AGENT_LISTEN_PORT"),
+		ProxyListenAddr:  os.Getenv("PROXY_LISTEN_ADDR"),
 	}
 
 	if raw := os.Getenv("HEARTBEAT_INTERVAL"); raw != "" {
@@ -121,6 +127,7 @@ func AgentFromFlags(cfg *AgentConfig) (*AgentConfig, error) {
 	flag.DurationVar(&flagConfig.HeartbeatInterval, "heartbeat-interval", 0, "interval between heartbeats (default: 30s)")
 	flag.StringVar(&flagConfig.DockerHost, "docker-host", "", "Docker daemon endpoint (default: unix:///var/run/docker.sock)")
 	flag.StringVar(&flagConfig.ListenPort, "agent-port", "", "Agent HTTP server port (default: 9090)")
+	flag.StringVar(&flagConfig.ProxyListenAddr, "proxy-listen-addr", "", "Ingress proxy listen address (default: :8081)")
 	flag.Parse()
 	return configutil.Merge[AgentConfig](cfg, flagConfig)
 }

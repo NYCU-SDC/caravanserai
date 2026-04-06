@@ -13,6 +13,17 @@ import (
 	"go.uber.org/zap"
 )
 
+// RouteUpdater is the narrow interface consumed by the agent loop to maintain
+// proxy routes.  It is satisfied by *proxy.RouteTable.
+type RouteUpdater interface {
+	// Update builds routes from the project's ingress definitions and the
+	// discovered container IPs.  Existing routes for the project are replaced.
+	Update(project *v1.Project, containerIPs map[string]string)
+
+	// Remove deletes all routes belonging to the named project.
+	Remove(projectName string)
+}
+
 // Run registers the node with the control-plane and then runs two concurrent
 // loops until ctx is cancelled:
 //
@@ -26,7 +37,10 @@ import (
 // The initial registration is retried with a fixed 5-second back-off until it
 // succeeds or ctx is cancelled, so that the agent can start before the server
 // is ready.
-func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatInterval time.Duration, agentPort int, logger *zap.Logger) {
+//
+// If routes is non-nil, the agent will maintain proxy routes for projects that
+// have ingress definitions.
+func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatInterval time.Duration, agentPort int, routes RouteUpdater, logger *zap.Logger) {
 	const pollInterval = 10 * time.Second
 
 	spec := v1.NodeSpec{
@@ -52,7 +66,7 @@ func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatI
 	// them from the server and verify containers are still alive so that
 	// failures are detected immediately rather than waiting for the first
 	// poll tick.
-	bootstrapRunningProjects(ctx, client, runtime, logger)
+	bootstrapRunningProjects(ctx, client, runtime, routes, logger)
 
 	// ── Heartbeat loop ────────────────────────────────────────────────────
 	heartbeatTicker := time.NewTicker(heartbeatInterval)
@@ -86,7 +100,7 @@ func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatI
 			}
 
 		case <-pollTicker.C:
-			reconcileProjects(ctx, client, runtime, logger)
+			reconcileProjects(ctx, client, runtime, routes, logger)
 		}
 	}
 }
@@ -126,8 +140,9 @@ func reRegister(ctx context.Context, client *Client, spec v1.NodeSpec, logger *z
 
 // bootstrapRunningProjects fetches all projects (including Running) from the
 // server and runs healthCheckOne on each Running project to rebuild the Agent's
-// awareness after a restart.
-func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docker.Runtime, logger *zap.Logger) {
+// awareness after a restart.  For healthy Running projects with ingress rules,
+// proxy routes are re-established.
+func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, logger *zap.Logger) {
 	projects, err := client.ListProjectsForReconcile(ctx)
 	if err != nil {
 		logger.Warn("Bootstrap: failed to list projects", zap.Error(err))
@@ -138,7 +153,7 @@ func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docke
 	for _, p := range projects {
 		if p.Status.Phase == v1.ProjectPhaseRunning {
 			running++
-			healthCheckOne(ctx, client, runtime, p, logger)
+			healthCheckOne(ctx, client, runtime, routes, p, logger)
 		}
 	}
 
@@ -150,7 +165,7 @@ func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docke
 //   - Terminating → tear down containers
 //   - Running → health-check containers
 //   - Scheduled → reconcile (create/start) containers
-func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, logger *zap.Logger) {
+func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, logger *zap.Logger) {
 	projects, err := client.ListProjectsForReconcile(ctx)
 	if err != nil {
 		logger.Warn("Failed to list projects for reconcile", zap.Error(err))
@@ -166,11 +181,11 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 	for _, p := range projects {
 		switch p.Status.Phase {
 		case v1.ProjectPhaseTerminating:
-			terminateOne(ctx, client, runtime, p, logger)
+			terminateOne(ctx, client, runtime, routes, p, logger)
 		case v1.ProjectPhaseRunning:
-			healthCheckOne(ctx, client, runtime, p, logger)
+			healthCheckOne(ctx, client, runtime, routes, p, logger)
 		default:
-			reconcileOne(ctx, client, runtime, p, logger)
+			reconcileOne(ctx, client, runtime, routes, p, logger)
 		}
 	}
 }
@@ -181,7 +196,9 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 //  3. If all containers are running and count matches → report Running.
 //  4. Otherwise call ReconcileProject to create/start missing containers, then
 //     report Running on success or Failed on error.
-func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, p *v1.Project, logger *zap.Logger) {
+//
+// After a successful transition to Running, proxy routes are updated.
+func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, p *v1.Project, logger *zap.Logger) {
 	log := logger.With(zap.String("project", p.Name))
 
 	states, err := runtime.InspectProject(ctx, p)
@@ -225,6 +242,7 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, p
 		); err != nil {
 			log.Warn("Failed to update project status", zap.Error(err))
 		}
+		updateProxyRoutes(ctx, runtime, routes, p, log)
 		return
 	}
 
@@ -246,12 +264,16 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, p
 	); err != nil {
 		log.Warn("Failed to update project status to Running", zap.Error(err))
 	}
+
+	updateProxyRoutes(ctx, runtime, routes, p, log)
 }
 
 // terminateOne tears down all Docker resources for a Terminating project and
 // reports Terminated back to the server.  The ProjectTerminationController on
 // the server will then perform the final store deletion.
-func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, p *v1.Project, logger *zap.Logger) {
+//
+// Proxy routes are removed after successful teardown.
+func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, p *v1.Project, logger *zap.Logger) {
 	log := logger.With(zap.String("project", p.Name))
 	log.Info("Removing Docker resources for Terminating project")
 
@@ -263,6 +285,11 @@ func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, p
 			err.Error(),
 		)
 		return
+	}
+
+	if routes != nil {
+		routes.Remove(p.Name)
+		log.Info("Removed proxy routes for project")
 	}
 
 	log.Info("Project resources removed, reporting Terminated")
@@ -279,7 +306,10 @@ func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, p
 // any container has crashed, exited, or is missing.  It does NOT attempt to
 // restart containers — it only reports the observed state.  A future
 // ProjectRecoveryController will handle automated recovery.
-func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime, p *v1.Project, logger *zap.Logger) {
+//
+// For healthy projects, proxy routes are re-affirmed to handle container IP
+// changes after a restart.
+func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, p *v1.Project, logger *zap.Logger) {
 	log := logger.With(zap.String("project", p.Name))
 
 	states, err := runtime.InspectProject(ctx, p)
@@ -342,6 +372,26 @@ func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime,
 		return
 	}
 
-	// All containers are running — healthy, nothing to do.
+	// All containers are running — healthy.
+	// Re-affirm proxy routes to handle container IP changes after restart.
 	log.Debug("All containers healthy, nothing to do")
+	updateProxyRoutes(ctx, runtime, routes, p, log)
+}
+
+// updateProxyRoutes discovers container IPs and updates the proxy route table
+// for a project.  It is a no-op if routes is nil or the project has no ingress
+// definitions.
+func updateProxyRoutes(ctx context.Context, runtime docker.Runtime, routes RouteUpdater, p *v1.Project, log *zap.Logger) {
+	if routes == nil || len(p.Spec.Ingress) == 0 {
+		return
+	}
+
+	ips, err := runtime.GetContainerIPs(ctx, p)
+	if err != nil {
+		log.Warn("Failed to get container IPs for proxy routes", zap.Error(err))
+		return
+	}
+
+	routes.Update(p, ips)
+	log.Info("Updated proxy routes for project")
 }
