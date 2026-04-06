@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "node.json",
   "$ref": "#/$defs/Node",
   "$defs": {
     "Condition": {
@@ -225,5 +226,6 @@
       "type": "object",
       "description": "ResourceList is a named set of resource quantities — cpu, memory, disk — whose values follow the same string format as Kubernetes: \"500m\", \"4Gi\", \"100Mbps\"."
     }
-  }
+  },
+  "title": "Node"
 }

@@ -252,17 +252,26 @@ All endpoints are under `/api/v1/`.
 ## Development
 
 ```bash
+# Set up git hooks (run once after cloning)
+make install-hooks
+
 # Run all unit tests
 make test
 
 # Run integration tests (requires Docker)
 make test-integration
 
+# Regenerate JSON Schemas from Go types
+make schemas
+
 # Build a single binary
 make -C cmd/cara-server build
 make -C cmd/cara-agent  build
-make -C cmd/caractrl    build
+make -C cmd/caractl    build
 ```
+
+The pre-commit hook automatically regenerates `schemas/` when `api/v1/` or
+`cmd/schemagen/` files are staged, so schema files stay in sync with Go types.
 
 ### Docker resource naming
 

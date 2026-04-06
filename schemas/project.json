@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "project.json",
   "$ref": "#/$defs/Project",
   "$defs": {
     "Condition": {
@@ -328,5 +329,6 @@
       ],
       "description": "Governs the lifecycle and backup behaviour of a Volume."
     }
-  }
+  },
+  "title": "Project"
 }
