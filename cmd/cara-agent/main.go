@@ -14,6 +14,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/agent"
 	agentapiserver "NYCU-SDC/caravanserai/internal/agent/apiserver"
 	forwardhandler "NYCU-SDC/caravanserai/internal/agent/apiserver/handler/forward"
+	logshandler "NYCU-SDC/caravanserai/internal/agent/apiserver/handler/logs"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
 	"NYCU-SDC/caravanserai/internal/agent/proxy"
 	"NYCU-SDC/caravanserai/internal/appinit"
@@ -110,8 +111,12 @@ func main() {
 
 	// ── Agent HTTP server ────────────────────────────────────────────────
 	apiSrv := agentapiserver.New(logger)
-	problemWriter := problem.NewWithMapping(forwardhandler.NewProblemMapping())
-	apiSrv.Register(forwardhandler.NewHandler(logger, dockerRuntime, problemWriter))
+
+	forwardPW := problem.NewWithMapping(forwardhandler.NewProblemMapping())
+	apiSrv.Register(forwardhandler.NewHandler(logger, dockerRuntime, forwardPW))
+
+	logsPW := problem.NewWithMapping(logshandler.NewProblemMapping())
+	apiSrv.Register(logshandler.NewHandler(logger, dockerRuntime, logsPW))
 
 	httpServer := &http.Server{
 		Addr:    net.JoinHostPort("0.0.0.0", cfg.ListenPort),

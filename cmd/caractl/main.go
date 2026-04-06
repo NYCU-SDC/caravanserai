@@ -41,6 +41,7 @@ func init() {
 	rootCmd.AddCommand(cli.NewDeleteCmd())
 	rootCmd.AddCommand(cli.NewApplyCmd())
 	rootCmd.AddCommand(cli.NewPortForwardCmd())
+	rootCmd.AddCommand(cli.NewLogsCmd())
 }
 
 func main() {
