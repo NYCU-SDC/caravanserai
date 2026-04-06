@@ -5,8 +5,9 @@
 # Usage: scripts/generate-index.sh <output-dir>
 #   e.g.  scripts/generate-index.sh website/out
 #
-# Only top-level schema pages (e.g. node.md, project.md) are linked.
-# Sub-definition pages (e.g. node-defs-condition.md) are excluded.
+# Only top-level schema pages (e.g. node.html, project.html) are linked.
+# Sub-definition pages (e.g. node-defs-condition.html) are excluded.
+# Run this AFTER md-to-html.sh so .html files exist.
 
 set -euo pipefail
 
@@ -54,11 +55,12 @@ cat > "${OUT_DIR}/index.html" <<'HTML_HEAD'
 HTML_HEAD
 
 # Only include top-level schema pages (no hyphens in basename = not a sub-definition)
-for page in "${OUT_DIR}"/*.md; do
+for page in "${OUT_DIR}"/*.html; do
   filename="$(basename "$page")"
-  # Skip sub-definition pages like node-defs-condition.md
+  [ "$filename" = "index.html" ] && continue
+  # Skip sub-definition pages like node-defs-condition.html
   case "$filename" in *-*) continue ;; esac
-  name="${filename%.md}"
+  name="${filename%.html}"
   title="$(echo "$name" | sed 's/.*/\u&/')"
   echo "    <li><a href=\"${filename}\">${title}</a></li>" >> "${OUT_DIR}/index.html"
 done

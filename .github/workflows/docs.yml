@@ -47,7 +47,10 @@ jobs:
       - name: Generate schema docs
         run: |
           mkdir -p website/out
-          npx @adobe/jsonschema2md -d schemas -o website/out -e json -x - -n
+          npx --yes @adobe/jsonschema2md -d schemas -o website/out -e json -x - -n
+
+      - name: Convert Markdown to HTML
+        run: scripts/md-to-html.sh website/out
 
       - name: Generate index page
         run: scripts/generate-index.sh website/out
