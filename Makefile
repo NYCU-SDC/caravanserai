@@ -71,5 +71,11 @@ dev-server: dev-up build
 dev-logs:
 	@docker compose logs -f
 
+install-hooks:
+	@echo -e ":: $(GREEN)Installing git hooks...$(NC)"
+	@git config core.hooksPath .githooks \
+		&& echo -e "==> $(BLUE)Git hooks installed (using .githooks/)$(NC)" \
+		|| (echo -e "==> $(RED)Failed to configure git hooks$(NC)" && exit 1)
+
 .PHONY: all prepare build run-server run-agent run-cli test test-integration schemas
-.PHONY: dev-up dev-down dev-reset dev-server dev-logs
+.PHONY: dev-up dev-down dev-reset dev-server dev-logs install-hooks

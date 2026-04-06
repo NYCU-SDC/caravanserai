@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#
+# pre-commit hook — Regenerate JSON Schemas and stage them if changed.
+#
+# Install via: make install-hooks
+
+set -euo pipefail
+
+# Only run if api/v1/ or cmd/schemagen/ files are staged.
+if git diff --cached --name-only | grep -qE '^(api/v1/|cmd/schemagen/)'; then
+  echo "pre-commit: api/v1/ or cmd/schemagen/ changed, regenerating schemas..."
+  make schemas
+  git add schemas/
+fi
