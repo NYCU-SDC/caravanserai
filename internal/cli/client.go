@@ -89,13 +89,20 @@ func (c *Client) DeleteNode(ctx context.Context, name string) error {
 	return checkStatus(resp)
 }
 
+// ApplyResult wraps the resource returned by an apply operation together with
+// whether it was newly created or updated (configured).
+type ApplyResult struct {
+	Resource any
+	Created  bool // true = POST created; false = PUT updated
+}
+
 // ApplyResource submits a raw YAML/JSON manifest to the server.
 // The kind field in the manifest is used to route to the correct endpoint.
-func (c *Client) ApplyResource(ctx context.Context, raw []byte) (any, error) {
+func (c *Client) ApplyResource(ctx context.Context, raw []byte) (ApplyResult, error) {
 	// Decode just the TypeMeta to determine which endpoint to call.
 	var meta v1.TypeMeta
 	if err := json.Unmarshal(raw, &meta); err != nil {
-		return nil, fmt.Errorf("decode kind: %w", err)
+		return ApplyResult{}, fmt.Errorf("decode kind: %w", err)
 	}
 
 	switch meta.Kind {
@@ -104,34 +111,72 @@ func (c *Client) ApplyResource(ctx context.Context, raw []byte) (any, error) {
 	case "Project":
 		return c.applyProject(ctx, raw)
 	default:
-		return nil, fmt.Errorf("unsupported kind %q", meta.Kind)
+		return ApplyResult{}, fmt.Errorf("unsupported kind %q", meta.Kind)
 	}
 }
 
-// applyNode posts a Node manifest. It creates the node if it does not exist.
-func (c *Client) applyNode(ctx context.Context, raw []byte) (v1.Node, error) {
+// applyNode creates or updates a Node manifest. It tries POST first; on 409
+// Conflict it falls back to PUT to update the existing resource.
+func (c *Client) applyNode(ctx context.Context, raw []byte) (ApplyResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/nodes",
 		bytes.NewReader(raw))
 	if err != nil {
-		return v1.Node{}, fmt.Errorf("build request: %w", err)
+		return ApplyResult{}, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return v1.Node{}, fmt.Errorf("request failed: %w", err)
+		return ApplyResult{}, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	// On 409, fall back to PUT for update.
+	if resp.StatusCode == http.StatusConflict {
+		_ = resp.Body.Close()
+
+		var meta struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			return ApplyResult{}, fmt.Errorf("decode name for update: %w", err)
+		}
+
+		putReq, err := http.NewRequestWithContext(ctx, http.MethodPut,
+			c.BaseURL+"/api/v1/nodes/"+meta.Metadata.Name, bytes.NewReader(raw))
+		if err != nil {
+			return ApplyResult{}, fmt.Errorf("build PUT request: %w", err)
+		}
+		putReq.Header.Set("Content-Type", "application/json")
+
+		putResp, err := c.HTTPClient.Do(putReq)
+		if err != nil {
+			return ApplyResult{}, fmt.Errorf("PUT request failed: %w", err)
+		}
+		defer putResp.Body.Close()
+
+		if err := checkStatus(putResp); err != nil {
+			return ApplyResult{}, err
+		}
+
+		var node v1.Node
+		if err := json.NewDecoder(putResp.Body).Decode(&node); err != nil {
+			return ApplyResult{}, fmt.Errorf("decode response: %w", err)
+		}
+		return ApplyResult{Resource: node, Created: false}, nil
+	}
+
 	if err := checkStatus(resp); err != nil {
-		return v1.Node{}, err
+		return ApplyResult{}, err
 	}
 
 	var node v1.Node
 	if err := json.NewDecoder(resp.Body).Decode(&node); err != nil {
-		return v1.Node{}, fmt.Errorf("decode response: %w", err)
+		return ApplyResult{}, fmt.Errorf("decode response: %w", err)
 	}
-	return node, nil
+	return ApplyResult{Resource: node, Created: true}, nil
 }
 
 // GetProjects fetches projects from the server. If phase is non-empty, only
@@ -210,30 +255,68 @@ func (c *Client) DeleteProject(ctx context.Context, name string) (deleted bool, 
 	return resp.StatusCode == http.StatusNoContent, nil
 }
 
-// applyProject posts a Project manifest to the server.
-func (c *Client) applyProject(ctx context.Context, raw []byte) (v1.Project, error) {
+// applyProject creates or updates a Project manifest. It tries POST first; on 409
+// Conflict it falls back to PUT to update the existing resource.
+func (c *Client) applyProject(ctx context.Context, raw []byte) (ApplyResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/projects",
 		bytes.NewReader(raw))
 	if err != nil {
-		return v1.Project{}, fmt.Errorf("build request: %w", err)
+		return ApplyResult{}, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return v1.Project{}, fmt.Errorf("request failed: %w", err)
+		return ApplyResult{}, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	// On 409, fall back to PUT for update.
+	if resp.StatusCode == http.StatusConflict {
+		_ = resp.Body.Close()
+
+		var meta struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			return ApplyResult{}, fmt.Errorf("decode name for update: %w", err)
+		}
+
+		putReq, err := http.NewRequestWithContext(ctx, http.MethodPut,
+			c.BaseURL+"/api/v1/projects/"+meta.Metadata.Name, bytes.NewReader(raw))
+		if err != nil {
+			return ApplyResult{}, fmt.Errorf("build PUT request: %w", err)
+		}
+		putReq.Header.Set("Content-Type", "application/json")
+
+		putResp, err := c.HTTPClient.Do(putReq)
+		if err != nil {
+			return ApplyResult{}, fmt.Errorf("PUT request failed: %w", err)
+		}
+		defer putResp.Body.Close()
+
+		if err := checkStatus(putResp); err != nil {
+			return ApplyResult{}, err
+		}
+
+		var project v1.Project
+		if err := json.NewDecoder(putResp.Body).Decode(&project); err != nil {
+			return ApplyResult{}, fmt.Errorf("decode response: %w", err)
+		}
+		return ApplyResult{Resource: project, Created: false}, nil
+	}
+
 	if err := checkStatus(resp); err != nil {
-		return v1.Project{}, err
+		return ApplyResult{}, err
 	}
 
 	var project v1.Project
 	if err := json.NewDecoder(resp.Body).Decode(&project); err != nil {
-		return v1.Project{}, fmt.Errorf("decode response: %w", err)
+		return ApplyResult{}, fmt.Errorf("decode response: %w", err)
 	}
-	return project, nil
+	return ApplyResult{Resource: project, Created: true}, nil
 }
 
 // checkStatus returns an error if the HTTP response indicates a failure.

@@ -202,3 +202,100 @@ func TestProjectNameValidation(t *testing.T) {
 		drainBody(resp)
 	}
 }
+
+// TestProjectUpdate exercises PUT /api/v1/projects/{name}:
+//
+//	PUT on Pending project  → 200, spec updated
+//	PUT on non-existent     → 404
+//	PUT with name mismatch  → 400
+//	PUT on Running project  → 409 (conflict state)
+func TestProjectUpdate(t *testing.T) {
+	const projectName = "e2e-project-update"
+
+	validSpec := v1.ProjectSpec{
+		Services: []v1.ServiceDef{
+			{Name: "web", Image: "nginx:latest"},
+		},
+	}
+
+	// ── Setup: create a project (starts in Pending) ───────────────────────────
+
+	createBody := mustMarshal(t, v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: projectName},
+		Spec:       validSpec,
+	})
+	resp := doRequest(t, http.MethodPost, "/api/v1/projects", createBody)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "create project: expected 201")
+	drainBody(resp)
+
+	// ── 1. PUT updates spec in Pending phase → 200 ────────────────────────────
+
+	updatedSpec := v1.ProjectSpec{
+		Services: []v1.ServiceDef{
+			{Name: "api", Image: "myapp:v2"},
+		},
+	}
+	updateBody := mustMarshal(t, v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: projectName},
+		Spec:       updatedSpec,
+	})
+	resp = doRequest(t, http.MethodPut, "/api/v1/projects/"+projectName, updateBody)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "update project: expected 200")
+
+	var updated v1.Project
+	mustDecodeBody(t, resp, &updated)
+	assert.Equal(t, projectName, updated.Name)
+	require.Len(t, updated.Spec.Services, 1)
+	assert.Equal(t, "api", updated.Spec.Services[0].Name, "service name should be updated")
+	assert.Equal(t, "myapp:v2", updated.Spec.Services[0].Image, "service image should be updated")
+	assert.Equal(t, v1.ProjectPhasePending, updated.Status.Phase, "phase should still be Pending")
+
+	// ── 2. PUT on non-existent project → 404 ──────────────────────────────────
+
+	nonExistentBody := mustMarshal(t, v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: "no-such-project"},
+		Spec:       validSpec,
+	})
+	resp = doRequest(t, http.MethodPut, "/api/v1/projects/no-such-project", nonExistentBody)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "update non-existent: expected 404")
+	drainBody(resp)
+
+	// ── 3. PUT with name mismatch → 400 ───────────────────────────────────────
+
+	mismatchBody := mustMarshal(t, v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: "different-name"},
+		Spec:       validSpec,
+	})
+	resp = doRequest(t, http.MethodPut, "/api/v1/projects/"+projectName, mismatchBody)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "name mismatch: expected 400")
+	drainBody(resp)
+
+	// ── 4. Transition to Running, then PUT → 409 ──────────────────────────────
+
+	// Patch phase to Running via status endpoint.
+	patchBody := mustMarshal(t, map[string]string{"phase": string(v1.ProjectPhaseRunning)})
+	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", patchBody)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode, "patch to Running: expected 204")
+	drainBody(resp)
+
+	resp = doRequest(t, http.MethodPut, "/api/v1/projects/"+projectName, updateBody)
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "update Running project: expected 409")
+	drainBody(resp)
+
+	// ── 5. Transition to Failed, then PUT → 200 (allowed) ────────────────────
+
+	patchBody = mustMarshal(t, map[string]string{"phase": string(v1.ProjectPhaseFailed)})
+	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", patchBody)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode, "patch to Failed: expected 204")
+	drainBody(resp)
+
+	resp = doRequest(t, http.MethodPut, "/api/v1/projects/"+projectName, updateBody)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "update Failed project: expected 200")
+	drainBody(resp)
+
+	// ── Cleanup ───────────────────────────────────────────────────────────────
+
+	resp = doRequest(t, http.MethodDelete, "/api/v1/projects/"+projectName, nil)
+	assert.Contains(t, []int{http.StatusNoContent, http.StatusAccepted}, resp.StatusCode, "delete project")
+	drainBody(resp)
+}

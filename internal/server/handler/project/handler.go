@@ -3,6 +3,7 @@
 // Routes registered:
 //
 //	POST   /api/v1/projects                  — create a Project
+//	PUT    /api/v1/projects/{name}           — update a Project's spec
 //	GET    /api/v1/projects                  — list Projects (supports ?phase= and ?nodeRef= filters)
 //	GET    /api/v1/projects/{name}           — get a single Project
 //	DELETE /api/v1/projects/{name}           — delete a Project
@@ -49,6 +50,7 @@ func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter
 // RegisterRoutes satisfies apiserver.RouteRegistrar.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("POST /api/v1/projects", mid.HandlerFunc(h.createProject))
+	mux.HandleFunc("PUT /api/v1/projects/{name}", mid.HandlerFunc(h.updateProject))
 	mux.HandleFunc("GET /api/v1/projects", mid.HandlerFunc(h.listProjects))
 	mux.HandleFunc("GET /api/v1/projects/{name}", mid.HandlerFunc(h.getProject))
 	mux.HandleFunc("DELETE /api/v1/projects/{name}", mid.HandlerFunc(h.deleteProject))
@@ -56,6 +58,58 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
+
+// validateProjectSpec validates the project spec, returning a handlerutil.ValidationError
+// if any rule is violated, or nil if the spec is valid.
+func validateProjectSpec(spec v1.ProjectSpec) error {
+	if len(spec.Services) == 0 {
+		return handlerutil.NewValidationError("spec.services", nil, "spec.services must contain at least one service")
+	}
+	for _, svc := range spec.Services {
+		if svc.Name == "" {
+			return handlerutil.NewValidationError("spec.services[].name", nil, "each service must have a non-empty name")
+		}
+		if svc.Image == "" {
+			return handlerutil.NewValidationError("spec.services[].image", svc.Name, "service "+svc.Name+": image is required")
+		}
+	}
+
+	if len(spec.Ingress) > 0 {
+		serviceNames := make(map[string]bool, len(spec.Services))
+		for _, svc := range spec.Services {
+			serviceNames[svc.Name] = true
+		}
+
+		ingressNames := make(map[string]bool, len(spec.Ingress))
+		for _, ing := range spec.Ingress {
+			if ing.Name == "" {
+				return handlerutil.NewValidationError("spec.ingress[].name", nil, "each ingress entry must have a non-empty name")
+			}
+
+			if ingressNames[ing.Name] {
+				return handlerutil.NewValidationError("spec.ingress[].name", ing.Name, "duplicate ingress name: "+ing.Name)
+			}
+			ingressNames[ing.Name] = true
+
+			if !serviceNames[ing.Target.Service] {
+				return handlerutil.NewValidationError("spec.ingress[].target.service", ing.Target.Service,
+					"ingress "+ing.Name+": target service "+ing.Target.Service+" does not exist in spec.services")
+			}
+
+			if ing.Target.Port <= 0 {
+				return handlerutil.NewValidationError("spec.ingress[].target.port", ing.Target.Port,
+					fmt.Sprintf("ingress %s: target port must be greater than 0", ing.Name))
+			}
+
+			if ing.Access.Scope != "" && ing.Access.Scope != v1.IngressScopeInternal {
+				return handlerutil.NewValidationError("spec.ingress[].access.scope", ing.Access.Scope,
+					"ingress "+ing.Name+": only \"Internal\" scope is supported")
+			}
+		}
+	}
+
+	return nil
+}
 
 func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 	traceCtx, span := h.tracer.Start(r.Context(), "createProject")
@@ -81,69 +135,9 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate spec: at least one service with a non-empty image is required.
-	if len(project.Spec.Services) == 0 {
-		h.problemWriter.WriteError(traceCtx, w,
-			handlerutil.NewValidationError("spec.services", nil, "spec.services must contain at least one service"), logger)
+	if err := validateProjectSpec(project.Spec); err != nil {
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
-	}
-	for _, svc := range project.Spec.Services {
-		if svc.Name == "" {
-			h.problemWriter.WriteError(traceCtx, w,
-				handlerutil.NewValidationError("spec.services[].name", nil, "each service must have a non-empty name"), logger)
-			return
-		}
-		if svc.Image == "" {
-			h.problemWriter.WriteError(traceCtx, w,
-				handlerutil.NewValidationError("spec.services[].image", svc.Name, "service "+svc.Name+": image is required"), logger)
-			return
-		}
-	}
-
-	// Validate ingress rules (if present).
-	if len(project.Spec.Ingress) > 0 {
-		// Build a set of valid service names for target reference validation.
-		serviceNames := make(map[string]bool, len(project.Spec.Services))
-		for _, svc := range project.Spec.Services {
-			serviceNames[svc.Name] = true
-		}
-
-		ingressNames := make(map[string]bool, len(project.Spec.Ingress))
-		for _, ing := range project.Spec.Ingress {
-			if ing.Name == "" {
-				h.problemWriter.WriteError(traceCtx, w,
-					handlerutil.NewValidationError("spec.ingress[].name", nil, "each ingress entry must have a non-empty name"), logger)
-				return
-			}
-
-			if ingressNames[ing.Name] {
-				h.problemWriter.WriteError(traceCtx, w,
-					handlerutil.NewValidationError("spec.ingress[].name", ing.Name, "duplicate ingress name: "+ing.Name), logger)
-				return
-			}
-			ingressNames[ing.Name] = true
-
-			if !serviceNames[ing.Target.Service] {
-				h.problemWriter.WriteError(traceCtx, w,
-					handlerutil.NewValidationError("spec.ingress[].target.service", ing.Target.Service,
-						"ingress "+ing.Name+": target service "+ing.Target.Service+" does not exist in spec.services"), logger)
-				return
-			}
-
-			if ing.Target.Port <= 0 {
-				h.problemWriter.WriteError(traceCtx, w,
-					handlerutil.NewValidationError("spec.ingress[].target.port", ing.Target.Port,
-						fmt.Sprintf("ingress %s: target port must be greater than 0", ing.Name)), logger)
-				return
-			}
-
-			if ing.Access.Scope != "" && ing.Access.Scope != v1.IngressScopeInternal {
-				h.problemWriter.WriteError(traceCtx, w,
-					handlerutil.NewValidationError("spec.ingress[].access.scope", ing.Access.Scope,
-						"ingress "+ing.Name+": only \"Internal\" scope is supported"), logger)
-				return
-			}
-		}
 	}
 
 	// New projects start in Pending phase; the Scheduler will assign a node.
@@ -164,6 +158,61 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 
 	project.TypeMeta = v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"}
 	handlerutil.WriteJSONResponse(w, http.StatusCreated, &project)
+}
+
+func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "updateProject")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
+	name := r.PathValue("name")
+
+	var project v1.Project
+	if err := json.NewDecoder(r.Body).Decode(&project); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return
+	}
+
+	// Reject requests where the body name does not match the URL path.
+	if project.Name != "" && project.Name != name {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.name", project.Name,
+				fmt.Sprintf("metadata.name %q does not match URL path %q", project.Name, name)), logger)
+		return
+	}
+	project.Name = name
+
+	if err := validateProjectSpec(project.Spec); err != nil {
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	// TODO: add metadata.resourceVersion / optimistic concurrency in a future PR.
+
+	if err := h.store.UpdateProjectSpec(traceCtx, &project); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		}
+		if errors.Is(err, store.ErrConflictState) {
+			h.problemWriter.WriteError(traceCtx, w, err, logger)
+			return
+		}
+		logger.Error("UpdateProjectSpec failed", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	// Fetch the updated resource to return the full object (including status).
+	updated, err := h.store.GetProject(traceCtx, name)
+	if err != nil {
+		logger.Error("GetProject failed after update", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+	handlerutil.WriteJSONResponse(w, http.StatusOK, updated)
 }
 
 // listProjects handles GET /api/v1/projects.
