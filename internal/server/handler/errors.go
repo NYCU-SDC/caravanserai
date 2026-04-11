@@ -14,8 +14,9 @@ import (
 // to problem.NewWithMapping to create an HttpWriter.
 //
 // Mapped errors:
-//   - store.ErrNotFound     → 404 Not Found
-//   - store.ErrAlreadyExists → 409 Conflict
+//   - store.ErrNotFound       → 404 Not Found
+//   - store.ErrAlreadyExists  → 409 Conflict
+//   - store.ErrConflictState  → 409 Conflict
 //
 // Unrecognised errors return an empty Problem{}, which lets summer's built-in
 // fallback logic handle them (typically producing a 500 Internal Server Error).
@@ -26,6 +27,14 @@ func NewProblemMapping() func(error) problem.Problem {
 			return problem.NewNotFoundProblem(err.Error())
 
 		case errors.Is(err, store.ErrAlreadyExists):
+			return problem.Problem{
+				Title:  "Conflict",
+				Status: 409,
+				Type:   "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/409",
+				Detail: err.Error(),
+			}
+
+		case errors.Is(err, store.ErrConflictState):
 			return problem.Problem{
 				Title:  "Conflict",
 				Status: 409,

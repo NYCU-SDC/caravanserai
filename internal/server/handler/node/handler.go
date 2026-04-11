@@ -3,6 +3,7 @@
 // Routes registered:
 //
 //	POST   /api/v1/nodes                   — register / create a Node
+//	PUT    /api/v1/nodes/{name}            — update a Node's spec
 //	GET    /api/v1/nodes                   — list all Nodes
 //	GET    /api/v1/nodes/{name}            — get a single Node
 //	DELETE /api/v1/nodes/{name}            — delete a Node
@@ -58,6 +59,7 @@ func NewHandler(logger *zap.Logger, s store.NodeStore, ps ProjectLister, pw *pro
 // RegisterRoutes satisfies apiserver.RouteRegistrar.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("POST /api/v1/nodes", mid.HandlerFunc(h.createNode))
+	mux.HandleFunc("PUT /api/v1/nodes/{name}", mid.HandlerFunc(h.updateNode))
 	mux.HandleFunc("GET /api/v1/nodes", mid.HandlerFunc(h.listNodes))
 	mux.HandleFunc("GET /api/v1/nodes/{name}", mid.HandlerFunc(h.getNode))
 	mux.HandleFunc("DELETE /api/v1/nodes/{name}", mid.HandlerFunc(h.deleteNode))
@@ -109,6 +111,52 @@ func (h *Handler) createNode(w http.ResponseWriter, r *http.Request) {
 
 	node.TypeMeta = v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Node"}
 	handlerutil.WriteJSONResponse(w, http.StatusCreated, &node)
+}
+
+func (h *Handler) updateNode(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "updateNode")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
+	name := r.PathValue("name")
+
+	var node v1.Node
+	if err := json.NewDecoder(r.Body).Decode(&node); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return
+	}
+
+	// Reject requests where the body name does not match the URL path.
+	if node.Name != "" && node.Name != name {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.name", node.Name,
+				fmt.Sprintf("metadata.name %q does not match URL path %q", node.Name, name)), logger)
+		return
+	}
+	node.Name = name
+
+	// TODO: add metadata.resourceVersion / optimistic concurrency in a future PR.
+
+	if err := h.store.UpdateNodeSpec(traceCtx, &node); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("node not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		}
+		logger.Error("UpdateNodeSpec failed", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	// Fetch the updated resource to return the full object (including status).
+	updated, err := h.store.GetNode(traceCtx, name)
+	if err != nil {
+		logger.Error("GetNode failed after update", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+	handlerutil.WriteJSONResponse(w, http.StatusOK, updated)
 }
 
 func (h *Handler) listNodes(w http.ResponseWriter, r *http.Request) {

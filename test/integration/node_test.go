@@ -202,6 +202,73 @@ func TestNodeCRUD(t *testing.T) {
 	drainBody(resp)
 }
 
+// TestNodeUpdate exercises PUT /api/v1/nodes/{name}:
+//
+//	PUT on existing node  → 200, spec updated, status preserved
+//	PUT on non-existent   → 404
+//	PUT with name mismatch → 400
+func TestNodeUpdate(t *testing.T) {
+	const nodeName = "e2e-node-update"
+
+	// ── Setup: create a node ──────────────────────────────────────────────────
+
+	createBody := mustMarshal(t, v1.Node{
+		ObjectMeta: v1.ObjectMeta{Name: nodeName},
+		Spec:       v1.NodeSpec{Hostname: "original-host"},
+	})
+	resp := doRequest(t, http.MethodPost, "/api/v1/nodes", createBody)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "create node: expected 201")
+	drainBody(resp)
+
+	// Send a heartbeat so the node has a non-default status.
+	heartbeatBody := mustMarshal(t, map[string]string{"state": string(v1.NodeStateReady)})
+	resp = doRequest(t, http.MethodPost, "/api/v1/nodes/"+nodeName+"/heartbeat", heartbeatBody)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode, "heartbeat: expected 204")
+	drainBody(resp)
+
+	// ── 1. PUT updates spec, preserves status ─────────────────────────────────
+
+	updateBody := mustMarshal(t, v1.Node{
+		ObjectMeta: v1.ObjectMeta{Name: nodeName},
+		Spec:       v1.NodeSpec{Hostname: "updated-host", Unschedulable: true},
+	})
+	resp = doRequest(t, http.MethodPut, "/api/v1/nodes/"+nodeName, updateBody)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "update node: expected 200")
+
+	var updated v1.Node
+	mustDecodeBody(t, resp, &updated)
+	assert.Equal(t, nodeName, updated.Name)
+	assert.Equal(t, "updated-host", updated.Spec.Hostname, "spec.hostname should be updated")
+	assert.True(t, updated.Spec.Unschedulable, "spec.unschedulable should be true")
+	assert.Equal(t, v1.NodeStateReady, updated.Status.State, "status.state must be preserved")
+
+	// ── 2. PUT on non-existent node → 404 ─────────────────────────────────────
+
+	nonExistentBody := mustMarshal(t, v1.Node{
+		ObjectMeta: v1.ObjectMeta{Name: "no-such-node"},
+		Spec:       v1.NodeSpec{Hostname: "ghost"},
+	})
+	resp = doRequest(t, http.MethodPut, "/api/v1/nodes/no-such-node", nonExistentBody)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "update non-existent: expected 404")
+	drainBody(resp)
+
+	// ── 3. PUT with name mismatch → 400 ───────────────────────────────────────
+
+	mismatchBody := mustMarshal(t, v1.Node{
+		ObjectMeta: v1.ObjectMeta{Name: "different-name"},
+		Spec:       v1.NodeSpec{Hostname: "mismatch"},
+	})
+	resp = doRequest(t, http.MethodPut, "/api/v1/nodes/"+nodeName, mismatchBody)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "name mismatch: expected 400")
+	drainBody(resp)
+
+	// ── Cleanup ───────────────────────────────────────────────────────────────
+
+	resp = doRequest(t, http.MethodDelete, "/api/v1/nodes/"+nodeName, nil)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode, "cleanup delete")
+	drainBody(resp)
+}
+
 // TestNodeHeartbeatStateValidation verifies that the heartbeat endpoint
 // rejects unrecognised state values with 400 and accepts valid ones with 204.
 func TestNodeHeartbeatStateValidation(t *testing.T) {

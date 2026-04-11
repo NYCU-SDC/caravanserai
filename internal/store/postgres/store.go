@@ -288,6 +288,41 @@ func (s *Store) UpdateNode(ctx context.Context, node *v1.Node) error {
 	return nil
 }
 
+// UpdateNodeSpec implements store.NodeStore.
+// Only the spec, labels, annotations, and updated_at columns are written;
+// status and phase are untouched.
+func (s *Store) UpdateNodeSpec(ctx context.Context, node *v1.Node) error {
+	now := time.Now().UTC()
+
+	spec, err := json.Marshal(node.Spec)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal node spec: %w", err)
+	}
+	labels, err := json.Marshal(node.Labels)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal node labels: %w", err)
+	}
+	annotations, err := json.Marshal(node.Annotations)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal node annotations: %w", err)
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE resources
+		SET spec = $1, labels = $2, annotations = $3, updated_at = $4
+		WHERE kind = $5 AND name = $6`,
+		spec, labels, annotations, now, kindNode, node.Name,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: update node spec %q: %w", node.Name, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: node %q", store.ErrNotFound, node.Name)
+	}
+	s.publish(event.TopicNodeUpdated, node.Name)
+	return nil
+}
+
 // DeleteNode implements store.NodeStore.
 func (s *Store) DeleteNode(ctx context.Context, name string) error {
 	tag, err := s.pool.Exec(ctx,
@@ -559,6 +594,49 @@ func (s *Store) UpdateProjectStatus(ctx context.Context, name string, status v1.
 		return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
 	}
 	s.publish(event.TopicProjectUpdated, name)
+	return nil
+}
+
+// UpdateProjectSpec implements store.ProjectStore.
+// Only the spec, labels, annotations, and updated_at columns are written;
+// status and phase are untouched. The update is only allowed when the
+// project's current phase is Pending or Failed; returns ErrConflictState
+// otherwise.
+func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) error {
+	now := time.Now().UTC()
+
+	spec, err := json.Marshal(project.Spec)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal project spec: %w", err)
+	}
+	labels, err := json.Marshal(project.Labels)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal project labels: %w", err)
+	}
+	annotations, err := json.Marshal(project.Annotations)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal project annotations: %w", err)
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE resources
+		SET spec = $1, labels = $2, annotations = $3, updated_at = $4
+		WHERE kind = $5 AND name = $6 AND phase = ANY($7)`,
+		spec, labels, annotations, now, kindProject, project.Name,
+		[]string{string(v1.ProjectPhasePending), string(v1.ProjectPhaseFailed)},
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: update project spec %q: %w", project.Name, err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Distinguish "not found" from "wrong phase" by checking existence.
+		_, getErr := s.getProject(ctx, project.Name)
+		if getErr != nil {
+			return fmt.Errorf("%w: project %q", store.ErrNotFound, project.Name)
+		}
+		return fmt.Errorf("%w: project %q is not in Pending or Failed phase", store.ErrConflictState, project.Name)
+	}
+	s.publish(event.TopicProjectUpdated, project.Name)
 	return nil
 }
 

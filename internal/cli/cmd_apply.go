@@ -61,7 +61,7 @@ Examples:
 				printApplyConfirmation(cmd, result)
 				return nil
 			}
-			return printer.PrintAny(result)
+			return printer.PrintAny(result.Resource)
 		},
 	}
 
@@ -118,12 +118,17 @@ func normaliseYAMLNode(v any) any {
 }
 
 // printApplyConfirmation prints a short human-readable success line.
-func printApplyConfirmation(cmd *cobra.Command, result any) {
-	switch res := result.(type) {
+func printApplyConfirmation(cmd *cobra.Command, result ApplyResult) {
+	verb := "configured"
+	if result.Created {
+		verb = "created"
+	}
+
+	switch res := result.Resource.(type) {
 	case v1.Node:
-		fmt.Fprintf(cmd.OutOrStdout(), "node/%s created\n", res.Name)
+		fmt.Fprintf(cmd.OutOrStdout(), "node/%s %s\n", res.Name, verb)
 	case v1.Project:
-		fmt.Fprintf(cmd.OutOrStdout(), "project/%s created\n", res.Name)
+		fmt.Fprintf(cmd.OutOrStdout(), "project/%s %s\n", res.Name, verb)
 	default:
 		fmt.Fprintln(cmd.OutOrStdout(), "resource applied")
 	}

@@ -28,6 +28,11 @@ var ErrNotFound = errors.New("resource not found")
 // already in use.
 var ErrAlreadyExists = errors.New("resource already exists")
 
+// ErrConflictState is returned when an operation is not allowed because the
+// resource is in a state that conflicts with the request (e.g. updating a
+// Project spec while it is Running).
+var ErrConflictState = errors.New("operation conflicts with current resource state")
+
 // Store is the top-level persistence interface.  A single concrete type
 // (e.g. sqlite.Store) implements all methods; tests may implement a subset
 // via a narrow sub-interface or a hand-rolled stub.
@@ -60,6 +65,11 @@ type NodeStore interface {
 	// DeleteNode removes a Node by name.
 	// Returns ErrNotFound if it does not exist.
 	DeleteNode(ctx context.Context, name string) error
+
+	// UpdateNodeSpec writes only the user-mutable fields of a Node (spec,
+	// labels, annotations). Status is preserved. Returns ErrNotFound if it
+	// does not exist.
+	UpdateNodeSpec(ctx context.Context, node *v1.Node) error
 
 	// UpdateNodeStatus writes only the status sub-object of the named Node.
 	// This is the preferred path for the Agent heartbeat and the
@@ -105,6 +115,13 @@ type ProjectStore interface {
 	// Project.  Used by the Controller Manager to avoid overwriting Spec
 	// changes made concurrently by the API server.
 	UpdateProjectStatus(ctx context.Context, name string, status v1.ProjectStatus) error
+
+	// UpdateProjectSpec writes only the user-mutable fields of a Project
+	// (spec, labels, annotations). Status is preserved. The update is only
+	// allowed when the project's current phase is Pending or Failed; returns
+	// ErrConflictState if the project is in any other phase, and ErrNotFound
+	// if it does not exist.
+	UpdateProjectSpec(ctx context.Context, project *v1.Project) error
 
 	// ListProjectsByNodeRef returns all Projects assigned to the given node
 	// whose phase is one of the supplied phases.  Used by
