@@ -38,6 +38,7 @@ func init() {
 
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(cli.NewGetCmd())
+	rootCmd.AddCommand(cli.NewDescribeCmd())
 	rootCmd.AddCommand(cli.NewDeleteCmd())
 	rootCmd.AddCommand(cli.NewApplyCmd())
 	rootCmd.AddCommand(cli.NewPortForwardCmd())
