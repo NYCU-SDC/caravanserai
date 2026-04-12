@@ -48,19 +48,20 @@ func newDeleteNodeCmd() *cobra.Command {
 }
 
 func newDeleteProjectCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:     "project <name>",
 		Short:   "Delete a project",
 		Aliases: []string{"projects"},
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
+			force, _ := cmd.Flags().GetBool("force")
 			name := args[0]
 
 			client := NewClient(serverURL)
 			ctx := context.Background()
 
-			deleted, err := client.DeleteProject(ctx, name)
+			deleted, err := client.DeleteProject(ctx, name, force)
 			if err != nil {
 				return fmt.Errorf("delete project %q: %w", name, err)
 			}
@@ -73,4 +74,8 @@ func newDeleteProjectCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().Bool("force", false, "Immediately hard-delete the project, bypassing graceful termination. Docker resources on the node may be orphaned.")
+
+	return cmd
 }

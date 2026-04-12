@@ -299,3 +299,95 @@ func TestProjectUpdate(t *testing.T) {
 	assert.Contains(t, []int{http.StatusNoContent, http.StatusAccepted}, resp.StatusCode, "delete project")
 	drainBody(resp)
 }
+
+// TestProjectForceDelete verifies the ?force=true query parameter on
+// DELETE /api/v1/projects/{name}:
+//
+//	Force-delete a Running project       → 204, project gone
+//	Force-delete a Terminating project    → 204, project gone
+//	Force-delete a Pending project        → 204 (same as normal delete)
+//	Normal delete on Running project      → 202 (existing behaviour preserved)
+func TestProjectForceDelete(t *testing.T) {
+	// createProject is a helper that creates a project in Pending phase.
+	createProject := func(t *testing.T, name string) {
+		t.Helper()
+		body := mustMarshal(t, v1.Project{
+			ObjectMeta: v1.ObjectMeta{Name: name},
+			Spec: v1.ProjectSpec{
+				Services: []v1.ServiceDef{
+					{Name: "web", Image: "nginx:latest"},
+				},
+			},
+		})
+		resp := doRequest(t, http.MethodPost, "/api/v1/projects", body)
+		require.Equal(t, http.StatusCreated, resp.StatusCode, "create project %q", name)
+		drainBody(resp)
+	}
+
+	// patchPhase transitions a project to the given phase via the status endpoint.
+	patchPhase := func(t *testing.T, name string, phase v1.ProjectPhase) {
+		t.Helper()
+		body := mustMarshal(t, map[string]string{"phase": string(phase)})
+		resp := doRequest(t, http.MethodPatch, "/api/v1/projects/"+name+"/status", body)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode, "patch %q to %s", name, phase)
+		drainBody(resp)
+	}
+
+	// assertGone verifies a project no longer exists in the store.
+	assertGone := func(t *testing.T, name string) {
+		t.Helper()
+		resp := doRequest(t, http.MethodGet, "/api/v1/projects/"+name, nil)
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode, "project %q should be gone", name)
+		drainBody(resp)
+	}
+
+	t.Run("Force-delete Running project returns 204 and removes from store", func(t *testing.T) {
+		const name = "e2e-force-del-running"
+		createProject(t, name)
+		patchPhase(t, name, v1.ProjectPhaseRunning)
+
+		resp := doRequest(t, http.MethodDelete, "/api/v1/projects/"+name+"?force=true", nil)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		drainBody(resp)
+
+		assertGone(t, name)
+	})
+
+	t.Run("Force-delete Terminating project returns 204 and removes from store", func(t *testing.T) {
+		const name = "e2e-force-del-terminating"
+		createProject(t, name)
+		patchPhase(t, name, v1.ProjectPhaseTerminating)
+
+		resp := doRequest(t, http.MethodDelete, "/api/v1/projects/"+name+"?force=true", nil)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		drainBody(resp)
+
+		assertGone(t, name)
+	})
+
+	t.Run("Force-delete Pending project returns 204", func(t *testing.T) {
+		const name = "e2e-force-del-pending"
+		createProject(t, name)
+
+		resp := doRequest(t, http.MethodDelete, "/api/v1/projects/"+name+"?force=true", nil)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		drainBody(resp)
+
+		assertGone(t, name)
+	})
+
+	t.Run("Normal delete on Running project returns 202 (existing behaviour)", func(t *testing.T) {
+		const name = "e2e-normal-del-running"
+		createProject(t, name)
+		patchPhase(t, name, v1.ProjectPhaseRunning)
+
+		resp := doRequest(t, http.MethodDelete, "/api/v1/projects/"+name, nil)
+		require.Equal(t, http.StatusAccepted, resp.StatusCode)
+		drainBody(resp)
+
+		// Cleanup: force-delete so the project doesn't linger.
+		resp = doRequest(t, http.MethodDelete, "/api/v1/projects/"+name+"?force=true", nil)
+		assert.Contains(t, []int{http.StatusNoContent, http.StatusAccepted}, resp.StatusCode, "cleanup")
+		drainBody(resp)
+	})
+}
