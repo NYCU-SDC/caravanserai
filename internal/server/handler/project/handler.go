@@ -6,7 +6,7 @@
 //	PUT    /api/v1/projects/{name}           — update a Project's spec
 //	GET    /api/v1/projects                  — list Projects (supports ?phase= and ?nodeRef= filters)
 //	GET    /api/v1/projects/{name}           — get a single Project
-//	DELETE /api/v1/projects/{name}           — delete a Project
+//	DELETE /api/v1/projects/{name}           — delete a Project (supports ?force=true for immediate hard-delete)
 //	PATCH  /api/v1/projects/{name}/status    — Agent reports observed phase (Running / Failed / Terminated)
 package project
 
@@ -314,12 +314,19 @@ func (h *Handler) getProject(w http.ResponseWriter, r *http.Request) {
 //     phase and performs the final store deletion.
 //
 // Calling DELETE on an already-Terminating project is idempotent (202).
+//
+// When the ?force=true query parameter is set, the handler bypasses the
+// two-phase lifecycle and directly hard-deletes the project from the store
+// regardless of current phase, returning 204 No Content.  A warning is logged
+// when the project has a nodeRef set, indicating Docker resources on the node
+// may be orphaned.
 func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 	traceCtx, span := h.tracer.Start(r.Context(), "deleteProject")
 	defer span.End()
 	logger := logutil.WithContext(traceCtx, h.logger)
 
 	name := r.PathValue("name")
+	force := r.URL.Query().Get("force") == "true"
 
 	project, err := h.store.GetProject(traceCtx, name)
 	if err != nil {
@@ -330,6 +337,30 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 		}
 		logger.Error("GetProject failed during delete", zap.String("name", name), zap.Error(err))
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	// Force-delete: bypass the two-phase lifecycle and hard-delete immediately.
+	if force {
+		if project.Status.NodeRef != "" {
+			logger.Warn("Force-deleting project with nodeRef set; Docker resources on the node may be orphaned",
+				zap.String("project", name),
+				zap.String("phase", string(project.Status.Phase)),
+				zap.String("nodeRef", project.Status.NodeRef))
+		}
+		if err := h.store.DeleteProject(traceCtx, name); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				h.problemWriter.WriteError(traceCtx, w,
+					fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+				return
+			}
+			logger.Error("Force DeleteProject failed", zap.String("name", name), zap.Error(err))
+			h.problemWriter.WriteError(traceCtx, w, err, logger)
+			return
+		}
+		logger.Info("Project force-deleted", zap.String("project", name),
+			zap.String("phase", string(project.Status.Phase)))
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 

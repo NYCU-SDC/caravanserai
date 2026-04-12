@@ -236,9 +236,15 @@ func (c *Client) GetProject(ctx context.Context, name string) (v1.Project, error
 // DeleteProject removes a project by name.
 // It returns (true, nil) when the project was deleted immediately (204 No Content)
 // and (false, nil) when the project has been marked for graceful termination
-// (202 Accepted).
-func (c *Client) DeleteProject(ctx context.Context, name string) (deleted bool, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+"/api/v1/projects/"+name, nil)
+// (202 Accepted). When force is true, the server bypasses the two-phase
+// lifecycle and hard-deletes the project regardless of current phase.
+func (c *Client) DeleteProject(ctx context.Context, name string, force bool) (deleted bool, err error) {
+	url := c.BaseURL + "/api/v1/projects/" + name
+	if force {
+		url += "?force=true"
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return false, fmt.Errorf("build request: %w", err)
 	}
