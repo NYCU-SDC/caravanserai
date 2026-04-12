@@ -7,6 +7,14 @@
 //	  heartbeat state changes.  Status=True means the agent is healthy;
 //	  Status=False means the heartbeat timed out.
 //
+//	  ConditionTypeDiskPressure — set by NodeConditionController based on
+//	  the Agent's reported Capacity and Allocatable values.  Status=True
+//	  means the node's allocatable disk is below 15% of capacity.
+//
+//	  ConditionTypeMemoryPressure — set by NodeConditionController based on
+//	  the Agent's reported Capacity and Allocatable values.  Status=True
+//	  means the node's allocatable memory is below 10% of capacity.
+//
 //	Project (project_types.go)
 //	  ConditionTypePhase — updated on every lifecycle phase transition to carry
 //	  the machine-readable Reason and human-readable Message.  Status is always
@@ -58,6 +66,16 @@ const (
 	// ConditionTypeNotReadyAt records the timestamp at which the rescheduler
 	// first observed a Running project on a NotReady node.
 	ConditionTypeNotReadyAt ConditionType = "NotReadyAt"
+
+	// ConditionTypeDiskPressure indicates whether the node's disk usage is
+	// approaching capacity. Set by the NodeConditionController based on
+	// the Agent's reported Capacity and Allocatable values.
+	ConditionTypeDiskPressure ConditionType = "DiskPressure"
+
+	// ConditionTypeMemoryPressure indicates whether the node's memory usage
+	// is approaching capacity. Set by the NodeConditionController based on
+	// the Agent's reported Capacity and Allocatable values.
+	ConditionTypeMemoryPressure ConditionType = "MemoryPressure"
 )
 
 // Condition describes a single observable aspect of a resource's state.

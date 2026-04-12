@@ -82,6 +82,18 @@ func (s NodeState) IsValid() bool {
 	}
 }
 
+// NodeInfo contains static system information reported by the Agent at startup.
+type NodeInfo struct {
+	// KernelVersion is the Linux kernel version (e.g. "5.15.0-84-generic").
+	KernelVersion string `json:"kernelVersion,omitempty" yaml:"kernelVersion,omitempty"`
+
+	// OSImage is the OS distribution description (e.g. "Ubuntu 22.04.3 LTS").
+	OSImage string `json:"osImage,omitempty" yaml:"osImage,omitempty"`
+
+	// AgentVersion is the cara-agent build version (e.g. "v1.2.0").
+	AgentVersion string `json:"agentVersion,omitempty" yaml:"agentVersion,omitempty"`
+}
+
 // NodeSpec contains the administrator-declared configuration of a Node.
 type NodeSpec struct {
 	// Hostname is the OS-level hostname of the machine.
@@ -109,6 +121,9 @@ type NodeStatus struct {
 	// by the Agent. The Scheduler subtracts running-Project usage to derive
 	// the effective available headroom.
 	Allocatable ResourceList `json:"allocatable,omitempty" yaml:"allocatable,omitempty"`
+
+	// Info contains static system information reported once at Agent startup.
+	Info NodeInfo `json:"info,omitempty" yaml:"info,omitempty"`
 
 	// LastHeartbeat is the timestamp of the most recent heartbeat received
 	// from the Agent. The NodeController uses this to detect timeouts.

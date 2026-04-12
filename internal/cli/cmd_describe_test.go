@@ -90,6 +90,10 @@ var describeNodeCoveredFields = newStringSet(
 	"Status.Conditions",
 	"Status.Capacity",
 	"Status.Allocatable",
+	// Status.Info
+	"Status.Info.KernelVersion",
+	"Status.Info.OSImage",
+	"Status.Info.AgentVersion",
 	// Status.Network
 	"Status.Network.IP",
 	"Status.Network.DNSName",

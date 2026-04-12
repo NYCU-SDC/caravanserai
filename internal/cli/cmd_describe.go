@@ -111,6 +111,13 @@ func describeNode(w io.Writer, node *v1.Node) {
 	printField(w, "  State", stringOrNone(string(node.Status.State)))
 	printField(w, "  Last Heartbeat", formatTimestamp(node.Status.LastHeartbeat))
 
+	// Info
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Info:")
+	printField(w, "  Kernel Version", stringOrNone(node.Status.Info.KernelVersion))
+	printField(w, "  OS Image", stringOrNone(node.Status.Info.OSImage))
+	printField(w, "  Agent Version", stringOrNone(node.Status.Info.AgentVersion))
+
 	// Network
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Network:")
