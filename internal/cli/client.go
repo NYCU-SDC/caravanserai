@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 )
@@ -325,11 +326,79 @@ func (c *Client) applyProject(ctx context.Context, raw []byte) (ApplyResult, err
 	return ApplyResult{Resource: project, Created: true}, nil
 }
 
+// APIError represents a parsed RFC 9457 Problem Details response from the
+// server. It implements the error interface so callers can use errors.As to
+// inspect server errors programmatically.
+type APIError struct {
+	StatusCode int
+	Status     string   // e.g. "409 Conflict"
+	Title      string   // e.g. "Conflict"
+	Detail     string   // e.g. "cannot delete node ...: 1 project(s) still assigned"
+	Errors     []string // validation sub-errors, if any
+}
+
+// Error returns a clean, human-readable error message.
+//
+//   - With detail:           Conflict: cannot delete node "test-node": 1 project(s) still assigned
+//   - With validation errors: Validation Error: name is required; endpoint must be a valid URL
+//   - Fallback (unparseable): server returned 409 Conflict: <raw body>
+func (e *APIError) Error() string {
+	if e.Title != "" && e.Detail != "" {
+		return fmt.Sprintf("%s: %s", e.Title, e.Detail)
+	}
+	if e.Title != "" && len(e.Errors) > 0 {
+		return fmt.Sprintf("%s: %s", e.Title, strings.Join(e.Errors, "; "))
+	}
+	if e.Detail != "" {
+		return e.Detail
+	}
+	if len(e.Errors) > 0 {
+		return strings.Join(e.Errors, "; ")
+	}
+	// Title-only (no detail or errors).
+	if e.Title != "" {
+		return e.Title
+	}
+	return fmt.Sprintf("server returned %s", e.Status)
+}
+
+// problemJSON is the wire format for RFC 9457 Problem Details.
+type problemJSON struct {
+	Title  string   `json:"title"`
+	Status int      `json:"status"`
+	Detail string   `json:"detail"`
+	Errors []string `json:"errors"`
+}
+
+// ParseAPIError attempts to parse an RFC 9457 Problem Details JSON body and
+// returns an APIError. If the body is not valid Problem JSON, the raw body is
+// stored in Detail as a fallback.
+func ParseAPIError(body []byte, httpStatus string, statusCode int) *APIError {
+	var p problemJSON
+	if err := json.Unmarshal(body, &p); err == nil && p.Title != "" {
+		return &APIError{
+			StatusCode: statusCode,
+			Status:     httpStatus,
+			Title:      p.Title,
+			Detail:     p.Detail,
+			Errors:     p.Errors,
+		}
+	}
+
+	// Fallback: unparseable body.
+	raw := strings.TrimSpace(string(body))
+	return &APIError{
+		StatusCode: statusCode,
+		Status:     httpStatus,
+		Detail:     fmt.Sprintf("server returned %s: %s", httpStatus, raw),
+	}
+}
+
 // checkStatus returns an error if the HTTP response indicates a failure.
 func checkStatus(resp *http.Response) error {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
 	}
 	body, _ := io.ReadAll(resp.Body)
-	return fmt.Errorf("server returned %s: %s", resp.Status, bytes.TrimSpace(body))
+	return ParseAPIError(bytes.TrimSpace(body), resp.Status, resp.StatusCode)
 }
