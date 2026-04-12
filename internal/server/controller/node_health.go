@@ -119,11 +119,8 @@ func (c *NodeHealthController) Reconcile(ctx context.Context, name string) (Resu
 		); err != nil {
 			return Result{}, err
 		}
-		// Notify ProjectReschedulerController (and any other subscribers) that
-		// this node's state changed so they can react immediately.
-		if c.bus != nil {
-			c.bus.Publish(event.TopicNodeUpdated, name)
-		}
+		// The store layer now publishes TopicNodeUpdated when the phase
+		// actually changes, so an explicit publish here is unnecessary.
 
 	case age <= NodeHeartbeatTimeout && snap.State == v1.NodeStateNotReady:
 		log.Info("Node heartbeat recovered, marking Ready",

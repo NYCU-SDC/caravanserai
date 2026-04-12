@@ -339,25 +339,38 @@ func (s *Store) DeleteNode(ctx context.Context, name string) error {
 // UpdateNodeStatus implements store.NodeStore.
 // Only the status column (and the promoted phase column) are written; spec is
 // untouched, so concurrent API-server spec updates are not clobbered.
+//
+// A TopicNodeUpdated event is published only when the node's phase actually
+// changes (e.g. Ready→NotReady), not on every heartbeat refresh.
 func (s *Store) UpdateNodeStatus(ctx context.Context, name string, status v1.NodeStatus) error {
 	raw, err := json.Marshal(status)
 	if err != nil {
 		return fmt.Errorf("postgres: marshal node status: %w", err)
 	}
 
-	tag, err := s.pool.Exec(ctx, `
+	// Use a CTE to atomically capture the old phase before the UPDATE.
+	// This avoids a separate SELECT and any TOCTOU race conditions.
+	var oldPhase string
+	err = s.pool.QueryRow(ctx, `
+		WITH old AS (
+			SELECT phase FROM resources WHERE kind = $4 AND name = $5
+		)
 		UPDATE resources
 		SET phase = $1, status = $2, updated_at = $3
-		WHERE kind = $4 AND name = $5`,
+		WHERE kind = $4 AND name = $5
+		RETURNING (SELECT phase FROM old) AS old_phase`,
 		string(status.State), raw, time.Now().UTC(), kindNode, name,
-	)
+	).Scan(&oldPhase)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: node %q", store.ErrNotFound, name)
+		}
 		return fmt.Errorf("postgres: update node status %q: %w", name, err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: node %q", store.ErrNotFound, name)
+
+	if oldPhase != string(status.State) {
+		s.publish(event.TopicNodeUpdated, name)
 	}
-	s.publish(event.TopicNodeUpdated, name)
 	return nil
 }
 
