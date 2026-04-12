@@ -78,6 +78,25 @@
       "title": "Node",
       "description": "Node represents a physical or virtual machine managed by a Caravanserai Agent."
     },
+    "NodeInfo": {
+      "properties": {
+        "kernelVersion": {
+          "type": "string",
+          "description": "KernelVersion is the Linux kernel version (e.g. \"5.15.0-84-generic\")."
+        },
+        "osImage": {
+          "type": "string",
+          "description": "OSImage is the OS distribution description (e.g. \"Ubuntu 22.04.3 LTS\")."
+        },
+        "agentVersion": {
+          "type": "string",
+          "description": "AgentVersion is the cara-agent build version (e.g. \"v1.2.0\")."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "NodeInfo contains static system information reported by the Agent at startup."
+    },
     "NodeNetworkStatus": {
       "properties": {
         "ip": {
@@ -146,6 +165,10 @@
         "allocatable": {
           "$ref": "#/$defs/ResourceList",
           "description": "Allocatable is Capacity minus system-reserved amounts, also reported\nby the Agent. The Scheduler subtracts running-Project usage to derive\nthe effective available headroom."
+        },
+        "info": {
+          "$ref": "#/$defs/NodeInfo",
+          "description": "Info contains static system information reported once at Agent startup."
         },
         "lastHeartbeat": {
           "type": "string",
