@@ -23,13 +23,6 @@ const (
 	defaultErrorBackoff = 5 * time.Second
 )
 
-// work is an internal reconcile request: the name of the object to process and
-// an optional delay before it should be acted upon.
-type work struct {
-	name  string
-	after time.Duration
-}
-
 // registration bundles a Controller with its runtime configuration.
 type registration struct {
 	ctrl    Controller
@@ -126,7 +119,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	for _, reg := range m.registrations {
 		reg := reg // capture loop variable
-		queue := make(chan work, 256)
+		wq := newWorkQueue()
 
 		m.logger.Info("Starting controller",
 			zap.String("controller", reg.ctrl.Name()),
@@ -134,11 +127,11 @@ func (m *Manager) Start(ctx context.Context) error {
 		)
 
 		// Seed the queue so the controller runs at least once on startup.
-		go m.seed(ctx, reg.ctrl, queue)
+		go m.seed(ctx, reg.ctrl, wq)
 
 		// Worker pool.
 		for range reg.workers {
-			go m.runWorker(ctx, reg.ctrl, queue, errCh)
+			go m.runWorker(ctx, reg.ctrl, wq, errCh)
 		}
 	}
 
@@ -156,7 +149,7 @@ func (m *Manager) Start(ctx context.Context) error {
 // controller can drive its own scheduling (e.g. periodic list + enqueue).
 // Otherwise it logs once and returns, leaving the queue to be driven by
 // external callers (e.g. HTTP handlers via Enqueue).
-func (m *Manager) seed(ctx context.Context, ctrl Controller, queue chan<- work) {
+func (m *Manager) seed(ctx context.Context, ctrl Controller, wq *workQueue) {
 	seeder, ok := ctrl.(Seeder)
 	if !ok {
 		m.logger.Debug("Controller has no Seeder, skipping seed goroutine",
@@ -170,94 +163,62 @@ func (m *Manager) seed(ctx context.Context, ctrl Controller, queue chan<- work) 
 	)
 
 	seeder.Seed(ctx, func(name string) {
-		select {
-		case queue <- work{name: name}:
-		default:
-			m.logger.Warn("Seed enqueue dropped: work queue full",
-				zap.String("controller", ctrl.Name()),
-				zap.String("name", name),
-			)
-		}
+		wq.Enqueue(name)
 	})
 }
 
-// Enqueue adds name to queue for reconciliation after the given delay.
-// It is exported so that HTTP handlers can trigger an immediate reconcile
-// (e.g. after a user submits a new Project via the API).
-func Enqueue(queue chan<- work, name string, after time.Duration) {
-	queue <- work{name: name, after: after}
-}
-
-// runWorker pulls items from queue and calls ctrl.Reconcile until ctx is done.
-// queue is a bidirectional channel so the worker can re-enqueue keys for retry.
-func (m *Manager) runWorker(ctx context.Context, ctrl Controller, queue chan work, errCh chan<- error) {
+// runWorker pulls items from the work queue and calls ctrl.Reconcile until ctx
+// is done.
+func (m *Manager) runWorker(ctx context.Context, ctrl Controller, wq *workQueue, errCh chan<- error) {
 	log := m.logger.With(zap.String("controller", ctrl.Name()))
 	log.Debug("Worker started")
 
 	for {
-		select {
-		case <-ctx.Done():
+		name, ok := wq.Get(ctx)
+		if !ok {
 			log.Debug("Worker stopping", zap.Error(ctx.Err()))
 			return
-		case w := <-queue:
-			if w.after > 0 {
+		}
+
+		result, err := ctrl.Reconcile(ctx, name)
+
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			// Context cancelled mid-reconcile — not a fatal error.
+			log.Debug("Reconcile interrupted by context", zap.String("name", name))
+			return
+
+		case err != nil:
+			log.Error("Reconcile failed, will retry",
+				zap.String("name", name),
+				zap.Duration("backoff", m.errorBackoff),
+				zap.Error(err),
+			)
+			backoff := m.errorBackoff
+			go func() {
 				select {
-				case <-time.After(w.after):
+				case <-time.After(backoff):
+					wq.Enqueue(name)
 				case <-ctx.Done():
-					return
 				}
-			}
+			}()
 
-			result, err := ctrl.Reconcile(ctx, w.name)
+		case result.Requeue:
+			log.Debug("Reconcile requested requeue",
+				zap.String("name", name),
+				zap.Duration("after", m.requeueAfter),
+			)
+			requeueAfter := m.requeueAfter
+			go func() {
+				select {
+				case <-time.After(requeueAfter):
+					wq.Enqueue(name)
+				case <-ctx.Done():
+				}
+			}()
 
-			switch {
-			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-				// Context cancelled mid-reconcile — not a fatal error.
-				log.Debug("Reconcile interrupted by context", zap.String("name", w.name))
-				return
-
-			case err != nil:
-				log.Error("Reconcile failed, will retry",
-					zap.String("name", w.name),
-					zap.Duration("backoff", m.errorBackoff),
-					zap.Error(err),
-				)
-				name := w.name
-				backoff := m.errorBackoff
-				go func() {
-					select {
-					case <-time.After(backoff):
-						select {
-						case queue <- work{name: name}:
-						default:
-							log.Warn("Requeue dropped: work queue full", zap.String("name", name))
-						}
-					case <-ctx.Done():
-					}
-				}()
-
-			case result.Requeue:
-				log.Debug("Reconcile requested requeue",
-					zap.String("name", w.name),
-					zap.Duration("after", m.requeueAfter),
-				)
-				name := w.name
-				requeueAfter := m.requeueAfter
-				go func() {
-					select {
-					case <-time.After(requeueAfter):
-						select {
-						case queue <- work{name: name}:
-						default:
-							log.Warn("Requeue dropped: work queue full", zap.String("name", name))
-						}
-					case <-ctx.Done():
-					}
-				}()
-
-			default:
-				log.Debug("Reconcile complete", zap.String("name", w.name))
-			}
+		default:
+			log.Debug("Reconcile complete", zap.String("name", name))
 		}
 	}
 }
