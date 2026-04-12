@@ -34,6 +34,7 @@ func newGetNodesCmd() *cobra.Command {
 		Aliases: []string{"node"},
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
 			outputFmt, _ := cmd.Root().PersistentFlags().GetString("output")
 
@@ -67,6 +68,7 @@ func newGetProjectsCmd() *cobra.Command {
 		Aliases: []string{"project"},
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
 			outputFmt, _ := cmd.Root().PersistentFlags().GetString("output")
 

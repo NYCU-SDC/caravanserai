@@ -45,6 +45,7 @@ func newDescribeNodeCmd() *cobra.Command {
 		Aliases: []string{"nodes"},
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
 
 			client := NewClient(serverURL)
@@ -68,6 +69,7 @@ func newDescribeProjectCmd() *cobra.Command {
 		Aliases: []string{"projects"},
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
 
 			client := NewClient(serverURL)

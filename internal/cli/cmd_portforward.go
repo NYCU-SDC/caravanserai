@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -46,6 +45,7 @@ Examples:
   caractrl port-forward my-app/db 5432 --node 192.168.1.100:9090`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			return runPortForward(cmd, args, nodeAddr)
 		},
 	}
@@ -212,7 +212,7 @@ func handleConnection(ctx context.Context, conn net.Conn, agentAddr, project, se
 		if resp != nil {
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			fmt.Fprintf(os.Stderr, "Error: %s\n", extractProblemDetail(body, resp.Status))
+			fmt.Fprintf(os.Stderr, "Error: %s\n", ParseAPIError(body, resp.Status, resp.StatusCode))
 		} else {
 			fmt.Fprintf(os.Stderr, "WebSocket dial failed: %v\n", err)
 		}
@@ -264,19 +264,4 @@ func handleConnection(ctx context.Context, conn net.Conn, agentAddr, project, se
 	<-done
 
 	fmt.Fprintf(os.Stderr, "Connection from %s closed\n", conn.RemoteAddr())
-}
-
-// extractProblemDetail attempts to parse an RFC 7807 problem+json body and
-// return the human-readable detail field. Falls back to the raw body if
-// parsing fails.
-func extractProblemDetail(body []byte, httpStatus string) string {
-	var p struct {
-		Detail string `json:"detail"`
-		Title  string `json:"title"`
-	}
-	if err := json.Unmarshal(body, &p); err == nil && p.Detail != "" {
-		return p.Detail
-	}
-	// Fallback: return raw body with HTTP status.
-	return fmt.Sprintf("%s: %s", httpStatus, strings.TrimSpace(string(body)))
 }

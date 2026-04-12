@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,6 +53,7 @@ Examples:
   caractrl logs my-app/web --node 192.168.1.100:9090`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			return runLogs(cmd, args, nodeAddr, follow, tail, timestamps)
 		},
 	}
@@ -131,8 +131,10 @@ func runLogs(cmd *cobra.Command, args []string, nodeAddr string, follow bool, ta
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
+		// Re-use the shared Problem Details parser via checkStatus-style logic.
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s", extractLogsProblemDetail(body, resp.Status))
+		apiErr := ParseAPIError(body, resp.Status, resp.StatusCode)
+		return fmt.Errorf("%s", apiErr)
 	}
 
 	// Stream the response body to stdout.
@@ -142,19 +144,4 @@ func runLogs(cmd *cobra.Command, args []string, nodeAddr string, follow bool, ta
 		return nil
 	}
 	return err
-}
-
-// extractLogsProblemDetail attempts to parse an RFC 7807 problem+json body and
-// return the human-readable detail field.  Falls back to the raw body if
-// parsing fails.
-func extractLogsProblemDetail(body []byte, httpStatus string) string {
-	var p struct {
-		Detail string `json:"detail"`
-		Title  string `json:"title"`
-	}
-	if err := json.Unmarshal(body, &p); err == nil && p.Detail != "" {
-		return p.Detail
-	}
-	// Fallback: return raw body with HTTP status.
-	return fmt.Sprintf("%s: %s", httpStatus, strings.TrimSpace(string(body)))
 }

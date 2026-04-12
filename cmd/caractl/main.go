@@ -36,6 +36,9 @@ func init() {
 	rootCmd.PersistentFlags().String("server", "http://localhost:8080", "cara-server address")
 	rootCmd.PersistentFlags().String("output", "table", "output format: table | json | yaml")
 
+	// Prevent cobra from printing errors itself — main() handles it.
+	rootCmd.SilenceErrors = true
+
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(cli.NewGetCmd())
 	rootCmd.AddCommand(cli.NewDescribeCmd())
@@ -47,7 +50,7 @@ func init() {
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		os.Exit(1)
 	}
 }

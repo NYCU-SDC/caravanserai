@@ -33,6 +33,7 @@ Examples:
   caractrl apply -f project.yaml
   cat project.yaml | caractrl apply -f -`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
 			outputFmt, _ := cmd.Root().PersistentFlags().GetString("output")
 
