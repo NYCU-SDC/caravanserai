@@ -34,6 +34,20 @@ func ValidateName(name string) error {
 	return nil
 }
 
+// DefaultNamespace is the only namespace value accepted for 1.0.
+const DefaultNamespace = "default"
+
+// ValidateNamespace rejects any metadata.namespace other than "" or
+// "default". 1.0 locks all resources to DefaultNamespace; remove this check
+// together with namespace-qualified routes and work-queue keys once
+// namespace support lands post-1.0.
+func ValidateNamespace(namespace string) error {
+	if namespace != "" && namespace != DefaultNamespace {
+		return fmt.Errorf("namespace support lands post-1.0; omit the field or use %q", DefaultNamespace)
+	}
+	return nil
+}
+
 // truncate shortens s to at most maxLen characters, appending "..." if truncated.
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {

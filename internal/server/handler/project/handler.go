@@ -135,6 +135,15 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := v1.ValidateNamespace(project.Namespace); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.namespace", project.Namespace, err.Error()), logger)
+		return
+	}
+	if project.Namespace == "" {
+		project.Namespace = v1.DefaultNamespace
+	}
+
 	if err := validateProjectSpec(project.Spec); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
@@ -182,6 +191,15 @@ func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	project.Name = name
+
+	if err := v1.ValidateNamespace(project.Namespace); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.namespace", project.Namespace, err.Error()), logger)
+		return
+	}
+	if project.Namespace == "" {
+		project.Namespace = v1.DefaultNamespace
+	}
 
 	if err := validateProjectSpec(project.Spec); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
