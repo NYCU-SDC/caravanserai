@@ -147,6 +147,8 @@ func TestNodeCRUD(t *testing.T) {
 	mustDecodeBody(t, resp, &created)
 	assert.Equal(t, nodeName, created.Name)
 	assert.Equal(t, v1.NodeStateNotReady, created.Status.State, "initial state must be NotReady")
+	assert.Equal(t, "default", created.Namespace, "node namespace is always default")
+	assert.Equal(t, int64(1), created.ResourceVersion, "resource_version should start at 1")
 
 	// ── 2. Create duplicate → 409 ──────────────────────────────────────────────
 
@@ -241,6 +243,7 @@ func TestNodeUpdate(t *testing.T) {
 	assert.Equal(t, "updated-host", updated.Spec.Hostname, "spec.hostname should be updated")
 	assert.True(t, updated.Spec.Unschedulable, "spec.unschedulable should be true")
 	assert.Equal(t, v1.NodeStateReady, updated.Status.State, "status.state must be preserved")
+	assert.Equal(t, int64(3), updated.ResourceVersion, "resource_version should be 3: create(1) + heartbeat(2) + this PUT(3)")
 
 	// ── 2. PUT on non-existent node → 404 ─────────────────────────────────────
 

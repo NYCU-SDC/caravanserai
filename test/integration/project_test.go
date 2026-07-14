@@ -203,6 +203,79 @@ func TestProjectNameValidation(t *testing.T) {
 	}
 }
 
+// TestProjectNamespaceValidation verifies that CARA-46 locks Project creation
+// to the default namespace: empty and "default" are accepted, anything else
+// is rejected with a descriptive 400.
+func TestProjectNamespaceValidation(t *testing.T) {
+	type testCase struct {
+		name        string
+		projectName string
+		namespace   string
+		wantStatus  int
+	}
+
+	validService := v1.ProjectSpec{
+		Services: []v1.ServiceDef{
+			{Name: "web", Image: "nginx:latest"},
+		},
+	}
+
+	testCases := []testCase{
+		{
+			name:        "Empty namespace returns 201",
+			projectName: "e2e-ns-empty",
+			namespace:   "",
+			wantStatus:  http.StatusCreated,
+		},
+		{
+			name:        "Explicit default namespace returns 201",
+			projectName: "e2e-ns-default",
+			namespace:   "default",
+			wantStatus:  http.StatusCreated,
+		},
+		{
+			name:        "Non-default namespace returns 400",
+			projectName: "e2e-ns-rejected",
+			namespace:   "blog-team",
+			wantStatus:  http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := mustMarshal(t, v1.Project{
+				ObjectMeta: v1.ObjectMeta{Name: tc.projectName, Namespace: tc.namespace},
+				Spec:       validService,
+			})
+			resp := doRequest(t, http.MethodPost, "/api/v1/projects", body)
+
+			require.Equal(t, tc.wantStatus, resp.StatusCode,
+				"namespace %q: expected %d", tc.namespace, tc.wantStatus)
+
+			if tc.wantStatus == http.StatusBadRequest {
+				var p problemResponse
+				require.NoError(t, json.NewDecoder(resp.Body).Decode(&p))
+				assert.Contains(t, p.Detail, "namespace support lands post-1.0",
+					"detail should explain why the namespace was rejected")
+				return
+			}
+
+			var created v1.Project
+			mustDecodeBody(t, resp, &created)
+			assert.Equal(t, "default", created.Namespace,
+				"server should normalize the namespace to \"default\"")
+		})
+	}
+
+	// Cleanup: delete successfully created projects.
+	for _, name := range []string{"e2e-ns-empty", "e2e-ns-default"} {
+		resp := doRequest(t, http.MethodDelete, "/api/v1/projects/"+name, nil)
+		assert.Contains(t, []int{http.StatusNoContent, http.StatusAccepted}, resp.StatusCode,
+			"cleanup delete %q", name)
+		drainBody(resp)
+	}
+}
+
 // TestProjectUpdate exercises PUT /api/v1/projects/{name}:
 //
 //	PUT on Pending project  → 200, spec updated
@@ -226,7 +299,10 @@ func TestProjectUpdate(t *testing.T) {
 	})
 	resp := doRequest(t, http.MethodPost, "/api/v1/projects", createBody)
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "create project: expected 201")
-	drainBody(resp)
+
+	var created v1.Project
+	mustDecodeBody(t, resp, &created)
+	assert.Equal(t, int64(1), created.ResourceVersion, "resource_version should start at 1")
 
 	// ── 1. PUT updates spec in Pending phase → 200 ────────────────────────────
 
@@ -249,6 +325,7 @@ func TestProjectUpdate(t *testing.T) {
 	assert.Equal(t, "api", updated.Spec.Services[0].Name, "service name should be updated")
 	assert.Equal(t, "myapp:v2", updated.Spec.Services[0].Image, "service image should be updated")
 	assert.Equal(t, v1.ProjectPhasePending, updated.Status.Phase, "phase should still be Pending")
+	assert.Equal(t, int64(2), updated.ResourceVersion, "resource_version should increment on spec update")
 
 	// ── 2. PUT on non-existent project → 404 ──────────────────────────────────
 
