@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/server/agentdialer"
 	"NYCU-SDC/caravanserai/internal/server/apiserver"
 	"NYCU-SDC/caravanserai/internal/server/handler"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
@@ -108,7 +109,8 @@ func run(m *testing.M) int {
 	apiSrv := apiserver.New(logger, basicMiddleware)
 
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
-	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, problemWriter))
+	agentDialer := agentdialer.New(agentdialer.Config{Nodes: pgStore})
+	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, agentDialer, problemWriter))
 	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter))
 
 	ts := httptest.NewServer(apiSrv.Handler())

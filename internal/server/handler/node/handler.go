@@ -8,6 +8,7 @@
 //	GET    /api/v1/nodes/{name}            — get a single Node
 //	DELETE /api/v1/nodes/{name}            — delete a Node
 //	POST   /api/v1/nodes/{name}/heartbeat  — Agent heartbeat (updates status only)
+//	POST   /api/v1/nodes/{name}/probe      — server→agent reachability probe (via agentdialer)
 package node
 
 import (
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/server/agentdialer"
 	"NYCU-SDC/caravanserai/internal/store"
 
 	handlerutil "github.com/NYCU-SDC/summer/pkg/handler"
@@ -35,6 +37,7 @@ type Handler struct {
 	logger        *zap.Logger
 	store         store.NodeStore
 	projectStore  ProjectLister
+	dialer        agentdialer.Dialer
 	tracer        trace.Tracer
 	problemWriter *problem.HttpWriter
 }
@@ -46,11 +49,16 @@ type ProjectLister interface {
 }
 
 // NewHandler creates a Node Handler.
-func NewHandler(logger *zap.Logger, s store.NodeStore, ps ProjectLister, pw *problem.HttpWriter) *Handler {
+//
+// The dialer parameter is used by the probe endpoint (and every future
+// server→agent call site). It may be nil in tests that do not exercise the
+// probe path; the probe handler returns a clear 500 in that case.
+func NewHandler(logger *zap.Logger, s store.NodeStore, ps ProjectLister, dialer agentdialer.Dialer, pw *problem.HttpWriter) *Handler {
 	return &Handler{
 		logger:        logger,
 		store:         s,
 		projectStore:  ps,
+		dialer:        dialer,
 		tracer:        otel.Tracer("node/handler"),
 		problemWriter: pw,
 	}
@@ -64,6 +72,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("GET /api/v1/nodes/{name}", mid.HandlerFunc(h.getNode))
 	mux.HandleFunc("DELETE /api/v1/nodes/{name}", mid.HandlerFunc(h.deleteNode))
 	mux.HandleFunc("POST /api/v1/nodes/{name}/heartbeat", mid.HandlerFunc(h.heartbeat))
+	mux.HandleFunc("POST /api/v1/nodes/{name}/probe", mid.HandlerFunc(h.probe))
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
