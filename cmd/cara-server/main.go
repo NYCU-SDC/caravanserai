@@ -19,6 +19,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/server/handler"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
 	projecthandler "NYCU-SDC/caravanserai/internal/server/handler/project"
+	secrethandler "NYCU-SDC/caravanserai/internal/server/handler/secret"
 	pgstore "NYCU-SDC/caravanserai/internal/store/postgres"
 	"NYCU-SDC/caravanserai/internal/trace"
 
@@ -112,6 +113,7 @@ func main() {
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
 	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, problemWriter))
 	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter))
+	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
 
 	// ============================================
 	// Controller Manager
