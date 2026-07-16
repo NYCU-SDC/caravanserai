@@ -24,7 +24,40 @@ func NewGetCmd() *cobra.Command {
 
 	getCmd.AddCommand(newGetNodesCmd())
 	getCmd.AddCommand(newGetProjectsCmd())
+	getCmd.AddCommand(newGetSecretsCmd())
 	return getCmd
+}
+
+func newGetSecretsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "secrets [name]",
+		Short:   "List secrets or get a single secret (values are never shown)",
+		Aliases: []string{"secret"},
+		Args:    cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
+			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
+			outputFmt, _ := cmd.Root().PersistentFlags().GetString("output")
+
+			client := NewClient(serverURL)
+			printer := &Printer{Format: outputFmt, Out: os.Stdout}
+			ctx := context.Background()
+
+			if len(args) == 1 {
+				secret, err := client.GetSecret(ctx, args[0])
+				if err != nil {
+					return fmt.Errorf("get secret %q: %w", args[0], err)
+				}
+				return printer.PrintSecret(secret)
+			}
+
+			list, err := client.GetSecrets(ctx)
+			if err != nil {
+				return fmt.Errorf("get secrets: %w", err)
+			}
+			return printer.PrintSecretList(list)
+		},
+	}
 }
 
 func newGetNodesCmd() *cobra.Command {

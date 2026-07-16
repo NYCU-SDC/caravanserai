@@ -26,7 +26,7 @@ func NewApplyCmd() *cobra.Command {
 		Long: `Apply creates or updates a resource defined in a YAML or JSON manifest.
 The kind field in the manifest determines which API endpoint is called.
 
-Supported kinds: Node, Project
+Supported kinds: Node, Project, Secret
 
 Examples:
   caractrl apply -f node.yaml
@@ -130,6 +130,8 @@ func printApplyConfirmation(cmd *cobra.Command, result ApplyResult) {
 		fmt.Fprintf(cmd.OutOrStdout(), "node/%s %s\n", res.Name, verb)
 	case v1.Project:
 		fmt.Fprintf(cmd.OutOrStdout(), "project/%s %s\n", res.Name, verb)
+	case v1.Secret:
+		fmt.Fprintf(cmd.OutOrStdout(), "secret/%s %s\n", res.Name, verb)
 	default:
 		fmt.Fprintln(cmd.OutOrStdout(), "resource applied")
 	}
