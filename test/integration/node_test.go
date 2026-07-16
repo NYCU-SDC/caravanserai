@@ -23,6 +23,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/server/handler"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
 	projecthandler "NYCU-SDC/caravanserai/internal/server/handler/project"
+	secrethandler "NYCU-SDC/caravanserai/internal/server/handler/secret"
 	pgstore "NYCU-SDC/caravanserai/internal/store/postgres"
 
 	"github.com/NYCU-SDC/summer/pkg/middleware"
@@ -110,6 +111,7 @@ func run(m *testing.M) int {
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
 	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, problemWriter))
 	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter))
+	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
 
 	ts := httptest.NewServer(apiSrv.Handler())
 	defer ts.Close()
