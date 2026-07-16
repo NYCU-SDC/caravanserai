@@ -39,6 +39,7 @@ var ErrConflictState = errors.New("operation conflicts with current resource sta
 type Store interface {
 	NodeStore
 	ProjectStore
+	SecretStore
 }
 
 // ============================================================
@@ -128,4 +129,37 @@ type ProjectStore interface {
 	// ProjectReschedulerController to find work that needs to be moved or
 	// force-terminated when a node goes NotReady.
 	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*v1.Project, error)
+}
+
+// ============================================================
+// Secret
+// ============================================================
+
+// SecretStore covers all Secret persistence operations.
+//
+// The interface is deliberately backend-agnostic: 1.0 stores Secrets in the
+// same PostgreSQL resources table as everything else, but the backend is
+// expected to move to Infisical before launch. Keeping this surface clean
+// means that migration only swaps the implementation, not this interface or
+// any caller.
+type SecretStore interface {
+	// CreateSecret persists a new Secret.  Returns ErrAlreadyExists if a
+	// Secret with the same name already exists.
+	CreateSecret(ctx context.Context, secret *v1.Secret) error
+
+	// GetSecret returns the Secret with the given name, including its plaintext
+	// values (the agent needs them to resolve secretKeyRef). Returns
+	// ErrNotFound if it does not exist.
+	GetSecret(ctx context.Context, name string) (*v1.Secret, error)
+
+	// ListSecrets returns all Secrets in the store.
+	ListSecrets(ctx context.Context) ([]*v1.Secret, error)
+
+	// UpdateSecret replaces the full Secret record.  Used by the create-or-update
+	// PUT path for credential rotation.  Returns ErrNotFound if it does not exist.
+	UpdateSecret(ctx context.Context, secret *v1.Secret) error
+
+	// DeleteSecret removes a Secret by name.
+	// Returns ErrNotFound if it does not exist.
+	DeleteSecret(ctx context.Context, name string) error
 }
