@@ -16,10 +16,9 @@ import (
 )
 
 // probeResult is the response body of POST /api/v1/nodes/{name}/probe.
-//
+
 // A successful probe means cara-server was able to reach the agent's /healthz
-// endpoint through the configured Dialer transport (underlay or overlay,
-// depending on server configuration).
+// endpoint through the configured Dialer transport
 type probeResult struct {
 	OK         bool   `json:"ok"`
 	StatusCode int    `json:"statusCode"`
@@ -29,10 +28,7 @@ type probeResult struct {
 }
 
 // probe dials the named node's agent via the injected Dialer and reports
-// reachability. This is the first (and, at the time of writing, only)
-// server→agent HTTP call site in cara-server; every future call site
-// (port-forward proxy, log streaming, active health probes) MUST use the same
-// Dialer instead of building URLs from raw Node status fields.
+// reachability.
 func (h *Handler) probe(w http.ResponseWriter, r *http.Request) {
 	traceCtx, span := h.tracer.Start(r.Context(), "probe")
 	defer span.End()
@@ -41,8 +37,6 @@ func (h *Handler) probe(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
 	if h.dialer == nil {
-		// This should never happen in production — cara-server always wires
-		// a Dialer — but guard anyway so tests that omit it get a clear 500.
 		h.problemWriter.WriteError(traceCtx, w,
 			fmt.Errorf("probe not available: dialer is not configured"), logger)
 		return
@@ -51,8 +45,6 @@ func (h *Handler) probe(w http.ResponseWriter, r *http.Request) {
 	client, baseURL, err := h.dialer.Client(traceCtx, name)
 	if err != nil {
 		if errors.Is(err, agentdialer.ErrNodeUnreachable) {
-			// 409 Conflict fits better than 404 here: the node exists but is
-			// not yet in a state where server→agent traffic can flow.
 			handlerutil.WriteJSONResponse(w, http.StatusConflict, probeResult{
 				OK:      false,
 				Address: "",
@@ -89,8 +81,7 @@ func (h *Handler) probe(w http.ResponseWriter, r *http.Request) {
 
 // doProbe issues a single GET /healthz against baseURL using client and
 // returns the observed status code, wall-clock latency, and any transport
-// error. A non-200 status code is not treated as a Go error; the caller
-// inspects statusCode itself.
+// error.
 func doProbe(ctx context.Context, client *http.Client, baseURL string) (int, time.Duration, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/healthz", nil)
 	if err != nil {

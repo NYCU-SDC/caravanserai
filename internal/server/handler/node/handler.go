@@ -42,17 +42,10 @@ type Handler struct {
 	problemWriter *problem.HttpWriter
 }
 
-// ProjectLister is the narrow interface the node handler needs to check
-// whether any projects are assigned to a node before allowing deletion.
 type ProjectLister interface {
 	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*v1.Project, error)
 }
 
-// NewHandler creates a Node Handler.
-//
-// The dialer parameter is used by the probe endpoint (and every future
-// server→agent call site). It may be nil in tests that do not exercise the
-// probe path; the probe handler returns a clear 500 in that case.
 func NewHandler(logger *zap.Logger, s store.NodeStore, ps ProjectLister, dialer agentdialer.Dialer, pw *problem.HttpWriter) *Handler {
 	return &Handler{
 		logger:        logger,
