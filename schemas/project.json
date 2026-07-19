@@ -47,6 +47,10 @@
         },
         "value": {
           "type": "string"
+        },
+        "valueFrom": {
+          "$ref": "#/$defs/EnvVarSource",
+          "description": "ValueFrom sources the value from another object instead of a literal.\nThe agent resolves it to a plain Value before the spec reaches the\ncontainer runtime; the Runtime layer never sees a ValueFrom."
         }
       },
       "additionalProperties": false,
@@ -55,6 +59,16 @@
         "name"
       ],
       "description": "EnvVar is a single environment variable to inject into a container."
+    },
+    "EnvVarSource": {
+      "properties": {
+        "secretKeyRef": {
+          "$ref": "#/$defs/SecretKeySelector"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "EnvVarSource holds the possible indirect sources for an EnvVar value."
     },
     "IngressAccess": {
       "properties": {
@@ -261,6 +275,25 @@
       "additionalProperties": false,
       "type": "object",
       "description": "ProjectStatus is written by the Controller Manager and Agent."
+    },
+    "SecretKeySelector": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the Secret's metadata.name."
+        },
+        "key": {
+          "type": "string",
+          "description": "Key selects one entry in the Secret's spec.data."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "key"
+      ],
+      "description": "SecretKeySelector points at a single key inside a named Secret."
     },
     "ServiceDef": {
       "properties": {
