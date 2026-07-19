@@ -343,3 +343,121 @@ func TestBootstrapRunningProjects(t *testing.T) {
 	assert.Equal(t, v1.ProjectPhaseFailed, updates[0].Phase)
 	assert.Equal(t, "ContainerCrashed", updates[0].Reason)
 }
+
+// ── resolveSecrets ───────────────────────────────────────────────────────────
+
+// newSecretsTestServer returns a Client backed by an httptest server that
+// serves the given secrets on GET /api/v1/secrets/{name} and counts fetches.
+func newSecretsTestServer(t *testing.T, secrets map[string]v1.Secret, fetches *int) *Client {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/secrets/{name}", func(w http.ResponseWriter, r *http.Request) {
+		*fetches++
+		s, ok := secrets[r.PathValue("name")]
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(s)
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return NewClient(zap.NewNop(), server.URL, "test-node")
+}
+
+// secretRefProject builds a two-service project where both services reference
+// the same secret key, plus one literal env var.
+func secretRefProject() *v1.Project {
+	ref := &v1.EnvVarSource{SecretKeyRef: &v1.SecretKeySelector{Name: "wordpress-creds", Key: "db-password"}}
+	return &v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: "wp"},
+		Spec: v1.ProjectSpec{
+			Services: []v1.ServiceDef{
+				{Name: "db", Image: "mysql:8", Env: []v1.EnvVar{
+					{Name: "MYSQL_ROOT_PASSWORD", ValueFrom: ref},
+					{Name: "MYSQL_DATABASE", Value: "wp"},
+				}},
+				{Name: "app", Image: "wordpress", Env: []v1.EnvVar{
+					{Name: "WORDPRESS_DB_PASSWORD", ValueFrom: ref},
+				}},
+			},
+		},
+	}
+}
+
+func TestResolveSecretsHappyPathAndCache(t *testing.T) {
+	fetches := 0
+	client := newSecretsTestServer(t, map[string]v1.Secret{
+		"wordpress-creds": {
+			ObjectMeta: v1.ObjectMeta{Name: "wordpress-creds"},
+			Spec: v1.SecretSpec{Data: []v1.SecretDataItem{
+				{Key: "db-password", Value: "hunter2"},
+			}},
+		},
+	}, &fetches)
+
+	p := secretRefProject()
+	resolved, err := resolveSecrets(context.Background(), client, p)
+	require.NoError(t, err)
+
+	// Both references resolved to the literal value; ValueFrom cleared.
+	assert.Equal(t, "hunter2", resolved.Spec.Services[0].Env[0].Value)
+	assert.Nil(t, resolved.Spec.Services[0].Env[0].ValueFrom)
+	assert.Equal(t, "hunter2", resolved.Spec.Services[1].Env[0].Value)
+	assert.Nil(t, resolved.Spec.Services[1].Env[0].ValueFrom)
+
+	// Literal env var untouched.
+	assert.Equal(t, "wp", resolved.Spec.Services[0].Env[1].Value)
+
+	// Two references to the same secret → exactly one fetch (cache hit).
+	assert.Equal(t, 1, fetches)
+
+	// The caller's original project must be unchanged: still carries the
+	// reference, never the plaintext value.
+	assert.NotNil(t, p.Spec.Services[0].Env[0].ValueFrom)
+	assert.Empty(t, p.Spec.Services[0].Env[0].Value)
+}
+
+func TestResolveSecretsNoRefsSkipsFetch(t *testing.T) {
+	fetches := 0
+	client := newSecretsTestServer(t, nil, &fetches)
+
+	p := &v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: "plain"},
+		Spec: v1.ProjectSpec{Services: []v1.ServiceDef{
+			{Name: "web", Image: "nginx", Env: []v1.EnvVar{{Name: "MODE", Value: "prod"}}},
+		}},
+	}
+	resolved, err := resolveSecrets(context.Background(), client, p)
+	require.NoError(t, err)
+	assert.Same(t, p, resolved, "no refs: original object returned, no copy")
+	assert.Equal(t, 0, fetches, "no refs: no API calls")
+}
+
+func TestResolveSecretsSecretNotFound(t *testing.T) {
+	fetches := 0
+	client := newSecretsTestServer(t, nil, &fetches) // empty: every name 404s
+
+	_, err := resolveSecrets(context.Background(), client, secretRefProject())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrSecretNotFound)
+}
+
+func TestResolveSecretsKeyNotFound(t *testing.T) {
+	fetches := 0
+	client := newSecretsTestServer(t, map[string]v1.Secret{
+		"wordpress-creds": {
+			ObjectMeta: v1.ObjectMeta{Name: "wordpress-creds"},
+			Spec: v1.SecretSpec{Data: []v1.SecretDataItem{
+				{Key: "some-other-key", Value: "x"},
+			}},
+		},
+	}, &fetches)
+
+	_, err := resolveSecrets(context.Background(), client, secretRefProject())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errSecretKeyNotFound)
+}
