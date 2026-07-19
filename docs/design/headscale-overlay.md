@@ -48,16 +48,18 @@ The following are explicitly deferred to a later iteration:
 
 ```mermaid
 flowchart LR
-  subgraph User["End user laptop"]
+  subgraph User["Admin device"]
     Ctl[caractl]
+    TsCtl[(tsnet / tailscale client<br/>overlay IP<br/>100.64.0.10)]
   end
 
   subgraph CP["Control plane host"]
     subgraph SrvBin["cara-server (single binary)"]
-      API[HTTP API<br/>:8080 underlay]
+      API[REST API<br/>tsnet listener :8080]
       Proxy[WS proxy<br/>/nodes/*/port-forward<br/>/nodes/*/logs]
       TsSrv[(tsnet client<br/>overlay IP<br/>100.64.0.1)]
       HSClient[Headscale admin<br/>API client]
+      LocalDebug[localhost-only<br/>debug / health]
     end
     DB[(PostgreSQL)]
   end
@@ -76,17 +78,18 @@ flowchart LR
     Docker[Docker runtime<br/>project containers]
   end
 
-  Ctl -- "1. HTTPS underlay<br/>(public)" --> API
-  Ctl -- "2. WSS underlay<br/>port-forward / logs" --> Proxy
+  Ctl -- "1. HTTPS overlay<br/>CRUD / describe / apply" --> API
+  Ctl -- "2. WSS overlay<br/>port-forward / logs" --> Proxy
 
   API <--> DB
   HSClient -- "admin: create user,<br/>preauth key, delete node" --> HSAPI
 
+  TsCtl <-. "WireGuard<br/>coordinated by HS" .-> HSCoord
   TsSrv <-. "WireGuard<br/>coordinated by HS" .-> HSCoord
   TsAg  <-. "WireGuard<br/>coordinated by HS" .-> HSCoord
 
   Proxy -- "3. tsnet.Dial<br/>100.64.0.5:9090" --> AgHTTP
-  AgHB -- "heartbeat underlay<br/>SERVER_URL" --> API
+  AgHB -- "heartbeat overlay<br/>server overlay URL" --> API
 
   AgHTTP --> Docker
 ```
@@ -97,20 +100,21 @@ flowchart LR
 - **Dashed arrows** — WireGuard control-plane coordination (nodes negotiate
   peer keys and DERP relays through Headscale, then send data plane traffic
   peer-to-peer or via DERP without transiting Headscale itself).
-- **Underlay** — the pre-existing internet path (`caractl → server`, `agent
-  heartbeat → server`). Does not depend on the overlay.
-- **Overlay** — the WireGuard mesh (`server ↔ agent` for port-forward / logs /
-  exec). Only used for `server → agent` RPCs.
+- **Underlay** — the ordinary internet / LAN path used only to reach the
+  Headscale coordination service and any localhost-only debug endpoint. Cara's
+  control-plane API does not use underlay transport in v1.
+- **Overlay** — the WireGuard mesh used for every Cara control-plane flow:
+  `caractl ↔ server`, `agent ↔ server`, and server-mediated streams to agents.
 
 **Three key properties visible in this diagram:**
 
-1. `caractl` never touches Headscale or the overlay — it is always an underlay
-   HTTP client of `cara-server`.
-2. `cara-server` is the only Headscale admin client (HSClient → HSAPI). The
+1. `caractl` runs from an admin device that has already joined the overlay
+   under the `cara-admin` Headscale user. It never calls agents directly.
+2. `cara-server` is the only Headscale admin API client (HSClient → HSAPI). The
    `preauth_keys` table lives in the same PostgreSQL that owns Node state.
-3. Agent → server traffic (heartbeat) stays on the underlay, so overlay
-   outages do not affect node liveness reporting. Server → agent traffic
-   (port-forward / logs) runs on the overlay, which is what solves NAT.
+3. Agent heartbeat, status reporting, project polling, server→agent RPCs, and
+   `caractl` REST/WSS calls all use overlay transport. `cara-server` does not
+   expose a public underlay control-plane API.
 
 ## 4. Node identity
 
@@ -124,16 +128,16 @@ hostnames match.
 
 ```
 Cara Node               (server-side mapping)          Headscale node
-  metadata.name          preauth_keys(key, cara_node)    user, hostname, overlay IP
+  metadata.name          preauth_keys(key_hash, node)    user, hostname, overlay IP
   ────────────           ─────────────────────────      ──────────────────────────
   "PVE1_Server.03"  ◀──  key=tskey-abc, node="PVE1_Server.03"  ──▶  hostname="docker-host-07"
                                                                      overlay IP=100.64.0.7
 ```
 
-When the agent joins the overlay (`tailscale up --authkey=<key>`), the
-`cara-agent` may choose any hostname it likes (typically the OS hostname). The
-`cara-server` reverses the mapping via the `preauth_keys` table when the agent
-first heartbeats with the pre-auth key reference.
+When the agent joins the overlay from its secret join bundle, the `cara-agent`
+may choose any hostname it likes (typically the OS hostname). The `cara-server`
+reverses the mapping via the `preauth_keys` table when the agent first
+heartbeats with the pre-auth key reference.
 
 ### 4.2 Rationale
 
@@ -170,18 +174,18 @@ first heartbeats with the pre-auth key reference.
 ### 5.1 Lifecycle
 
 ```
-[admin]  caractl overlay create-preauth-key --node <name> [--ttl 24h]
+[admin device on overlay]  caractl node register --name <name> --output <bundle.yaml> [--ttl 24h]
              │
-             ▼ HTTP
-[cara-server]  POST /api/v1/overlay/preauth-keys
+             ▼ HTTPS overlay
+[cara-server]  POST /api/v1/nodes
                  └── Headscale admin API: create key (user=cara-node, one-shot, TTL)
-                 └── DB: insert preauth_keys(key, cara_node_name, expires_at, issued_by, state=active)
+                 └── DB: insert preauth_keys(key_hash, key_prefix, cara_node_name, expires_at, issued_by, state=active)
              │
              ▼
-[admin]  copies key to agent's config / provisioning script (out of band)
+[admin]  copies secret join bundle to agent host (out of band)
              │
              ▼
-[cara-agent on target host]  tailscale up --authkey=<key> --hostname=<free>
+[cara-agent on target host]  cara-agent --join-bundle=/etc/cara/join.yaml
              │
              ▼
 [Headscale]  key marked used; node record created with an overlay IP
@@ -191,7 +195,7 @@ first heartbeats with the pre-auth key reference.
              │
              ▼
 [cara-server]  looks up preauth_keys[key].cara_node_name → updates that Node's
-               status.network.ip; marks key state=used
+               status.network.overlayIP; marks key state=used
 ```
 
 ### 5.2 Key states
@@ -206,14 +210,14 @@ first heartbeats with the pre-auth key reference.
 ### 5.3 Edge cases
 
 - **Node re-provisioning**: revoke old Headscale node, issue new key, agent
-  joins fresh with a new overlay IP; server updates `status.network.ip` in
+  joins fresh with a new overlay IP; server updates `status.network.overlayIP` in
   place — the Cara Node identity is unchanged.
 - **Key leaked**: `caractl overlay revoke-key` immediately; DB row retained
   for audit trail.
 - **Key produced but never used**: expires automatically after TTL; no server
   action required.
-- **Agent retries `tailscale up` after key was already used**: Headscale
-  rejects (one-shot); agent must obtain a fresh key.
+- **Agent retries join after key was already used**: Headscale rejects
+  (one-shot); agent must obtain a fresh join bundle.
 
 ## 6. IP model and traffic flow
 
@@ -221,30 +225,36 @@ first heartbeats with the pre-auth key reference.
 
 | Direction | Transport | Notes |
 |---|---|---|
-| Server → Agent (API calls, port-forward setup, logs, health probe) | **Overlay** | Canonical path. Underlay fallback allowed only under explicit configuration (owned by [CARA-52](https://clustron.atlassian.net/browse/CARA-52)). |
-| Agent → Server (register, heartbeat, poll projects, report status) | **Underlay** (`SERVER_URL`) | Unchanged from today. Server keeps its public HTTPS endpoint. Rationale: bootstrap independence — agent can heartbeat even if overlay is degraded. |
-| caractl → Server (all CRUD / describe / apply / delete) | **Underlay** | Server's public HTTPS endpoint. `caractl` users do not need Tailscale installed for day-to-day commands. |
-| caractl → Agent (tunneling: `port-forward`, `logs`, future `exec`) | **Server-side proxy (C2)** | `caractl` opens a WebSocket to `cara-server`; the server proxies bidirectionally to the agent over the overlay. |
+| Server → Agent (API calls, port-forward setup, logs, health probe) | **Overlay** | Canonical and only path. Dial by the agent's authoritative overlay IP. |
+| Agent → Server (register, heartbeat, poll projects, report status) | **Overlay** | Agent must join Headscale before it can register or heartbeat. |
+| caractl → Server (all CRUD / describe / apply / delete) | **Overlay** | Admin device must join Headscale before running `caractl` against the cluster. |
+| caractl → Agent (tunneling: `port-forward`, `logs`, future `exec`) | **Server-side proxy over overlay** | `caractl` opens an overlay WebSocket to `cara-server`; the server proxies bidirectionally to the agent over the overlay. |
 
 ### 6.2 Rationale for `caractl → Agent` via server proxy
 
-- `caractl` is the interface every developer / operator uses, not just SREs.
-  Forcing every user to install a Tailscale client to run `caractl logs` or
-  `caractl port-forward` breaks the "kubectl-style" single-endpoint UX Cara
-  aims for.
+- `caractl` is the single Cara API client. Even though admin devices are on the
+  overlay, forcing `caractl` to dial agents directly would push node discovery,
+  stream authorization, and audit concerns into every agent.
 - Cost: `cara-server` adds a WebSocket bidi proxy handler
   (`/api/v1/nodes/<name>/port-forward`, `/api/v1/nodes/<name>/logs`). One-time
   engineering effort; no new binary or deployment component.
 - Benefit: single trust boundary (server-side auth applies to tunnels too);
-  no admin-device onboarding required.
+  agents only trust `cara-server`, not every admin device.
 
-### 6.3 Underlay fallback (server → agent)
+### 6.3 Addressing model
 
-Owned by CARA-52. Overlay is the default. An explicit configuration flag on
-`cara-server` may cause the dialer to fall back to a stored underlay address
-for a specific Node when overlay is unreachable. This exists mainly for the
-transitional period while nodes are still being migrated onto the overlay and
-should not be relied upon in steady state.
+The Headscale-assigned overlay IP is the authoritative address for server→agent
+dialing and is stored in `Node.status.network.overlayIP`. `cara-server` uses
+that IP when opening agent RPCs and tunnel streams.
+
+MagicDNS names may be stored or displayed as optional debug metadata (for
+example in `caractl describe node`), but they are not authoritative in v1. DNS
+configuration, hostname constraints, or MagicDNS outages must not break normal
+Cara operation when the overlay IP is known.
+
+There is no underlay fallback for server→agent traffic in v1. If an overlay dial
+fails, the server reports the error to the caller and updates node conditions as
+described in section 10.
 
 ## 7. Trust boundary
 
@@ -254,20 +264,23 @@ should not be relied upon in steady state.
 |---|---|---|---|
 | `cara-agent` (per node) | `cara-node` | Pre-auth key issued by server on request | One-shot, non-ephemeral, TTL 24h (see §5) |
 | `cara-server` | `cara-control` | Pre-auth key issued once at bootstrap | **Long-lived, non-ephemeral, one-shot** — used once at first start, never regenerated for the same server identity |
-| Admin devices | N/A (v1) | N/A | Not on the overlay in v1. `caractl` reaches agents through the server-side WebSocket proxy (§6). |
+| Admin devices running `caractl` | `cara-admin` | Pre-auth key issued by operator / Headscale ops flow | Non-ephemeral; TTL and reuse policy are deployment-specific, but keys must be handled as admin credentials |
 
 ### 7.2 Pre-auth key issuance rules
 
-- **Only `cara-server` calls the Headscale admin API.** `caractl` never touches
-  Headscale directly (see [CARA-49](https://clustron.atlassian.net/browse/CARA-49)).
+- **Only `cara-server` calls the Headscale admin API for Cara nodes.**
+  `caractl` never creates agent keys directly; it asks `cara-server` over the
+  overlay. Operator-managed bootstrap may use Headscale tooling to provision
+  the initial `cara-control` and `cara-admin` identities.
 - **Key format**: Headscale-generated opaque token; never logged in full;
   server persists `key_prefix` (first 8 chars) plus a hash for audit.
 - **Revocation**: `cara-server` is the sole writer of `preauth_keys` state and
   the sole caller of Headscale delete-node / delete-key APIs.
-- **Two Headscale users, not one.** Isolating `cara-control` from `cara-node`
-  means an agent's stolen credentials cannot impersonate the server, and
-  Headscale ACLs (v2 non-goal) can later restrict node-to-node traffic without
-  affecting the server's control-plane reachability.
+- **Three Headscale users, not one.** Isolating `cara-control`, `cara-node`,
+  and `cara-admin` means stolen agent credentials cannot impersonate the server
+  or an admin device. Headscale ACLs (v2 non-goal) can later restrict admin
+  devices to `cara-server`, restrict agents to `cara-server`, and prevent
+  agent-to-agent traffic without changing Cara's protocol.
 
 ### 7.3 Server bootstrap key
 
@@ -282,6 +295,19 @@ Rekey / rotation is out of scope for v1: if the server needs a new overlay
 identity, the operator re-issues a fresh pre-auth key, wipes the server's
 `tsnet` state directory, and restarts.
 
+### 7.4 Admin device bootstrap
+
+Admin devices are intentionally outside Cara's self-service flow because they
+are needed before any overlay-only `cara-server` API is reachable. An operator
+uses Headscale tooling or an equivalent infrastructure process to create the
+`cara-admin` user and issue admin-device pre-auth keys. After the admin device
+joins the overlay, `caractl` can reach the `cara-server` overlay API and request
+agent join bundles.
+
+Admin-device keys are administrative credentials. The v1 design does not define
+per-user RBAC inside Headscale; Cara authorization remains enforced by
+`cara-server` once a request reaches the overlay API.
+
 ## 8. Tailscale integration mode
 
 Both `cara-server` and `cara-agent` embed the overlay client in-process using
@@ -293,7 +319,7 @@ Neither host requires the standalone `tailscaled` daemon, `CAP_NET_ADMIN`,
 
 | Concern | tsnet (chosen) | External tailscaled (rejected) |
 |---|---|---|
-| Node operator onboarding | `cara-agent --preauth-key=<k>` and nothing else | Install tailscale package + `tailscale up` + then start agent |
+| Node operator onboarding | `cara-agent --join-bundle=/etc/cara/join.yaml` and nothing else | Install tailscale package + `tailscale up` + then start agent |
 | Container / K8s deployment | Works in an unprivileged container | Requires privileged container or host-network + `/dev/net/tun` |
 | Binary self-containment | Single binary carries all dependencies | External systemd unit / package manager dependency |
 | Blast radius of overlay | Only the `cara-*` process | Every process on the host (including debug shells, unrelated daemons) |
@@ -315,20 +341,28 @@ inspection MUST go through `cara-server`'s API (`caractl get node`,
   overlay. This is intentional: overlay is a control-plane concern (agent ↔
   server), not a workload concern.
 - `cara-server` uses `tsnet.Server.Dial` to reach agents by overlay IP, and
-  keeps its underlay HTTP listener (`:8080`) unchanged for `caractl` traffic.
+  exposes its main REST/WSS API through a `tsnet` overlay listener.
 - `cara-agent` uses `tsnet.Server.Listen` for its agent HTTP endpoint, and
-  keeps its underlay heartbeat client unchanged (pointing at `SERVER_URL`).
+  sends heartbeat / status / project polling requests to the server's overlay
+  URL.
+- `cara-server` MAY expose a localhost-only debug / health endpoint for process
+  readiness, metrics, and overlay diagnostics. That endpoint MUST NOT provide
+  Cara CRUD APIs, heartbeat ingestion, logs, port-forward, exec, or any other
+  control-plane operation. It exists only for local troubleshooting and
+  infrastructure health checks.
 
 ### 8.3 Configuration surface
 
-Both binaries accept the same set of flags/env vars:
+The overlay-enabled commands accept the relevant subset of these flags/env vars:
 
 | Field | Description |
 |---|---|
 | `--headscale-url` | Base URL of the Headscale control plane |
-| `--preauth-key` | One-shot key used to join the overlay (agent only; server uses a long-lived key or a separate admin identity — see §7) |
+| `--preauth-key` | One-shot key used to join the overlay (agent join bundle; server uses a long-lived key or a separate admin identity — see §7) |
 | `--hostname` | Overlay hostname (defaults to the Cara node name) |
 | `--state-dir` | Directory where `tsnet` persists its node key and machine state across restarts |
+| `--server-url` | Server overlay URL used by agents and `caractl` |
+| `--debug-listen` | Optional localhost-only debug / health listener; never a control-plane API |
 
 The `--state-dir` requirement is important: `tsnet` writes its private node
 identity to disk. Losing this directory forces a rejoin (see §10 for the
@@ -336,8 +370,9 @@ identity to disk. Losing this directory forces a rejoin (see §10 for the
 
 ## 9. Bootstrap sequences
 
-Two flows: initial server bootstrap (once per cluster) and per-agent join
-(every time a node is added).
+Three flows: initial server bootstrap (once per cluster), admin device join
+(before `caractl` can manage the cluster), and per-agent join (every time a node
+is added).
 
 ### 9.1 Server bootstrap (one-time)
 
@@ -356,11 +391,32 @@ sequenceDiagram
   Srv->>HS: WireGuard handshake using preauth-key
   HS-->>Srv: overlay IP (100.64.0.1)
   Srv->>Srv: persist node identity to --state-dir
+  Srv->>Srv: start REST/WSS API on tsnet overlay listener
   Srv->>DB: migrate preauth_keys, nodes tables
-  Note over Srv: Server is now on overlay as 100.64.0.1.<br/>Preauth key is consumed; will not be reused.
+  Note over Srv: Server API is reachable only on overlay as 100.64.0.1.<br/>Preauth key is consumed; will not be reused.
 ```
 
-### 9.2 Agent join (per node)
+### 9.2 Admin device join
+
+```mermaid
+sequenceDiagram
+  actor Op as Operator
+  participant HS as Headscale
+  participant Ctl as Admin device / caractl
+  participant Srv as cara-server
+
+  Op->>HS: headscale users create cara-admin
+  Op->>HS: headscale preauthkeys create --user cara-admin ...
+  HS-->>Op: admin-device preauth key
+  Op->>Ctl: tailscale up / tsnet config using admin key
+  Ctl->>HS: WireGuard handshake
+  HS-->>Ctl: overlay IP (100.64.0.10)
+  Ctl->>Srv: HTTPS overlay request to server API
+  Srv-->>Ctl: 200 OK
+  Note over Ctl,Srv: caractl can now manage Cara over overlay.<br/>It still never dials agents directly.
+```
+
+### 9.3 Agent join (per node)
 
 ```mermaid
 sequenceDiagram
@@ -372,57 +428,73 @@ sequenceDiagram
   participant DB as PostgreSQL
 
   Op->>Ctl: caractl node register --name pve1
-  Ctl->>Srv: POST /api/v1/nodes { name: "pve1" }
+  Ctl->>Srv: POST /api/v1/nodes { name: "pve1" } over overlay
   Srv->>HS: create preauth key (user=cara-node, one-shot, ttl=24h)
   HS-->>Srv: preauth-key
   Srv->>DB: INSERT preauth_keys (key_hash, cara_node_name="pve1", ttl)
-  Srv-->>Ctl: { name: "pve1", preauth_key: "tskey-..." }
-  Ctl-->>Op: preauth key (copy to node)
+  Srv-->>Ctl: join bundle { nodeName, headscaleURL, serverURL, preauthKey, stateDir, expiresAt }
+  Ctl-->>Op: write join bundle to --output path with 0600 permissions
 
-  Op->>Ag: cara-agent --preauth-key=tskey-... --state-dir=/var/lib/cara
+  Op->>Ag: copy secret join bundle to /etc/cara/join.yaml
+  Op->>Ag: cara-agent --join-bundle=/etc/cara/join.yaml
   Ag->>Ag: tsnet.Start()
   Ag->>HS: WireGuard handshake
   HS-->>Ag: overlay IP (100.64.0.5)
-  Ag->>Srv: POST /api/v1/heartbeat { name: "pve1", overlay_ip: "100.64.0.5", key_ref: <hash> }
+  Ag->>Srv: POST /api/v1/heartbeat { name: "pve1", overlay_ip: "100.64.0.5", key_ref: <hash> } over overlay
   Srv->>DB: lookup preauth_keys by key_hash → cara_node_name="pve1"
-  Srv->>DB: UPDATE nodes SET status.network = { ip: "100.64.0.5", ... } WHERE name = "pve1"
-  Srv->>DB: DELETE preauth_keys WHERE key_hash = <hash> (one-shot consumed)
+  Srv->>DB: UPDATE nodes SET status.network = { overlayIP: "100.64.0.5", ... } WHERE name = "pve1"
+  Srv->>DB: UPDATE preauth_keys SET state = used, used_by_ip = "100.64.0.5" WHERE key_hash = <hash>
   Srv-->>Ag: 200 OK
-  Note over Ag,Srv: Agent is now Ready. Subsequent heartbeats validate<br/>overlay IP against nodes.status.network.ip.
+  Note over Ag,Srv: Agent is now Ready. Subsequent heartbeats validate<br/>overlay IP against nodes.status.network.overlayIP.
 ```
+
+The join bundle contains a live Headscale pre-auth key and MUST be treated as a
+secret. `caractl node register --output <path>` writes it on the admin device
+with `0600` permissions and prints only the path, expiry, and handling
+instructions. Operators copy it to the target agent host through their normal
+secret transport (`scp`, cloud-init secret data, Ansible Vault, a secret
+manager, or equivalent). `cara-server` stores only key hashes / prefixes and
+audit metadata, never the full key in plaintext.
 
 ## 10. Failure modes
 
 | # | Failure | Symptom | Detector | Surfacing | Recovery |
 |---|---|---|---|---|---|
-| 1 | Headscale unreachable at server start | `cara-server` cannot join overlay; underlay API still works | `tsnet.Start()` returns error, retried with backoff | Server logs + Prometheus `cara_overlay_up = 0`; caractl port-forward returns 503 with "server overlay down" | Operator restarts Headscale; server retries automatically. Agents remain Ready (no server→agent RPCs land until server rejoins). |
-| 2 | Headscale unreachable at agent start | Agent cannot obtain overlay IP; heartbeat has no `overlay_ip` field | Agent-side `tsnet` handshake timeout | Agent stays in `Pending` (never transitions to Ready); server marks node `Unknown` after heartbeat timeout ([CARA-54](https://clustron.atlassian.net/browse/CARA-54)) | Operator confirms Headscale reachable from node; agent retries on interval. |
-| 3 | Pre-auth key expired before first use | Agent gets 401 from Headscale during handshake | Agent handshake returns explicit "key expired" | Agent logs error; heartbeat NOT sent; node stays absent in `caractl get nodes` | Operator runs `caractl node register` again to reissue key. Server garbage-collects expired keys via periodic sweep. |
-| 4 | Overlay IP reused after node revoke + rejoin | New agent process claims same overlay IP that an old (revoked) node used | Server detects `preauth_keys.cara_node_name` on heartbeat resolves to a name that already exists with a different key ref | Server responds 409 to heartbeat; logs incident | Operator revokes stale node explicitly (`caractl node delete`) before rejoin, then reissues key. |
-| 5 | Agent overlay interface flaps | Server intermittently cannot reach agent overlay IP | `tsnet.Dial` timeout / connection reset from server side | Server marks node condition `OverlayReachable=False`; port-forward / logs return 503 with reason | Automatic — resolves when `tsnet` reconnects. Agent underlay heartbeat continues so node does NOT flip to `Unknown`. |
-| 6 | Server `--state-dir` lost | Server restarts and cannot resume overlay identity | `tsnet.Start()` finds no state; treats as new node; original preauth-key already consumed | Server fails to start (fatal), logs "no state and no valid preauth-key" | Operator regenerates a preauth key for `cara-control`, wipes any partial state, restarts. |
-| 7 | Cara node rename while overlay identity persists | `nodes.metadata.name` changed but Headscale still knows the old hostname | Heartbeat carries updated Cara name, but `preauth_keys` lookup returns different name | Server rejects heartbeat with 409 "identity mismatch"; requires explicit revoke + rejoin | Operator deletes and re-registers the node under the new name. Rename is not supported in v1. |
+| 1 | Headscale unreachable at server start | `cara-server` cannot join overlay; main REST/WSS API is not served | `tsnet.Start()` returns error, retried with backoff | Server logs, localhost-only debug / health reports not ready, infra monitoring reports overlay down | Operator restores Headscale reachability. Server keeps retrying and starts its overlay listener only after join succeeds. |
+| 2 | Headscale unreachable for admin device | `caractl` cannot reach the overlay-only server API | Admin device cannot join overlay or cannot route to server overlay IP | `caractl` connection error; infra monitoring / Headscale status | Operator restores Headscale or admin-device connectivity. No underlay Cara API exists as fallback. |
+| 3 | Headscale unreachable at agent start | Agent cannot obtain overlay IP and cannot heartbeat | Agent-side `tsnet` handshake timeout | Agent local logs / localhost debug report not ready; server marks node `Unknown` after heartbeat timeout ([CARA-54](https://clustron.atlassian.net/browse/CARA-54)) | Operator confirms Headscale reachable from node; agent retries on interval. |
+| 4 | Pre-auth key expired before first use | Agent gets 401 from Headscale during handshake | Agent handshake returns explicit "key expired" | Agent logs error; heartbeat NOT sent; node stays absent or `Unknown` in `caractl get nodes` | Operator runs `caractl node register` again to reissue a fresh join bundle. Server garbage-collects expired keys via periodic sweep. |
+| 5 | Overlay IP reused after node revoke + rejoin | New agent process claims same overlay IP that an old (revoked) node used | Server detects `preauth_keys.cara_node_name` on heartbeat resolves to a name that already exists with a different key ref | Server responds 409 to heartbeat; logs incident | Operator revokes stale node explicitly (`caractl node delete`) before rejoin, then reissues key. |
+| 6 | Agent overlay interface flaps | Agent heartbeat stops and server→agent dials fail intermittently | Heartbeat timeout and `tsnet.Dial` timeout / connection reset from server side | Server marks node `Unknown` after heartbeat timeout and sets `OverlayReachable=False` when server→agent dial fails; port-forward / logs return 503 with reason | Automatic — resolves when `tsnet` reconnects and heartbeat resumes. |
+| 7 | Server `--state-dir` lost | Server restarts and cannot resume overlay identity | `tsnet.Start()` finds no state; treats as new node; original preauth-key already consumed | Server never serves main API; localhost debug / health reports not ready; logs "no state and no valid preauth-key" | Operator regenerates a preauth key for `cara-control`, wipes any partial state, restarts. |
+| 8 | Cara node rename while overlay identity persists | `nodes.metadata.name` changed but Headscale still knows the old hostname | Heartbeat carries updated Cara name, but `preauth_keys` lookup returns different name | Server rejects heartbeat with 409 "identity mismatch"; requires explicit revoke + rejoin | Operator deletes and re-registers the node under the new name. Rename is not supported in v1. |
 
-Rows 1, 2, 5 are the expected steady-state failures and MUST be observable
-through `caractl get nodes -o wide` and Prometheus. Rows 3, 4, 6, 7 are
-operator-driven and can rely on error surfacing in logs and CLI output.
+Rows 1, 2, 3, and 6 are the expected steady-state failures. When `caractl` can
+reach the server overlay API, node-level symptoms MUST be observable through
+`caractl get nodes -o wide` and Prometheus. When the server or admin device
+cannot join the overlay, operators rely on Headscale / infrastructure
+monitoring plus localhost-only debug / health on the affected process. Rows 4,
+5, 7, and 8 are operator-driven and can rely on error surfacing in logs and CLI
+output.
 
 ## 11. Open questions
 
-- Whether to expose overlay MagicDNS names in `Node.status.network.dnsName`
-  or to keep only the numeric overlay IP as authoritative. Current lean:
-  keep numeric IP authoritative in v1; add MagicDNS as an optional cosmetic
-  field for `caractl describe node` once Headscale MagicDNS is proven stable
-  in our deployment.
+- Whether to expose optional MagicDNS names in `Node.status.network.dnsName` or
+  only in `caractl describe node` output. The authoritative address is already
+  decided: the numeric overlay IP.
 - Whether the periodic garbage-collection sweep for expired `preauth_keys`
   belongs in the same controller loop as node reconciliation or in a
   dedicated janitor (see [CARA-53](https://clustron.atlassian.net/browse/CARA-53)).
-- Whether pre-auth keys should be delivered to the node operator through
-  `caractl` stdout (current plan) or a downloadable one-time bundle
-  (config + key). Impacts operator UX only, not the protocol.
+- The exact join-bundle schema and filename convention. The architectural
+  decision is fixed: `caractl node register --output <path>` writes a
+  secret-bearing bundle on the admin device with `0600` permissions.
 
 ## Changelog
 
+- 2026-07-19 — Revised the design to an overlay-only Cara control plane:
+  `caractl`, `cara-server`, and `cara-agent` all communicate through
+  Headscale; underlay fallback was removed; admin devices use `cara-admin`;
+  agent onboarding uses secret join bundles.
 - 2026-07-13 — Q5 resolved (`tsnet` on both server and agent), Q6 resolved
   (server also uses a long-lived one-shot preauth key under Headscale user
   `cara-control`). §3 architecture diagram, §7 trust boundary, §8 tailscale
