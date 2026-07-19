@@ -72,6 +72,11 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 		if svc.Image == "" {
 			return handlerutil.NewValidationError("spec.services[].image", svc.Name, "service "+svc.Name+": image is required")
 		}
+		for _, env := range svc.Env {
+			if err := validateEnvVar(svc.Name, env); err != nil {
+				return err
+			}
+		}
 	}
 
 	if len(spec.Ingress) > 0 {
@@ -108,6 +113,35 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 		}
 	}
 
+	return nil
+}
+
+// validateEnvVar enforces the EnvVar contract from CARA-57: value and
+// valueFrom are mutually exclusive, and a secretKeyRef must name both the
+// Secret and the key. Whether the referenced Secret actually exists is NOT
+// checked here — that is resolved (and failed) by the agent at reconcile
+// time, since the Secret can legitimately be created after the Project.
+func validateEnvVar(svcName string, env v1.EnvVar) error {
+	if env.Name == "" {
+		return handlerutil.NewValidationError("spec.services[].env[].name", nil,
+			"service "+svcName+": each env var must have a non-empty name")
+	}
+	if env.ValueFrom == nil {
+		return nil
+	}
+	if env.Value != "" {
+		return handlerutil.NewValidationError("spec.services[].env[]", env.Name,
+			"service "+svcName+", env "+env.Name+": value and valueFrom are mutually exclusive")
+	}
+	ref := env.ValueFrom.SecretKeyRef
+	if ref == nil {
+		return handlerutil.NewValidationError("spec.services[].env[].valueFrom", env.Name,
+			"service "+svcName+", env "+env.Name+": valueFrom requires secretKeyRef")
+	}
+	if ref.Name == "" || ref.Key == "" {
+		return handlerutil.NewValidationError("spec.services[].env[].valueFrom.secretKeyRef", env.Name,
+			"service "+svcName+", env "+env.Name+": secretKeyRef.name and secretKeyRef.key must both be non-empty")
+	}
 	return nil
 }
 
