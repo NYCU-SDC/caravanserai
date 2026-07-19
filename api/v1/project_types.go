@@ -99,9 +99,11 @@ type ServiceDef struct {
 type VolumeType string
 
 const (
-	//// VolumeTypeManaged means Caravanserai owns the full lifecycle:
-	//// provisioning, backup, restore, and deletion.
-	//VolumeTypeManaged VolumeType = "Managed"
+	// VolumeTypeManaged means Caravanserai owns the full lifecycle:
+	// provisioning, backup, restore, and deletion. The agent derives the
+	// host bind directory from (namespace, project, volume); it is never
+	// user-supplied.
+	VolumeTypeManaged VolumeType = "Managed"
 
 	// VolumeTypeEphemeral means the volume is discarded when the Project
 	// is stopped or moved. No backup or restore occurs.
@@ -116,9 +118,39 @@ const (
 func (VolumeType) JSONSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type:        "string",
-		Enum:        []any{string(VolumeTypeEphemeral)},
+		Enum:        []any{string(VolumeTypeManaged), string(VolumeTypeEphemeral)},
 		Description: "Governs the lifecycle and backup behaviour of a Volume.",
 	}
+}
+
+// VolumeOnMissing selects what the agent does when a Managed volume has no
+// backup in the object store at restore time.
+type VolumeOnMissing string
+
+const (
+	// VolumeOnMissingInitializeEmpty starts the Project with a freshly
+	// created empty volume directory when no backup exists.
+	VolumeOnMissingInitializeEmpty VolumeOnMissing = "InitializeEmpty"
+)
+
+// JSONSchema returns a JSON Schema with the allowed VolumeOnMissing values.
+func (VolumeOnMissing) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Enum:        []any{string(VolumeOnMissingInitializeEmpty)},
+		Description: "What to do when a Managed volume has no backup at restore time.",
+	}
+}
+
+// VolumeBackupConfig configures periodic S3 backup for a Managed volume.
+type VolumeBackupConfig struct {
+	// Interval is the time between backups, e.g. "1h", "30m". Parsed with
+	// time.ParseDuration; must be positive.
+	Interval string `json:"interval" yaml:"interval"`
+
+	// OnMissing selects behaviour when no backup exists at restore time.
+	// Defaults to InitializeEmpty when empty.
+	OnMissing VolumeOnMissing `json:"onMissing,omitempty" yaml:"onMissing,omitempty"`
 }
 
 // VolumeDef describes a named volume used by one or more services.
@@ -127,6 +159,9 @@ type VolumeDef struct {
 
 	// Type determines lifecycle and backup semantics.
 	Type VolumeType `json:"type" yaml:"type"`
+
+	// Backup configures periodic S3 backup. Only valid for Managed volumes.
+	Backup *VolumeBackupConfig `json:"backup,omitempty" yaml:"backup,omitempty"`
 }
 
 // IngressScope controls whether a route is exposed to the public internet

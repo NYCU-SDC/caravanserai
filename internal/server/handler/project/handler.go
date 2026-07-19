@@ -74,6 +74,53 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 		}
 	}
 
+	volumeNames := make(map[string]bool, len(spec.Volumes))
+	for _, vol := range spec.Volumes {
+		if vol.Name == "" {
+			return handlerutil.NewValidationError("spec.volumes[].name", nil, "each volume must have a non-empty name")
+		}
+		if volumeNames[vol.Name] {
+			return handlerutil.NewValidationError("spec.volumes[].name", vol.Name, "duplicate volume name: "+vol.Name)
+		}
+		volumeNames[vol.Name] = true
+
+		switch vol.Type {
+		case v1.VolumeTypeManaged, v1.VolumeTypeEphemeral:
+		default:
+			return handlerutil.NewValidationError("spec.volumes[].type", vol.Type,
+				"volume "+vol.Name+": type must be \"Managed\" or \"Ephemeral\"")
+		}
+
+		if vol.Backup != nil {
+			if vol.Type != v1.VolumeTypeManaged {
+				return handlerutil.NewValidationError("spec.volumes[].backup", vol.Name,
+					"volume "+vol.Name+": backup is only valid for Managed volumes")
+			}
+			d, err := time.ParseDuration(vol.Backup.Interval)
+			if err != nil || d <= 0 {
+				return handlerutil.NewValidationError("spec.volumes[].backup.interval", vol.Backup.Interval,
+					"volume "+vol.Name+": backup.interval must be a positive duration such as \"1h\" or \"30m\"")
+			}
+			if vol.Backup.OnMissing != "" && vol.Backup.OnMissing != v1.VolumeOnMissingInitializeEmpty {
+				return handlerutil.NewValidationError("spec.volumes[].backup.onMissing", vol.Backup.OnMissing,
+					"volume "+vol.Name+": onMissing must be \"InitializeEmpty\"")
+			}
+		}
+	}
+
+	for _, svc := range spec.Services {
+		for _, vm := range svc.VolumeMounts {
+			if !volumeNames[vm.Name] {
+				return handlerutil.NewValidationError("spec.services[].volumeMounts[].name", vm.Name,
+					"service "+svc.Name+": volumeMount references undeclared volume "+vm.Name)
+			}
+			if vm.MountPath == "" {
+				return handlerutil.NewValidationError("spec.services[].volumeMounts[].mountPath", vm.Name,
+					"service "+svc.Name+": volumeMount "+vm.Name+" must have a non-empty mountPath")
+			}
+		}
+	}
+
 	if len(spec.Ingress) > 0 {
 		serviceNames := make(map[string]bool, len(spec.Services))
 		for _, svc := range spec.Services {

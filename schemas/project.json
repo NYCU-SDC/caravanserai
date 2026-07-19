@@ -295,6 +295,24 @@
       ],
       "description": "ServiceDef describes a single container (analogous to a Compose service)."
     },
+    "VolumeBackupConfig": {
+      "properties": {
+        "interval": {
+          "type": "string",
+          "description": "Interval is the time between backups, e.g. \"1h\", \"30m\". Parsed with\ntime.ParseDuration; must be positive."
+        },
+        "onMissing": {
+          "$ref": "#/$defs/VolumeOnMissing",
+          "description": "OnMissing selects behaviour when no backup exists at restore time.\nDefaults to InitializeEmpty when empty."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "interval"
+      ],
+      "description": "VolumeBackupConfig configures periodic S3 backup for a Managed volume."
+    },
     "VolumeDef": {
       "properties": {
         "name": {
@@ -303,6 +321,10 @@
         "type": {
           "$ref": "#/$defs/VolumeType",
           "description": "Type determines lifecycle and backup semantics."
+        },
+        "backup": {
+          "$ref": "#/$defs/VolumeBackupConfig",
+          "description": "Backup configures periodic S3 backup. Only valid for Managed volumes."
         }
       },
       "additionalProperties": false,
@@ -330,9 +352,17 @@
       ],
       "description": "VolumeMount associates a named Volume with a container mount path."
     },
+    "VolumeOnMissing": {
+      "type": "string",
+      "enum": [
+        "InitializeEmpty"
+      ],
+      "description": "What to do when a Managed volume has no backup at restore time."
+    },
     "VolumeType": {
       "type": "string",
       "enum": [
+        "Managed",
         "Ephemeral"
       ],
       "description": "Governs the lifecycle and backup behaviour of a Volume."
