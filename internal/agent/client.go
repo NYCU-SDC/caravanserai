@@ -25,6 +25,11 @@ import (
 // indicating the node no longer exists and should re-register.
 var ErrNodeNotFound = errors.New("node not found")
 
+// ErrSecretNotFound is returned by GetSecret when the server responds with
+// 404. resolveSecrets treats this as a terminal condition for the project
+// (Failed, no retry at this layer) rather than a transient fetch error.
+var ErrSecretNotFound = errors.New("secret not found")
+
 // Client is an HTTP client for the cara-server node API.
 type Client struct {
 	serverURL  string
@@ -200,6 +205,37 @@ func (c *Client) ListProjectsForReconcile(ctx context.Context) ([]*v1.Project, e
 	}
 
 	return projects, nil
+}
+
+// GetSecret fetches a single Secret by name via GET /api/v1/secrets/{name}.
+// The returned Secret carries plaintext values; they must stay in process
+// memory only — never written to disk or logs (see CARA-57 memory-only rule).
+// Returns ErrSecretNotFound when the server responds with 404.
+func (c *Client) GetSecret(ctx context.Context, name string) (*v1.Secret, error) {
+	url := fmt.Sprintf("%s/api/v1/secrets/%s", c.serverURL, name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build get secret request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get secret request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("%w: %s", ErrSecretNotFound, name)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get secret %q: unexpected status %s", name, resp.Status)
+	}
+
+	var secret v1.Secret
+	if err := json.NewDecoder(resp.Body).Decode(&secret); err != nil {
+		return nil, fmt.Errorf("decode secret %q: %w", name, err)
+	}
+	return &secret, nil
 }
 
 // projectStatusRequest is the body sent to PATCH /api/v1/projects/{name}/status.
