@@ -112,8 +112,8 @@ func main() {
 
 	// agentDialer is the single place cara-server resolves a Node name into
 	// a dial-able HTTP endpoint for its agent. Transport is nil for now, so
-	// net/http.DefaultTransport dials the address stored in
-	// Status.Network.IP. When Headscale support lands in CARA-48/CARA-55,
+	// net/http.DefaultTransport dials the overlay address stored in
+	// Status.Network.OverlayIP. When tsnet lands in CARA-48/CARA-55,
 	// inject a tsnet-backed http.RoundTripper here without changing call
 	// sites.
 	agentDialer := agentdialer.New(agentdialer.Config{

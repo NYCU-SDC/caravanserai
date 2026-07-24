@@ -62,7 +62,7 @@ type Config struct {
 
 	// Transport is the http.RoundTripper used by every returned *http.Client.
 	// When nil, http.DefaultTransport is used, which dials the underlay IP
-	// stored in Node.Status.Network.IP.
+	// stored in Node.Status.Network.OverlayIP.
 	Transport http.RoundTripper
 
 	Timeout time.Duration
@@ -98,9 +98,9 @@ func (d *httpDialer) Client(ctx context.Context, nodeName string) (*http.Client,
 		return nil, "", fmt.Errorf("%w: %w", ErrNodeLookup, err)
 	}
 
-	ip := node.Status.Network.IP
+	ip := node.Status.Network.OverlayIP
 	if ip == "" {
-		return nil, "", fmt.Errorf("%w: node %q has no Status.Network.IP", ErrNodeUnreachable, nodeName)
+		return nil, "", fmt.Errorf("%w: node %q has no Status.Network.OverlayIP", ErrNodeUnreachable, nodeName)
 	}
 
 	port := node.Status.Network.AgentPort

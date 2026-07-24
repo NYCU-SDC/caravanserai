@@ -90,7 +90,7 @@ func TestProbeNode_HappyPath(t *testing.T) {
 	hbBody := mustMarshal(t, map[string]any{
 		"state": string(v1.NodeStateReady),
 		"network": map[string]any{
-			"ip":        agentHost,
+			"overlayIP": agentHost,
 			"agentPort": agentPort,
 		},
 	})
@@ -166,7 +166,7 @@ func TestProbeNode_AgentReturnsError(t *testing.T) {
 	hbBody := mustMarshal(t, map[string]any{
 		"state": string(v1.NodeStateReady),
 		"network": map[string]any{
-			"ip":        agentHost,
+			"overlayIP": agentHost,
 			"agentPort": agentPort,
 		},
 	})

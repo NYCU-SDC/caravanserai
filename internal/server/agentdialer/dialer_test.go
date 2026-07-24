@@ -34,7 +34,7 @@ func (f *fakeNodeLookup) GetNode(_ context.Context, name string) (*v1.Node, erro
 
 func node(name, ip string, port int) *v1.Node {
 	n := &v1.Node{ObjectMeta: v1.ObjectMeta{Name: name}}
-	n.Status.Network.IP = ip
+	n.Status.Network.OverlayIP = ip
 	n.Status.Network.AgentPort = port
 	return n
 }
@@ -84,7 +84,7 @@ func TestDialer_Client_OverlayAddressMissing(t *testing.T) {
 
 	_, _, err := d.Client(context.Background(), "pve1")
 	if err == nil {
-		t.Fatal("expected error when Status.Network.IP is empty")
+		t.Fatal("expected error when Status.Network.OverlayIP is empty")
 	}
 	if !errors.Is(err, ErrNodeUnreachable) {
 		t.Errorf("error = %v, want wrapping ErrNodeUnreachable", err)

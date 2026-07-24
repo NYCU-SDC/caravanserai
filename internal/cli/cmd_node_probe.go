@@ -44,11 +44,11 @@ func newNodeProbeCmd() *cobra.Command {
 		Use:   "probe <name>",
 		Short: "Ask cara-server to dial the agent for a node and report reachability",
 		Long: `probe asks cara-server to make a live HTTP call to the named node's agent
-via its configured Dialer (underlay today, Headscale overlay once enabled).
+via its configured Dialer (Headscale overlay transport via tsnet).
 
 Use this to verify that:
-  - the Node record contains a reachable Status.Network.IP,
-  - the server can reach the agent on that address, and
+  - the Node record contains a reachable Status.Network.OverlayIP,
+  - the server can reach the agent on that overlay address, and
   - the agent's HTTP server is responding to /healthz.
 
 Exit code is 0 when OK=true, 1 otherwise.`,

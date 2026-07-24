@@ -99,9 +99,9 @@
     },
     "NodeNetworkStatus": {
       "properties": {
-        "ip": {
+        "overlayIP": {
           "type": "string",
-          "description": "IP is the Headscale-assigned overlay IP (e.g. \"100.64.0.5\")."
+          "description": "OverlayIP is the Headscale-assigned overlay IP (e.g. \"100.64.0.5\")."
         },
         "dnsName": {
           "type": "string",

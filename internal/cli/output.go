@@ -132,7 +132,7 @@ func (p *Printer) printNodeTable(nodes []v1.Node) error {
 		if state == "" {
 			state = "<unknown>"
 		}
-		ip := n.Status.Network.IP
+		ip := n.Status.Network.OverlayIP
 		if ip == "" {
 			ip = "<none>"
 		}
