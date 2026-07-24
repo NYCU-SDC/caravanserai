@@ -192,6 +192,24 @@
       "title": "Project",
       "description": "Project is the central workload resource."
     },
+    "ProjectBackupConfig": {
+      "properties": {
+        "interval": {
+          "type": "string",
+          "description": "Interval is the time between backup runs, e.g. \"168h\", \"1h\". Parsed with\ntime.ParseDuration; must be positive."
+        },
+        "onMissing": {
+          "$ref": "#/$defs/VolumeOnMissing",
+          "description": "OnMissing selects behaviour when no backup exists at restore time.\nDefaults to InitializeEmpty when empty."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "interval"
+      ],
+      "description": "ProjectBackupConfig configures periodic object-store backup of a Project's Managed volumes."
+    },
     "ProjectPhase": {
       "type": "string",
       "enum": [
@@ -219,6 +237,10 @@
           },
           "type": "array",
           "description": "Volumes are named storage units shared across services."
+        },
+        "backup": {
+          "$ref": "#/$defs/ProjectBackupConfig",
+          "description": "Backup configures periodic backup of every Managed volume in this\nProject. Omitting it means the volumes persist on the node but are\nnever uploaded."
         },
         "ingress": {
           "items": {
@@ -295,24 +317,6 @@
       ],
       "description": "ServiceDef describes a single container (analogous to a Compose service)."
     },
-    "VolumeBackupConfig": {
-      "properties": {
-        "interval": {
-          "type": "string",
-          "description": "Interval is the time between backups, e.g. \"1h\", \"30m\". Parsed with\ntime.ParseDuration; must be positive."
-        },
-        "onMissing": {
-          "$ref": "#/$defs/VolumeOnMissing",
-          "description": "OnMissing selects behaviour when no backup exists at restore time.\nDefaults to InitializeEmpty when empty."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "interval"
-      ],
-      "description": "VolumeBackupConfig configures periodic S3 backup for a Managed volume."
-    },
     "VolumeDef": {
       "properties": {
         "name": {
@@ -321,10 +325,6 @@
         "type": {
           "$ref": "#/$defs/VolumeType",
           "description": "Type determines lifecycle and backup semantics."
-        },
-        "backup": {
-          "$ref": "#/$defs/VolumeBackupConfig",
-          "description": "Backup configures periodic S3 backup. Only valid for Managed volumes."
         }
       },
       "additionalProperties": false,

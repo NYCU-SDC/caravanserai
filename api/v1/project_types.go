@@ -142,26 +142,12 @@ func (VolumeOnMissing) JSONSchema() *jsonschema.Schema {
 	}
 }
 
-// VolumeBackupConfig configures periodic S3 backup for a Managed volume.
-type VolumeBackupConfig struct {
-	// Interval is the time between backups, e.g. "1h", "30m". Parsed with
-	// time.ParseDuration; must be positive.
-	Interval string `json:"interval" yaml:"interval"`
-
-	// OnMissing selects behaviour when no backup exists at restore time.
-	// Defaults to InitializeEmpty when empty.
-	OnMissing VolumeOnMissing `json:"onMissing,omitempty" yaml:"onMissing,omitempty"`
-}
-
 // VolumeDef describes a named volume used by one or more services.
 type VolumeDef struct {
 	Name string `json:"name" yaml:"name"`
 
 	// Type determines lifecycle and backup semantics.
 	Type VolumeType `json:"type" yaml:"type"`
-
-	// Backup configures periodic S3 backup. Only valid for Managed volumes.
-	Backup *VolumeBackupConfig `json:"backup,omitempty" yaml:"backup,omitempty"`
 }
 
 // IngressScope controls whether a route is exposed to the public internet
@@ -206,6 +192,24 @@ type IngressDef struct {
 	Access IngressAccess `json:"access,omitempty" yaml:"access,omitempty"`
 }
 
+// ProjectBackupConfig configures periodic object-store backup of a Project's
+// Managed volumes.
+//
+// The policy lives on the Project rather than on individual volumes because a
+// backup run is a single generation: the whole Project is stopped and every
+// Managed volume is captured and committed together. Per-volume intervals
+// could not be honoured without producing generations whose volumes are from
+// different points in time — exactly what stopping the whole Project avoids.
+type ProjectBackupConfig struct {
+	// Interval is the time between backup runs, e.g. "168h", "1h". Parsed with
+	// time.ParseDuration; must be positive.
+	Interval string `json:"interval" yaml:"interval"`
+
+	// OnMissing selects behaviour when no backup exists at restore time.
+	// Defaults to InitializeEmpty when empty.
+	OnMissing VolumeOnMissing `json:"onMissing,omitempty" yaml:"onMissing,omitempty"`
+}
+
 // ProjectSpec is the desired state declared by the user.
 type ProjectSpec struct {
 	// Services is the ordered list of containers to run.
@@ -213,6 +217,11 @@ type ProjectSpec struct {
 
 	// Volumes are named storage units shared across services.
 	Volumes []VolumeDef `json:"volumes,omitempty" yaml:"volumes,omitempty"`
+
+	// Backup configures periodic backup of every Managed volume in this
+	// Project. Omitting it means the volumes persist on the node but are
+	// never uploaded.
+	Backup *ProjectBackupConfig `json:"backup,omitempty" yaml:"backup,omitempty"`
 
 	// Ingress defines public or internal HTTP routing rules.
 	Ingress []IngressDef `json:"ingress,omitempty" yaml:"ingress,omitempty"`

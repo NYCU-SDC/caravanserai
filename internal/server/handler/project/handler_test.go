@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// specWithVolumes builds a minimal valid spec with the given volumes and one
-// service mounting nothing, so volume-specific rules can be tested in isolation.
+// specWithVolumes builds a minimal valid spec with the given volumes and mounts
+// so volume rules can be tested in isolation.
 func specWithVolumes(volumes []v1.VolumeDef, mounts []v1.VolumeMount) v1.ProjectSpec {
 	return v1.ProjectSpec{
 		Services: []v1.ServiceDef{
@@ -26,34 +26,16 @@ func TestValidateProjectSpecVolumes(t *testing.T) {
 		wantErr string // empty means valid
 	}{
 		{
-			name: "managed volume with backup is valid",
+			name: "managed volume is valid",
 			spec: specWithVolumes(
-				[]v1.VolumeDef{{
-					Name: "db-data",
-					Type: v1.VolumeTypeManaged,
-					Backup: &v1.VolumeBackupConfig{
-						Interval:  "1h",
-						OnMissing: v1.VolumeOnMissingInitializeEmpty,
-					},
-				}},
+				[]v1.VolumeDef{{Name: "db-data", Type: v1.VolumeTypeManaged}},
 				[]v1.VolumeMount{{Name: "db-data", MountPath: "/var/lib/postgresql/data"}},
 			),
 		},
 		{
-			name: "managed volume without backup is valid",
+			name: "ephemeral volume is valid",
 			spec: specWithVolumes(
-				[]v1.VolumeDef{{Name: "db-data", Type: v1.VolumeTypeManaged}},
-				nil,
-			),
-		},
-		{
-			name: "backup onMissing defaults to empty string and is valid",
-			spec: specWithVolumes(
-				[]v1.VolumeDef{{
-					Name:   "db-data",
-					Type:   v1.VolumeTypeManaged,
-					Backup: &v1.VolumeBackupConfig{Interval: "30m"},
-				}},
+				[]v1.VolumeDef{{Name: "cache", Type: v1.VolumeTypeEphemeral}},
 				nil,
 			),
 		},
@@ -85,66 +67,6 @@ func TestValidateProjectSpecVolumes(t *testing.T) {
 			wantErr: "type must be",
 		},
 		{
-			name: "backup on ephemeral volume is rejected",
-			spec: specWithVolumes(
-				[]v1.VolumeDef{{
-					Name:   "cache",
-					Type:   v1.VolumeTypeEphemeral,
-					Backup: &v1.VolumeBackupConfig{Interval: "1h"},
-				}},
-				nil,
-			),
-			wantErr: "only valid for Managed",
-		},
-		{
-			name: "unparsable backup interval is rejected",
-			spec: specWithVolumes(
-				[]v1.VolumeDef{{
-					Name:   "db-data",
-					Type:   v1.VolumeTypeManaged,
-					Backup: &v1.VolumeBackupConfig{Interval: "yearly"},
-				}},
-				nil,
-			),
-			wantErr: "positive duration",
-		},
-		{
-			name: "zero backup interval is rejected",
-			spec: specWithVolumes(
-				[]v1.VolumeDef{{
-					Name:   "db-data",
-					Type:   v1.VolumeTypeManaged,
-					Backup: &v1.VolumeBackupConfig{Interval: "0s"},
-				}},
-				nil,
-			),
-			wantErr: "positive duration",
-		},
-		{
-			name: "negative backup interval is rejected",
-			spec: specWithVolumes(
-				[]v1.VolumeDef{{
-					Name:   "db-data",
-					Type:   v1.VolumeTypeManaged,
-					Backup: &v1.VolumeBackupConfig{Interval: "-1h"},
-				}},
-				nil,
-			),
-			wantErr: "positive duration",
-		},
-		{
-			name: "unknown onMissing is rejected",
-			spec: specWithVolumes(
-				[]v1.VolumeDef{{
-					Name:   "db-data",
-					Type:   v1.VolumeTypeManaged,
-					Backup: &v1.VolumeBackupConfig{Interval: "1h", OnMissing: "InitalizeEmpty"},
-				}},
-				nil,
-			),
-			wantErr: "onMissing must be",
-		},
-		{
 			name: "volumeMount referencing undeclared volume is rejected",
 			spec: specWithVolumes(
 				[]v1.VolumeDef{{Name: "db-data", Type: v1.VolumeTypeManaged}},
@@ -159,6 +81,80 @@ func TestValidateProjectSpecVolumes(t *testing.T) {
 				[]v1.VolumeMount{{Name: "db-data", MountPath: ""}},
 			),
 			wantErr: "non-empty mountPath",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateProjectSpec(tt.spec)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// specWithBackup builds a spec whose volumes are as given plus a Project-level
+// backup policy.
+func specWithBackup(volumes []v1.VolumeDef, backup *v1.ProjectBackupConfig) v1.ProjectSpec {
+	spec := specWithVolumes(volumes, nil)
+	spec.Backup = backup
+	return spec
+}
+
+func TestValidateProjectSpecBackup(t *testing.T) {
+	managed := []v1.VolumeDef{{Name: "db-data", Type: v1.VolumeTypeManaged}}
+	ephemeral := []v1.VolumeDef{{Name: "cache", Type: v1.VolumeTypeEphemeral}}
+
+	tests := []struct {
+		name    string
+		spec    v1.ProjectSpec
+		wantErr string // empty means valid
+	}{
+		{
+			name: "backup with managed volume is valid",
+			spec: specWithBackup(managed, &v1.ProjectBackupConfig{
+				Interval:  "168h",
+				OnMissing: v1.VolumeOnMissingInitializeEmpty,
+			}),
+		},
+		{
+			name: "onMissing may be omitted",
+			spec: specWithBackup(managed, &v1.ProjectBackupConfig{Interval: "1h"}),
+		},
+		{
+			name: "managed volume without a backup policy is valid",
+			spec: specWithBackup(managed, nil),
+		},
+		{
+			name:    "backup without any managed volume is rejected",
+			spec:    specWithBackup(ephemeral, &v1.ProjectBackupConfig{Interval: "168h"}),
+			wantErr: "requires at least one volume with type \"Managed\"",
+		},
+		{
+			name:    "unparsable interval is rejected",
+			spec:    specWithBackup(managed, &v1.ProjectBackupConfig{Interval: "weekly"}),
+			wantErr: "positive duration",
+		},
+		{
+			name:    "zero interval is rejected",
+			spec:    specWithBackup(managed, &v1.ProjectBackupConfig{Interval: "0s"}),
+			wantErr: "positive duration",
+		},
+		{
+			name:    "negative interval is rejected",
+			spec:    specWithBackup(managed, &v1.ProjectBackupConfig{Interval: "-1h"}),
+			wantErr: "positive duration",
+		},
+		{
+			name: "misspelled onMissing is rejected",
+			spec: specWithBackup(managed, &v1.ProjectBackupConfig{
+				Interval:  "168h",
+				OnMissing: "InitalizeEmpty",
+			}),
+			wantErr: "onMissing must be",
 		},
 	}
 

@@ -123,6 +123,8 @@ var describeProjectCoveredFields = newStringSet(
 	// Spec
 	"Spec.Services",
 	"Spec.Volumes",
+	"Spec.Backup.Interval",
+	"Spec.Backup.OnMissing",
 	"Spec.Ingress",
 	"Spec.ExpireAt",
 	// Status

@@ -75,6 +75,7 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 	}
 
 	volumeNames := make(map[string]bool, len(spec.Volumes))
+	hasManagedVolume := false
 	for _, vol := range spec.Volumes {
 		if vol.Name == "" {
 			return handlerutil.NewValidationError("spec.volumes[].name", nil, "each volume must have a non-empty name")
@@ -85,26 +86,30 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 		volumeNames[vol.Name] = true
 
 		switch vol.Type {
-		case v1.VolumeTypeManaged, v1.VolumeTypeEphemeral:
+		case v1.VolumeTypeManaged:
+			hasManagedVolume = true
+		case v1.VolumeTypeEphemeral:
 		default:
 			return handlerutil.NewValidationError("spec.volumes[].type", vol.Type,
 				"volume "+vol.Name+": type must be \"Managed\" or \"Ephemeral\"")
 		}
+	}
 
-		if vol.Backup != nil {
-			if vol.Type != v1.VolumeTypeManaged {
-				return handlerutil.NewValidationError("spec.volumes[].backup", vol.Name,
-					"volume "+vol.Name+": backup is only valid for Managed volumes")
-			}
-			d, err := time.ParseDuration(vol.Backup.Interval)
-			if err != nil || d <= 0 {
-				return handlerutil.NewValidationError("spec.volumes[].backup.interval", vol.Backup.Interval,
-					"volume "+vol.Name+": backup.interval must be a positive duration such as \"1h\" or \"30m\"")
-			}
-			if vol.Backup.OnMissing != "" && vol.Backup.OnMissing != v1.VolumeOnMissingInitializeEmpty {
-				return handlerutil.NewValidationError("spec.volumes[].backup.onMissing", vol.Backup.OnMissing,
-					"volume "+vol.Name+": onMissing must be \"InitializeEmpty\"")
-			}
+	if spec.Backup != nil {
+		// A backup policy with nothing to back up is always a mistake, and
+		// would otherwise be a silent no-op.
+		if !hasManagedVolume {
+			return handlerutil.NewValidationError("spec.backup", nil,
+				"spec.backup requires at least one volume with type \"Managed\"")
+		}
+		d, err := time.ParseDuration(spec.Backup.Interval)
+		if err != nil || d <= 0 {
+			return handlerutil.NewValidationError("spec.backup.interval", spec.Backup.Interval,
+				"spec.backup.interval must be a positive duration such as \"168h\" or \"1h\"")
+		}
+		if spec.Backup.OnMissing != "" && spec.Backup.OnMissing != v1.VolumeOnMissingInitializeEmpty {
+			return handlerutil.NewValidationError("spec.backup.onMissing", spec.Backup.OnMissing,
+				"spec.backup.onMissing must be \"InitializeEmpty\"")
 		}
 	}
 
