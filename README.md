@@ -297,8 +297,39 @@ The `cara-node` user only needs to be created once per Headscale data volume.
 If it already exists, use the numeric ID from `users list`; Headscale v0.29
 does not accept the username in `preauthkeys create --user`.
 
-CARA-55 will add `cara-agent` support for consuming this key and joining the
-overlay.
+#### Joining the overlay from cara-agent
+
+Overlay networking is **opt-in**: `cara-agent` joins the Headscale mesh only
+when both a control-plane URL and a pre-auth key file are configured. With
+neither set, the agent runs on the underlay as before.
+
+Write the pre-auth key to a file (never commit it), then start the agent
+pointing at the dev Headscale:
+
+```bash
+docker compose exec headscale headscale preauthkeys create --user 1 --expiration 24h > preauth.key
+
+./bin/cara-agent \
+  --headscale-url http://localhost:8081 \
+  --preauth-key-file ./preauth.key \
+  --proxy-listen-addr 127.0.0.1:8199   # avoid clashing with Headscale on :8081
+```
+
+On startup the agent blocks until Headscale assigns an overlay IP, logs it
+(`Joined Headscale overlay … overlay_ip=100.64.0.x`), and registers as a node
+you can see with `docker compose exec headscale headscale nodes list`. A join
+failure caused by a bad/expired key fails fast with a readable error; the agent
+never silently falls back to the underlay once overlay is requested.
+
+| Setting | Flag | Env / YAML | Notes |
+|---|---|---|---|
+| Control-plane URL | `--headscale-url` | `HEADSCALE_URL` / `headscale_url` | Enables overlay when set |
+| Pre-auth key file | `--preauth-key-file` | `HEADSCALE_PREAUTH_KEY_FILE` / `preauth_key_file` | Path to a file holding the key; the key is never logged |
+| Overlay hostname | `--overlay-hostname` | `OVERLAY_HOSTNAME` / `overlay_hostname` | Optional; defaults to the node name |
+
+> The dev Headscale listens on host port `8081`, which is also the agent
+> ingress proxy's default. Pass `--proxy-listen-addr` (as above) when running an
+> agent on the same host.
 
 ### Docker resource naming
 
