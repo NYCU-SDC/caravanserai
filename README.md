@@ -255,6 +255,9 @@ All endpoints are under `/api/v1/`.
 # Set up git hooks (run once after cloning)
 make install-hooks
 
+# Start local PostgreSQL and Headscale
+make dev-up
+
 # Run all unit tests
 make test
 
@@ -272,6 +275,30 @@ make -C cmd/caractl    build
 
 The pre-commit hook automatically regenerates `schemas/` when `api/v1/` or
 `cmd/schemagen/` files are staged, so schema files stay in sync with Go types.
+
+### Local Headscale
+
+`make dev-up` starts a development Headscale control plane at
+`http://localhost:8081` using the pinned `headscale/headscale:v0.29.2` image.
+Its config lives in `deploy/dev/headscale/config.yaml`, and its state is stored
+in the `headscale-data` Docker volume. Use `make dev-reset` to wipe that state.
+
+To create a local agent pre-auth key for future overlay work:
+
+```bash
+docker compose exec headscale headscale users create cara-node
+docker compose exec headscale headscale users list
+docker compose exec headscale headscale preauthkeys create \
+  --user <cara-node-id> \
+  --expiration 24h
+```
+
+The `cara-node` user only needs to be created once per Headscale data volume.
+If it already exists, use the numeric ID from `users list`; Headscale v0.29
+does not accept the username in `preauthkeys create --user`.
+
+CARA-55 will add `cara-agent` support for consuming this key and joining the
+overlay.
 
 ### Docker resource naming
 
