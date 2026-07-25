@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	caravolume "NYCU-SDC/caravanserai/internal/agent/volume"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -15,6 +17,7 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	dockerclient "github.com/docker/docker/client"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -23,20 +26,33 @@ const (
 	labelProject = "cara.project"
 	// labelService tags each container with its ServiceDef name.
 	labelService = "cara.service"
+	// labelNamespace records the Project's namespace on containers using a
+	// Managed volume, so operators and future tooling can map a running
+	// container back to its host data directory.
+	labelNamespace = "cara.namespace"
+	// labelVolume lists the Managed volumes bound into a container (comma
+	// separated).
+	labelVolume = "cara.volume"
+	// labelVolumeType records that a container carries a Managed volume.
+	labelVolumeType = "cara.volume.type"
 )
 
 // DockerRuntime is the production implementation of Runtime backed by the
 // Docker Engine API.
 type DockerRuntime struct {
-	client *dockerclient.Client
-	logger *zap.Logger
+	client   *dockerclient.Client
+	logger   *zap.Logger
+	dataRoot string
 }
 
 // NewDockerRuntime creates a DockerRuntime connected to the Docker daemon at
 // host (e.g. "unix:///var/run/docker.sock" or "tcp://127.0.0.1:2375").
 // WithAPIVersionNegotiation is always enabled so the client works with a range
 // of Docker daemon versions.
-func NewDockerRuntime(host string, logger *zap.Logger) (*DockerRuntime, error) {
+//
+// dataRoot is the directory the agent owns for Managed volume data; Managed
+// volumes are bind-mounted from {dataRoot}/volumes/{namespace}/{project}/{volume}/data.
+func NewDockerRuntime(host, dataRoot string, logger *zap.Logger) (*DockerRuntime, error) {
 	c, err := dockerclient.NewClientWithOpts(
 		dockerclient.WithHost(host),
 		dockerclient.WithAPIVersionNegotiation(),
@@ -44,7 +60,7 @@ func NewDockerRuntime(host string, logger *zap.Logger) (*DockerRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("docker: create client: %w", err)
 	}
-	return &DockerRuntime{client: c, logger: logger}, nil
+	return &DockerRuntime{client: c, logger: logger, dataRoot: dataRoot}, nil
 }
 
 // Close releases the underlying HTTP connection to the Docker daemon.
@@ -63,15 +79,16 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 		return fmt.Errorf("ensure network: %w", err)
 	}
 
-	// 2. Ensure all Ephemeral volumes exist.
-	if err := r.ensureVolumes(ctx, project.Name, project.Spec.Volumes); err != nil {
+	// 2. Ensure all volumes exist: Ephemeral as Docker named volumes, Managed
+	//    as agent-owned host bind directories.
+	if err := r.ensureVolumes(ctx, project.Namespace, project.Name, project.Spec.Volumes); err != nil {
 		r.rollback(ctx, project, log)
 		return fmt.Errorf("ensure volumes: %w", err)
 	}
 
 	// 3. Ensure every service container exists and is running.
 	for _, svc := range project.Spec.Services {
-		if err := r.ensureContainer(ctx, project.Name, svc); err != nil {
+		if err := r.ensureContainer(ctx, project.Namespace, project.Name, svc, project.Spec.Volumes); err != nil {
 			r.rollback(ctx, project, log)
 			return fmt.Errorf("ensure container %q: %w", svc.Name, err)
 		}
@@ -86,14 +103,48 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 // RemoveProject which is already idempotent and tolerates missing resources.
 func (r *DockerRuntime) rollback(ctx context.Context, project *v1.Project, log *zap.Logger) {
 	log.Warn("Reconcile failed, rolling back Docker resources")
-	if err := r.RemoveProject(ctx, project.Name, project.Spec); err != nil {
+	if err := r.RemoveProject(ctx, project.Namespace, project.Name, project.Spec); err != nil {
 		log.Error("Rollback failed, resources may leak",
 			zap.Error(err))
 	}
 }
 
+// volumeRemovalPlan describes what RemoveProject does with a project's volumes:
+// which Docker named volumes to delete, and which Managed host directories are
+// kept (their paths logged for the operator).
+type volumeRemovalPlan struct {
+	// removeNamedVolumes are Docker named volumes to delete. This covers both
+	// Ephemeral volumes and any legacy named volume auto-created for a Managed
+	// volume before bind mounts were wired up (pre-CARA-66).
+	removeNamedVolumes []string
+	// retainedManagedPaths are host directories left in place on disk.
+	retainedManagedPaths []string
+}
+
+// planVolumeRemoval decides the fate of each volume without touching Docker or
+// the filesystem, so the retention policy is unit-testable. Managed host data
+// is always retained; its legacy named volume (if any) is still scheduled for
+// removal so old deployments do not keep an orphan.
+func planVolumeRemoval(dataRoot, namespace, projectName string, vols []v1.VolumeDef) volumeRemovalPlan {
+	var plan volumeRemovalPlan
+	for _, vol := range vols {
+		named := VolumeName(projectName, vol.Name)
+		switch vol.Type {
+		case v1.VolumeTypeEphemeral:
+			plan.removeNamedVolumes = append(plan.removeNamedVolumes, named)
+		case v1.VolumeTypeManaged:
+			// Retain the host data; sweep any pre-CARA-66 orphan named volume.
+			plan.removeNamedVolumes = append(plan.removeNamedVolumes, named)
+			if hostPath, err := caravolume.HostPath(dataRoot, namespace, projectName, vol.Name); err == nil {
+				plan.retainedManagedPaths = append(plan.retainedManagedPaths, hostPath)
+			}
+		}
+	}
+	return plan
+}
+
 // RemoveProject implements Runtime.
-func (r *DockerRuntime) RemoveProject(ctx context.Context, projectName string, spec v1.ProjectSpec) error {
+func (r *DockerRuntime) RemoveProject(ctx context.Context, namespace, projectName string, spec v1.ProjectSpec) error {
 	log := r.logger.With(zap.String("project", projectName))
 
 	// Stop and remove containers tagged with this project.
@@ -124,15 +175,16 @@ func (r *DockerRuntime) RemoveProject(ctx context.Context, projectName string, s
 		}
 	}
 
-	// Remove Ephemeral volumes.
-	for _, vol := range spec.Volumes {
-		if vol.Type != v1.VolumeTypeEphemeral {
-			continue
-		}
-		vName := VolumeName(projectName, vol.Name)
+	plan := planVolumeRemoval(r.dataRoot, namespace, projectName, spec.Volumes)
+	for _, path := range plan.retainedManagedPaths {
+		// Managed data is retained on delete — a `caractrl delete` typo must not
+		// destroy a database. Log the host path so an operator can reclaim it.
+		log.Info("Retaining managed volume data on host", zap.String("path", path))
+	}
+	for _, vName := range plan.removeNamedVolumes {
 		if err := r.client.VolumeRemove(ctx, vName, false); err != nil {
 			if !isNotFound(err) {
-				log.Warn("Failed to remove volume", zap.String("volume", vName), zap.Error(err))
+				log.Warn("Failed to remove named volume", zap.String("volume", vName), zap.Error(err))
 			}
 		}
 	}
@@ -216,39 +268,121 @@ func (r *DockerRuntime) ensureNetwork(ctx context.Context, projectName string) e
 	return nil
 }
 
-// ensureVolumes creates any Ephemeral volumes that do not yet exist.
-func (r *DockerRuntime) ensureVolumes(ctx context.Context, projectName string, vols []v1.VolumeDef) error {
+// ensureVolumes provisions every volume in the project: Ephemeral as Docker
+// named volumes, Managed as agent-owned host bind directories. A Managed
+// volume whose directory cannot be created or is not writable is a hard error
+// so the caller can fail the project rather than start containers against a
+// missing mount.
+func (r *DockerRuntime) ensureVolumes(ctx context.Context, namespace, projectName string, vols []v1.VolumeDef) error {
 	for _, vol := range vols {
-		if vol.Type != v1.VolumeTypeEphemeral {
-			r.logger.Warn("Unsupported volume type, skipping",
-				zap.String("volume", vol.Name), zap.String("type", string(vol.Type)))
-			continue
+		switch vol.Type {
+		case v1.VolumeTypeManaged:
+			if err := r.ensureManagedDir(namespace, projectName, vol.Name); err != nil {
+				return err
+			}
+		case v1.VolumeTypeEphemeral:
+			if err := r.ensureEphemeralVolume(ctx, projectName, vol.Name); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("volume %q: unsupported type %q", vol.Name, vol.Type)
 		}
-
-		vName := VolumeName(projectName, vol.Name)
-		_, err := r.client.VolumeInspect(ctx, vName)
-		if err == nil {
-			r.logger.Debug("Volume already exists", zap.String("volume", vName))
-			continue
-		}
-		if !isNotFound(err) {
-			return fmt.Errorf("inspect volume %q: %w", vName, err)
-		}
-
-		if _, err := r.client.VolumeCreate(ctx, volume.CreateOptions{
-			Name:   vName,
-			Labels: map[string]string{labelProject: projectName},
-		}); err != nil {
-			return fmt.Errorf("create volume %q: %w", vName, err)
-		}
-		r.logger.Info("Volume created", zap.String("volume", vName))
 	}
 	return nil
 }
 
+// ensureManagedDir creates the host bind directory for a Managed volume with
+// owner-only permissions and verifies it is a writable directory. Existing
+// content is left untouched — that data is the point of a Managed volume.
+func (r *DockerRuntime) ensureManagedDir(namespace, projectName, volumeName string) error {
+	hostPath, err := caravolume.HostPath(r.dataRoot, namespace, projectName, volumeName)
+	if err != nil {
+		return fmt.Errorf("derive host path for volume %q: %w", volumeName, err)
+	}
+
+	if err := os.MkdirAll(hostPath, 0o700); err != nil {
+		return fmt.Errorf("create managed volume dir %q: %w", hostPath, err)
+	}
+
+	info, err := os.Stat(hostPath)
+	if err != nil {
+		return fmt.Errorf("stat managed volume dir %q: %w", hostPath, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("managed volume path %q exists but is not a directory", hostPath)
+	}
+	if err := unix.Access(hostPath, unix.W_OK); err != nil {
+		return fmt.Errorf("managed volume dir %q is not writable: %w", hostPath, err)
+	}
+
+	r.logger.Info("Managed volume directory ready",
+		zap.String("volume", volumeName), zap.String("path", hostPath))
+	return nil
+}
+
+// ensureEphemeralVolume creates the Docker named volume for an Ephemeral volume
+// if it does not already exist.
+func (r *DockerRuntime) ensureEphemeralVolume(ctx context.Context, projectName, volumeName string) error {
+	vName := VolumeName(projectName, volumeName)
+	_, err := r.client.VolumeInspect(ctx, vName)
+	if err == nil {
+		r.logger.Debug("Volume already exists", zap.String("volume", vName))
+		return nil
+	}
+	if !isNotFound(err) {
+		return fmt.Errorf("inspect volume %q: %w", vName, err)
+	}
+
+	if _, err := r.client.VolumeCreate(ctx, volume.CreateOptions{
+		Name:   vName,
+		Labels: map[string]string{labelProject: projectName},
+	}); err != nil {
+		return fmt.Errorf("create volume %q: %w", vName, err)
+	}
+	r.logger.Info("Volume created", zap.String("volume", vName))
+	return nil
+}
+
+// buildBinds resolves a service's volume mounts into Docker bind strings. The
+// source depends on the volume type: Managed → absolute host path (a real bind
+// mount under the data root), Ephemeral → the Docker named volume. Selecting by
+// type is what stops a Managed volume from silently falling through to Docker's
+// named-volume auto-create. It also returns the names of the Managed volumes
+// bound, for labelling. An undeclared or unsupported volume is an error rather
+// than a fall-through.
+func (r *DockerRuntime) buildBinds(namespace, projectName string, svc v1.ServiceDef, vols []v1.VolumeDef) (binds, managedNames []string, err error) {
+	byName := make(map[string]v1.VolumeDef, len(vols))
+	for _, v := range vols {
+		byName[v.Name] = v
+	}
+	for _, vm := range svc.VolumeMounts {
+		vol, ok := byName[vm.Name]
+		if !ok {
+			// validateProjectSpec rejects this at apply time; guard here too so
+			// a mount can never fall through to Docker's auto-create.
+			return nil, nil, fmt.Errorf("service %q mounts undeclared volume %q", svc.Name, vm.Name)
+		}
+		switch vol.Type {
+		case v1.VolumeTypeManaged:
+			hostPath, herr := caravolume.HostPath(r.dataRoot, namespace, projectName, vm.Name)
+			if herr != nil {
+				return nil, nil, fmt.Errorf("derive host path for volume %q: %w", vm.Name, herr)
+			}
+			binds = append(binds, hostPath+":"+vm.MountPath)
+			managedNames = append(managedNames, vm.Name)
+		case v1.VolumeTypeEphemeral:
+			binds = append(binds, VolumeName(projectName, vm.Name)+":"+vm.MountPath)
+		default:
+			return nil, nil, fmt.Errorf("service %q mounts volume %q of unsupported type %q", svc.Name, vm.Name, vol.Type)
+		}
+	}
+	return binds, managedNames, nil
+}
+
 // ensureContainer creates and starts the container for a single service if it
-// is not already running.
-func (r *DockerRuntime) ensureContainer(ctx context.Context, projectName string, svc v1.ServiceDef) error {
+// is not already running. vols is the project's volume list, used to resolve
+// each mount's bind source by volume type.
+func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectName string, svc v1.ServiceDef, vols []v1.VolumeDef) error {
 	cName := ContainerName(projectName, svc.Name)
 	log := r.logger.With(
 		zap.String("container", cName),
@@ -294,23 +428,28 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, projectName string,
 		env[i] = e.Name + "=" + e.Value
 	}
 
-	// Build bind-mount slice: ["cara-proj-volname:/mountpath", ...]
-	var binds []string
-	for _, vm := range svc.VolumeMounts {
-		vName := VolumeName(projectName, vm.Name)
-		binds = append(binds, vName+":"+vm.MountPath)
+	binds, managedNames, err := r.buildBinds(namespace, projectName, svc, vols)
+	if err != nil {
+		return err
+	}
+
+	labels := map[string]string{
+		labelProject: projectName,
+		labelService: svc.Name,
+	}
+	if len(managedNames) > 0 {
+		labels[labelNamespace] = namespace
+		labels[labelVolume] = strings.Join(managedNames, ",")
+		labels[labelVolumeType] = string(v1.VolumeTypeManaged)
 	}
 
 	netName := NetworkName(projectName)
 
 	resp, err := r.client.ContainerCreate(ctx,
 		&container.Config{
-			Image: svc.Image,
-			Env:   env,
-			Labels: map[string]string{
-				labelProject: projectName,
-				labelService: svc.Name,
-			},
+			Image:  svc.Image,
+			Env:    env,
+			Labels: labels,
 		},
 		&container.HostConfig{
 			Binds: binds,

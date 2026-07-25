@@ -36,6 +36,12 @@ type AgentConfig struct {
 	// This is a temporary workaround until Headscale overlay networking is
 	// implemented (see CARA-30).
 	AdvertiseIP string `yaml:"advertise_ip" envconfig:"AGENT_ADVERTISE_IP"`
+	// DataRoot is the directory the agent owns for Managed volume data.
+	// Volumes live at {DataRoot}/volumes/{namespace}/{project}/{volume}/data
+	// and are bind-mounted into containers.  Defaults to "/var/lib/cara".
+	// It must be on a filesystem with room for both volume data and backup
+	// staging.
+	DataRoot string `yaml:"data_root" envconfig:"AGENT_DATA_ROOT"`
 }
 
 // LoadAgent reads cara-agent config from file → env → flags.
@@ -52,6 +58,7 @@ func LoadAgent() (AgentConfig, *LogBuffer) {
 		DockerHost:        "unix:///var/run/docker.sock",
 		ListenPort:        "9090",
 		ProxyListenAddr:   ":8081",
+		DataRoot:          "/var/lib/cara",
 	}
 
 	var err error

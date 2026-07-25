@@ -81,7 +81,7 @@ func main() {
 
 	agentClient := agent.NewClient(logger, cfg.ServerURL, cfg.NodeName)
 
-	dockerRuntime, err := docker.NewDockerRuntime(cfg.DockerHost, logger)
+	dockerRuntime, err := docker.NewDockerRuntime(cfg.DockerHost, cfg.DataRoot, logger)
 	if err != nil {
 		logger.Fatal("Failed to create Docker runtime", zap.Error(err))
 	}
