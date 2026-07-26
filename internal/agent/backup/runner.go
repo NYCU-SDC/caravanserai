@@ -58,6 +58,43 @@ var ErrNoManagedVolumes = errors.New("backup: project has no Managed volumes")
 // full disk costs no downtime.
 var ErrInsufficientDiskSpace = errors.New("backup: insufficient free disk space")
 
+// DefaultStagingDir returns where archives are staged for a given data root.
+// Staging lives under the data root so it shares a filesystem with the volumes
+// being archived, which keeps the free-space precondition meaningful.
+func DefaultStagingDir(dataRoot string) string {
+	return filepath.Join(dataRoot, "staging")
+}
+
+// CleanStaging removes archives left behind by a run that never reached its
+// deferred cleanup — an agent killed mid-backup, or a host that lost power.
+//
+// A Runner removes its own staging directory on every exit path, so anything
+// still present at startup is by definition orphaned: it belongs to a process
+// that no longer exists. Left alone it would occupy space equal to a full set
+// of volume archives, indefinitely, and eventually trip the free-space
+// precondition that stops future backups from running.
+//
+// Callers should invoke this before the agent begins reconciling, and treat
+// failure as non-fatal: leftover archives waste space but corrupt nothing.
+func CleanStaging(stagingDir string) error {
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("backup: read staging dir %q: %w", stagingDir, err)
+	}
+
+	var firstErr error
+	for _, entry := range entries {
+		path := filepath.Join(stagingDir, entry.Name())
+		if rmErr := os.RemoveAll(path); rmErr != nil && firstErr == nil {
+			firstErr = fmt.Errorf("backup: remove stale staging %q: %w", path, rmErr)
+		}
+	}
+	return firstErr
+}
+
 // Config holds the settings a Runner needs that come from AgentConfig.
 type Config struct {
 	// DataRoot is the agent-owned directory Managed volumes live under.
@@ -112,7 +149,7 @@ func NewRunner(
 	logger *zap.Logger,
 ) *Runner {
 	if cfg.StagingDir == "" {
-		cfg.StagingDir = filepath.Join(cfg.DataRoot, "staging")
+		cfg.StagingDir = DefaultStagingDir(cfg.DataRoot)
 	}
 	return &Runner{
 		coordinator: coordinator,

@@ -547,3 +547,36 @@ func TestManagedVolumesFiltersEphemeral(t *testing.T) {
 	assert.Equal(t, "db-data", got[0].Name)
 	assert.Equal(t, "uploads", got[1].Name)
 }
+
+func TestCleanStaging(t *testing.T) {
+	t.Run("removes leftovers from an interrupted run", func(t *testing.T) {
+		staging := t.TempDir()
+		orphan := filepath.Join(staging, "20260725T120000Z-deadbeef")
+		require.NoError(t, os.MkdirAll(orphan, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(orphan, "db-data.tar.gz"), []byte("partial"), 0o600))
+
+		require.NoError(t, CleanStaging(staging))
+
+		entries, err := os.ReadDir(staging)
+		require.NoError(t, err)
+		assert.Empty(t, entries, "orphaned archives must not survive a restart")
+	})
+
+	t.Run("keeps the staging directory itself", func(t *testing.T) {
+		staging := t.TempDir()
+		require.NoError(t, CleanStaging(staging))
+		info, err := os.Stat(staging)
+		require.NoError(t, err)
+		assert.True(t, info.IsDir())
+	})
+
+	t.Run("a missing staging directory is not an error", func(t *testing.T) {
+		assert.NoError(t, CleanStaging(filepath.Join(t.TempDir(), "never-created")))
+	})
+}
+
+func TestDefaultStagingDir(t *testing.T) {
+	// Staging must sit under the data root so it shares a filesystem with the
+	// volumes, which is what makes the free-space precondition meaningful.
+	assert.Equal(t, "/var/lib/cara/staging", DefaultStagingDir("/var/lib/cara"))
+}

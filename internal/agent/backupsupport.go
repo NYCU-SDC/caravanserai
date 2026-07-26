@@ -72,6 +72,14 @@ func NewBackupSupport(
 		return nil, fmt.Errorf("agent: create object store: %w", err)
 	}
 
+	// Anything in staging now belongs to a run whose process is gone — this
+	// agent has not started one yet. Sweep it before any backup can trip the
+	// free-space precondition on space that is already dead.
+	stagingDir := backup.DefaultStagingDir(cfg.DataRoot)
+	if err := backup.CleanStaging(stagingDir); err != nil {
+		logger.Warn("Failed to clean stale backup staging", zap.String("path", stagingDir), zap.Error(err))
+	}
+
 	coordinator := backup.NewCoordinator()
 	runner := backup.NewRunner(
 		coordinator,
