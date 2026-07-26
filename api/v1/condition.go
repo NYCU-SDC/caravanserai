@@ -67,6 +67,18 @@ const (
 	// first observed a Running project on a NotReady node.
 	ConditionTypeNotReadyAt ConditionType = "NotReadyAt"
 
+	// ConditionTypeMaintenance indicates that the agent has deliberately
+	// stopped a Project's containers for an operation such as a Managed
+	// volume backup.  Status=True with Reason="BackingUp" means the Project
+	// is not broken even though its containers are down.
+	//
+	// It is observability, not a lock: the agent's own poll loop is held off
+	// by in-process state, because a condition written over the network can
+	// fail or arrive late.  Consumers should treat the condition as expired
+	// after MaintenanceStaleAfter so a crashed operation cannot mark a
+	// Project as under maintenance forever.
+	ConditionTypeMaintenance ConditionType = "Maintenance"
+
 	// ConditionTypeDiskPressure indicates whether the node's disk usage is
 	// approaching capacity. Set by the NodeConditionController based on
 	// the Agent's reported Capacity and Allocatable values.
@@ -77,6 +89,27 @@ const (
 	// the Agent's reported Capacity and Allocatable values.
 	ConditionTypeMemoryPressure ConditionType = "MemoryPressure"
 )
+
+// MaintenanceStaleAfter is how long a Maintenance condition stays meaningful.
+// An agent that dies mid-backup leaves the condition behind with nothing to
+// clear it, so readers must ignore one older than this rather than treat the
+// Project as permanently under maintenance.
+const MaintenanceStaleAfter = 30 * time.Minute
+
+// IsMaintenanceActive reports whether conditions carry a Maintenance condition
+// that is both True and fresh, as of now.
+func IsMaintenanceActive(conditions []Condition, now time.Time) bool {
+	for _, c := range conditions {
+		if c.Type != ConditionTypeMaintenance {
+			continue
+		}
+		if c.Status != ConditionTrue {
+			return false
+		}
+		return now.Sub(c.LastTransitionTime) < MaintenanceStaleAfter
+	}
+	return false
+}
 
 // Condition describes a single observable aspect of a resource's state.
 // It mirrors the Kubernetes Condition pattern so the mental model stays familiar.

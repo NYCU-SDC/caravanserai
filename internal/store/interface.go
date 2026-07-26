@@ -116,6 +116,20 @@ type ProjectStore interface {
 	// changes made concurrently by the API server.
 	UpdateProjectStatus(ctx context.Context, name string, status v1.ProjectStatus) error
 
+	// PatchProjectCondition replaces exactly one named condition inside a
+	// Project's status.conditions, leaving phase and every other status field
+	// untouched.  Used by the agent to publish Maintenance while controllers
+	// concurrently write other status fields; a read-modify-write of the whole
+	// status object would discard those.  A patch that changes nothing is a
+	// no-op and publishes no event.  Returns ErrNotFound if the Project does
+	// not exist.
+	PatchProjectCondition(ctx context.Context, name string, condition v1.Condition) error
+
+	// ClearProjectCondition removes the named condition from a Project's
+	// status, with the same isolation guarantees as PatchProjectCondition.
+	// Removing an absent condition is a no-op.
+	ClearProjectCondition(ctx context.Context, name string, conditionType v1.ConditionType) error
+
 	// UpdateProjectSpec writes only the user-mutable fields of a Project
 	// (spec, labels, annotations). Status is preserved. The update is only
 	// allowed when the project's current phase is Pending or Failed; returns
