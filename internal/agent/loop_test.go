@@ -24,6 +24,8 @@ type mockRuntime struct {
 	reconcileFn     func(ctx context.Context, project *v1.Project) error
 	removeFn        func(ctx context.Context, namespace, name string, spec v1.ProjectSpec) error
 	getContainerIPs func(ctx context.Context, project *v1.Project) (map[string]string, error)
+	stopFn          func(ctx context.Context, project *v1.Project) error
+	startFn         func(ctx context.Context, project *v1.Project) error
 }
 
 func (m *mockRuntime) InspectProject(ctx context.Context, project *v1.Project) ([]docker.ContainerState, error) {
@@ -52,6 +54,20 @@ func (m *mockRuntime) GetContainerIPs(ctx context.Context, project *v1.Project) 
 		return m.getContainerIPs(ctx, project)
 	}
 	return nil, nil
+}
+
+func (m *mockRuntime) StopProject(ctx context.Context, project *v1.Project) error {
+	if m.stopFn != nil {
+		return m.stopFn(ctx, project)
+	}
+	return nil
+}
+
+func (m *mockRuntime) StartProject(ctx context.Context, project *v1.Project) error {
+	if m.startFn != nil {
+		return m.startFn(ctx, project)
+	}
+	return nil
 }
 
 // statusUpdate records a single call to PATCH /api/v1/projects/{name}/status.
