@@ -1,0 +1,40 @@
+# CARA-58 shape: Project-level backup policy over multiple Managed volumes.
+#
+# The backup policy lives on the Project, not on individual volumes, because a
+# backup run captures every Managed volume together as one generation. This
+# manifest applies cleanly today (validation + provisioning); the backup upload
+# itself is implemented in CARA-59.
+#
+# Two Managed volumes are provisioned under:
+#   /var/lib/cara/volumes/default/blog/db-data/data
+#   /var/lib/cara/volumes/default/blog/uploads/data
+apiVersion: caravanserai/v1
+kind: Project
+metadata:
+  name: blog
+  namespace: default
+spec:
+  services:
+    - name: db
+      image: postgres:17
+      env:
+        - name: POSTGRES_PASSWORD
+          value: demo
+      volumeMounts:
+        - name: db-data
+          mountPath: /var/lib/postgresql/data
+    - name: web
+      image: nginx:alpine
+      volumeMounts:
+        - name: uploads
+          mountPath: /usr/share/nginx/html
+
+  volumes:
+    - name: db-data
+      type: Managed
+    - name: uploads
+      type: Managed
+
+  backup:
+    interval: 168h
+    onMissing: InitializeEmpty

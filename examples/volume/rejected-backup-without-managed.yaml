@@ -1,0 +1,26 @@
+# CARA-58 validation demo: a backup policy with nothing to back up is rejected.
+#
+# This project declares spec.backup but has no Managed volume, so
+# `caractl apply -f examples/volume/rejected-backup-without-managed.yaml`
+# must fail with:
+#   spec.backup requires at least one volume with type "Managed"
+apiVersion: caravanserai/v1
+kind: Project
+metadata:
+  name: bad-backup
+  namespace: default
+spec:
+  services:
+    - name: db
+      image: postgres:17
+      env:
+        - name: POSTGRES_PASSWORD
+          value: demo
+      volumeMounts:
+        - name: scratch
+          mountPath: /var/lib/postgresql/data
+  volumes:
+    - name: scratch
+      type: Ephemeral
+  backup:
+    interval: 168h
