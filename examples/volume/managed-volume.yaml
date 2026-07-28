@@ -1,0 +1,27 @@
+# CARA-66 demo: a Managed volume is a real host bind mount.
+#
+# Postgres initialises its data directory on first start. With a Managed volume
+# that data lands in an agent-owned host directory, not a Docker named volume,
+# so it survives container restarts and project deletion.
+#
+# Expected host path (default data root):
+#   /var/lib/cara/volumes/default/managed-demo/db-data/data
+# After the container starts it should contain PG_VERSION, base/, global/, ...
+apiVersion: caravanserai/v1
+kind: Project
+metadata:
+  name: managed-demo
+  namespace: default
+spec:
+  services:
+    - name: db
+      image: postgres:17
+      env:
+        - name: POSTGRES_PASSWORD
+          value: demo
+      volumeMounts:
+        - name: db-data
+          mountPath: /var/lib/postgresql/data
+  volumes:
+    - name: db-data
+      type: Managed
