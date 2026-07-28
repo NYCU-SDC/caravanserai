@@ -131,6 +131,43 @@ var describeProjectCoveredFields = newStringSet(
 	"Status.Conditions",
 )
 
+// describeSecretCoveredFields lists every field path that describeSecret
+// explicitly handles. "Spec.Data" covers the whole slice: describeSecret
+// prints each item's Key but must never print Value, so there is no separate
+// "Spec.Data.Value" path to register.
+var describeSecretCoveredFields = newStringSet(
+	// TypeMeta (embedded)
+	"APIVersion",
+	"Kind",
+	// ObjectMeta (embedded)
+	"Name",
+	"Namespace",
+	"ResourceVersion",
+	"Labels",
+	"Annotations",
+	"CreatedAt",
+	"UpdatedAt",
+	// Spec
+	"Spec.Data",
+)
+
+func TestDescribeSecretFieldCoverage(t *testing.T) {
+	actual := collectFieldPaths(reflect.TypeOf(v1.Secret{}), "")
+	sort.Strings(actual)
+
+	var missing []string
+	for _, path := range actual {
+		if !describeSecretCoveredFields.has(path) {
+			missing = append(missing, path)
+		}
+	}
+
+	assert.Empty(t, missing,
+		"describeSecret does not cover these Secret fields — add formatting in "+
+			"cmd_describe.go and register the paths in describeSecretCoveredFields:\n  %s",
+		strings.Join(missing, "\n  "))
+}
+
 func TestDescribeNodeFieldCoverage(t *testing.T) {
 	actual := collectFieldPaths(reflect.TypeOf(v1.Node{}), "")
 	sort.Strings(actual)
