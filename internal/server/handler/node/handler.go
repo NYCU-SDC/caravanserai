@@ -92,6 +92,12 @@ func (h *Handler) createNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := v1.ValidateNamespace(node.Namespace); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.namespace", node.Namespace, err.Error()), logger)
+		return
+	}
+
 	// Initialise status to NotReady on creation; the Agent will push heartbeats
 	// to transition it to Ready once the connection is confirmed.
 	if node.Status.State == "" {
@@ -135,6 +141,12 @@ func (h *Handler) updateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	node.Name = name
+
+	if err := v1.ValidateNamespace(node.Namespace); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.namespace", node.Namespace, err.Error()), logger)
+		return
+	}
 
 	// TODO: add metadata.resourceVersion / optimistic concurrency in a future PR.
 
