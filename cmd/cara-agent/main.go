@@ -113,7 +113,16 @@ func main() {
 		logger.Fatal("Failed to configure Managed volume backups", zap.Error(err))
 	}
 
-	go agent.Run(ctx, agentClient, dockerRuntime, cfg.HeartbeatInterval, agentPort, cfg.AdvertiseIP, routeTable, backupSupport, logger)
+	go agent.Run(ctx, agent.RunConfig{
+		Client:            agentClient,
+		Runtime:           dockerRuntime,
+		HeartbeatInterval: cfg.HeartbeatInterval,
+		AgentPort:         agentPort,
+		AdvertiseIP:       cfg.AdvertiseIP,
+		Routes:            routeTable,
+		Backups:           backupSupport,
+		Logger:            logger,
+	})
 
 	// ── Agent HTTP server ────────────────────────────────────────────────
 	apiSrv := agentapiserver.New(logger)

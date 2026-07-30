@@ -170,8 +170,17 @@ func AgentFromFile(filePath string, cfg *AgentConfig, logger *LogBuffer) (*Agent
 		}
 	}
 
-	s3 := mergeS3(cfg.S3, fileConfig.S3)
-	merged, err := configutil.Merge[AgentConfig](cfg, &fileConfig)
+	return mergeAgentConfig(cfg, &fileConfig)
+}
+
+// mergeAgentConfig merges override onto cfg via configutil.Merge, then
+// replaces the wholesale-merged S3 field with a field-by-field merge (see
+// mergeS3) so a partially-set override never wipes previously loaded S3
+// settings. Shared by AgentFromFile and AgentFromEnv, the two layers that can
+// each carry a partial S3Config.
+func mergeAgentConfig(cfg, override *AgentConfig) (*AgentConfig, error) {
+	s3 := mergeS3(cfg.S3, override.S3)
+	merged, err := configutil.Merge[AgentConfig](cfg, override)
 	if err != nil {
 		return cfg, err
 	}
@@ -214,13 +223,7 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 		}
 	}
 
-	s3 := mergeS3(cfg.S3, envConfig.S3)
-	merged, err := configutil.Merge[AgentConfig](cfg, envConfig)
-	if err != nil {
-		return nil, err
-	}
-	merged.S3 = s3
-	return merged, nil
+	return mergeAgentConfig(cfg, envConfig)
 }
 
 func AgentFromFlags(cfg *AgentConfig) (*AgentConfig, error) {

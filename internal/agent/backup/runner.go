@@ -330,7 +330,7 @@ func (r *Runner) captureVolumes(
 func (r *Runner) uploadAndVerify(ctx context.Context, archivePath, key string, result ArchiveResult) error {
 	f, err := os.Open(archivePath)
 	if err != nil {
-		return fmt.Errorf("open archive: %w", err)
+		return fmt.Errorf("backup: open archive: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -338,15 +338,15 @@ func (r *Runner) uploadAndVerify(ctx context.Context, archivePath, key string, r
 		ContentType: "application/gzip",
 		Size:        result.SizeBytes,
 	}); err != nil {
-		return fmt.Errorf("upload: %w", err)
+		return fmt.Errorf("backup: upload: %w", err)
 	}
 
 	meta, err := r.store.Head(ctx, key)
 	if err != nil {
-		return fmt.Errorf("verify upload: %w", err)
+		return fmt.Errorf("backup: verify upload: %w", err)
 	}
 	if meta.Size != result.SizeBytes {
-		return fmt.Errorf("verify upload: stored size %d does not match archive size %d",
+		return fmt.Errorf("backup: verify upload: stored size %d does not match archive size %d",
 			meta.Size, result.SizeBytes)
 	}
 	return nil

@@ -44,11 +44,31 @@ type RouteUpdater interface {
 	Remove(projectName string)
 }
 
+// RunConfig configures Run. Client, Runtime, HeartbeatInterval, and Logger are
+// required; Routes and Backups are optional.
+type RunConfig struct {
+	Client            *Client
+	Runtime           docker.Runtime
+	HeartbeatInterval time.Duration
+	AgentPort         int
+	AdvertiseIP       string
+
+	// Routes maintains proxy routes for projects with ingress definitions.
+	// Nil disables proxy route maintenance.
+	Routes RouteUpdater
+
+	// Backups schedules Managed volume backups per Project and makes the poll
+	// loop skip Projects with an operation in flight. Nil disables backups.
+	Backups *BackupSupport
+
+	Logger *zap.Logger
+}
+
 // Run registers the node with the control-plane and then runs two concurrent
 // loops until ctx is cancelled:
 //
-//  1. Heartbeat loop — sends a heartbeat every heartbeatInterval to keep the
-//     node marked as Ready.
+//  1. Heartbeat loop — sends a heartbeat every cfg.HeartbeatInterval to keep
+//     the node marked as Ready.
 //
 //  2. Project poll loop — every pollInterval, fetches Projects that have been
 //     scheduled onto this node and reconciles them (runs workloads, reports
@@ -57,23 +77,19 @@ type RouteUpdater interface {
 // The initial registration is retried with a fixed 5-second back-off until it
 // succeeds or ctx is cancelled, so that the agent can start before the server
 // is ready.
-//
-// If routes is non-nil, the agent will maintain proxy routes for projects that
-// have ingress definitions.
-//
-// If backups is non-nil, Managed volume backups are scheduled per Project and
-// the poll loop skips Projects with an operation in flight.
-func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatInterval time.Duration, agentPort int, advertiseIP string, routes RouteUpdater, backups *BackupSupport, logger *zap.Logger) {
+func Run(ctx context.Context, cfg RunConfig) {
 	const pollInterval = 10 * time.Second
+
+	client, runtime, routes, logger := cfg.Client, cfg.Runtime, cfg.Routes, cfg.Logger
 
 	var (
 		supervisor *backup.Supervisor
 		busy       busyChecker
 	)
-	if backups != nil {
-		supervisor = backups.Supervisor
-		if backups.Coordinator != nil {
-			busy = backups.Coordinator
+	if cfg.Backups != nil {
+		supervisor = cfg.Backups.Supervisor
+		if cfg.Backups.Coordinator != nil {
+			busy = cfg.Backups.Coordinator
 		}
 		defer supervisor.Stop()
 	}
@@ -104,7 +120,7 @@ func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatI
 	bootstrapRunningProjects(ctx, client, runtime, routes, logger)
 
 	// ── Heartbeat loop ────────────────────────────────────────────────────
-	heartbeatTicker := time.NewTicker(heartbeatInterval)
+	heartbeatTicker := time.NewTicker(cfg.HeartbeatInterval)
 	defer heartbeatTicker.Stop()
 
 	// ── Project poll loop ─────────────────────────────────────────────────
@@ -120,8 +136,8 @@ func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatI
 			status := v1.NodeStatus{
 				State: v1.NodeStateReady,
 				Network: v1.NodeNetworkStatus{
-					IP:        advertiseIP,
-					AgentPort: agentPort,
+					IP:        cfg.AdvertiseIP,
+					AgentPort: cfg.AgentPort,
 				},
 			}
 			if err := client.Heartbeat(ctx, status); err != nil {
