@@ -2,10 +2,11 @@
 #
 # The backup policy lives on the Project, not on individual volumes, because a
 # backup run captures every Managed volume together as one generation. This
-# manifest applies cleanly today (validation + provisioning); the backup upload
-# itself is implemented in CARA-59.
+# manifest applies cleanly today (validation only — CARA-58 is API types and
+# apply-time validation, nothing else); host directory provisioning lands in
+# CARA-66 and the backup upload itself in CARA-59.
 #
-# Two Managed volumes are provisioned under:
+# Once CARA-66 lands, the two Managed volumes here will be provisioned under:
 #   /var/lib/cara/volumes/default/blog/db-data/data
 #   /var/lib/cara/volumes/default/blog/uploads/data
 apiVersion: caravanserai/v1
