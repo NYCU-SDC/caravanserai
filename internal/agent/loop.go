@@ -15,10 +15,17 @@ import (
 )
 
 // busyChecker reports whether a Project has an agent-local operation in
-// flight that the poll loop must not interrupt. Satisfied by
+// flight, and lets a caller claim one of its own. Satisfied by
 // *backup.Coordinator.
+//
+// terminateOne claims OpTerminate before tearing down a Project's Docker
+// resources so a backup supervisor tick cannot start mid-teardown: the
+// Coordinator only protects against overlap between operations that actually
+// claim it, and until terminate claimed too, a backup could start while
+// containers were being removed out from under it.
 type busyChecker interface {
 	IsBusy(key backup.ResourceKey) bool
+	TryClaim(key backup.ResourceKey, op backup.Operation) (release func(), ok bool)
 }
 
 // BackupSupport bundles the optional Managed volume backup wiring. It is nil
@@ -259,7 +266,7 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 
 		switch p.Status.Phase {
 		case v1.ProjectPhaseTerminating:
-			terminateOne(ctx, client, runtime, routes, p, logger)
+			terminateOne(ctx, client, runtime, routes, busy, p, logger)
 		case v1.ProjectPhaseRunning:
 			healthCheckOne(ctx, client, runtime, routes, p, logger)
 		default:
@@ -351,8 +358,26 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 // the server will then perform the final store deletion.
 //
 // Proxy routes are removed after successful teardown.
-func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, p *v1.Project, logger *zap.Logger) {
+func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, busy busyChecker, p *v1.Project, logger *zap.Logger) {
 	log := logger.With(zap.String("project", p.Name))
+
+	// Claim the Project before touching Docker so a backup supervisor tick
+	// cannot start (or continue) mid-teardown. reconcileProjects already
+	// checked IsBusy before dispatching here, but that check and this claim
+	// are not atomic — a backup goroutine can win the race in between, so the
+	// claim can still legitimately fail. Skip this tick rather than tear down
+	// half of what a concurrent backup is reading; the next poll retries.
+	if busy != nil {
+		key := backup.ResourceKey{Namespace: p.Namespace, Name: p.Name}
+		release, ok := busy.TryClaim(key, backup.OpTerminate)
+		if !ok {
+			log.Debug("Deferring termination: project busy with another operation",
+				zap.String("project", key.String()))
+			return
+		}
+		defer release()
+	}
+
 	log.Info("Removing Docker resources for Terminating project")
 
 	if err := runtime.RemoveProject(ctx, p.Namespace, p.Name, p.Spec); err != nil {
