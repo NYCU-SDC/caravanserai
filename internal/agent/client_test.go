@@ -66,6 +66,28 @@ func TestClient_RegisterConflictRefreshesOverlayIP(t *testing.T) {
 	assert.Equal(t, "100.64.0.6", got.Network.OverlayIP)
 }
 
+func TestClient_RegisterConflictWithoutOverlayIPDoesNotRefresh(t *testing.T) {
+	var heartbeatCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/nodes":
+			w.WriteHeader(http.StatusConflict)
+		case "/api/v1/nodes/node-1/heartbeat":
+			heartbeatCount++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	c := NewClient(zap.NewNop(), server.URL, "node-1")
+
+	err := c.Register(context.Background(), v1.NodeSpec{Hostname: "node-1"})
+	require.NoError(t, err)
+	assert.Zero(t, heartbeatCount)
+}
+
 func TestClient_HeartbeatDefaultsOverlayIPFromClient(t *testing.T) {
 	var got heartbeatRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +103,44 @@ func TestClient_HeartbeatDefaultsOverlayIPFromClient(t *testing.T) {
 	err := c.Heartbeat(context.Background(), v1.NodeStatus{State: v1.NodeStateReady})
 	require.NoError(t, err)
 	assert.Equal(t, "100.64.0.7", got.Network.OverlayIP)
+}
+
+func TestClient_HeartbeatUsesExplicitOverlayIPOverClientDefault(t *testing.T) {
+	var got heartbeatRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/nodes/node-1/heartbeat", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := NewClient(zap.NewNop(), server.URL, "node-1")
+	c.SetOverlayIP("100.64.0.7")
+
+	err := c.Heartbeat(context.Background(), v1.NodeStatus{
+		State:   v1.NodeStateReady,
+		Network: v1.NodeNetworkStatus{OverlayIP: "100.64.0.8"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "100.64.0.8", got.Network.OverlayIP)
+}
+
+func TestReRegisterReportsOverlayIP(t *testing.T) {
+	var got v1.Node
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "/api/v1/nodes", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	c := NewClient(zap.NewNop(), server.URL, "node-1")
+	c.SetOverlayIP("100.64.0.9")
+
+	err := reRegister(context.Background(), c, v1.NodeSpec{Hostname: "node-1"}, zap.NewNop())
+	require.NoError(t, err)
+	assert.Equal(t, "100.64.0.9", got.Status.Network.OverlayIP)
 }
 
 func TestHeartbeatNetworkStatus(t *testing.T) {
