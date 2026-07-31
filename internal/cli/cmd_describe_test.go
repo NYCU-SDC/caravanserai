@@ -13,7 +13,7 @@ import (
 
 // collectFieldPaths recursively collects all leaf field paths in a struct type.
 // Embedded (anonymous) structs are flattened. The paths use dot notation,
-// e.g. "Spec.Hostname", "Status.Network.IP".
+// e.g. "Spec.Hostname", "Status.Network.OverlayIP".
 func collectFieldPaths(t reflect.Type, prefix string) []string {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
@@ -95,7 +95,7 @@ var describeNodeCoveredFields = newStringSet(
 	"Status.Info.OSImage",
 	"Status.Info.AgentVersion",
 	// Status.Network
-	"Status.Network.IP",
+	"Status.Network.OverlayIP",
 	"Status.Network.DNSName",
 	"Status.Network.Mode",
 	"Status.Network.AgentPort",

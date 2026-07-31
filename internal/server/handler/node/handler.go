@@ -296,9 +296,9 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 		status.State = req.State
 	}
 	// Merge Network field-by-field so that a heartbeat sending only AgentPort
-	// does not clobber a previously-set IP (or vice versa).
-	if req.Network.IP != "" {
-		status.Network.IP = req.Network.IP
+	// does not clobber a previously-set OverlayIP (or vice versa).
+	if req.Network.OverlayIP != "" {
+		status.Network.OverlayIP = req.Network.OverlayIP
 	}
 	if req.Network.DNSName != "" {
 		status.Network.DNSName = req.Network.DNSName

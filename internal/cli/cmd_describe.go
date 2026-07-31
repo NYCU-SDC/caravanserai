@@ -121,7 +121,7 @@ func describeNode(w io.Writer, node *v1.Node) {
 	// Network
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Network:")
-	printField(w, "  IP", stringOrNone(node.Status.Network.IP))
+	printField(w, "  Overlay IP", stringOrNone(node.Status.Network.OverlayIP))
 	printField(w, "  DNS Name", stringOrNone(node.Status.Network.DNSName))
 	printField(w, "  Mode", stringOrNone(string(node.Status.Network.Mode)))
 	if node.Status.Network.AgentPort != 0 {

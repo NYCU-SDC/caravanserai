@@ -33,9 +33,7 @@ type Client struct {
 	logger     *zap.Logger
 
 	// overlayIP is the Headscale-assigned overlay IP set after the agent
-	// joins the overlay network (CARA-55).  It is stored here so that a
-	// follow-up ticket (CARA-53) can include it in the registration and
-	// heartbeat payloads.  Empty when overlay networking is disabled.
+	// joins the overlay network.  Empty when overlay networking is disabled.
 	overlayIP string
 }
 
@@ -53,8 +51,7 @@ func NewClient(logger *zap.Logger, serverURL, nodeName string) *Client {
 }
 
 // SetOverlayIP records the overlay IP assigned to this agent after joining the
-// Headscale overlay network.  A follow-up ticket (CARA-53) reports it to the
-// control plane; this call only makes it available on the Client.
+// Headscale overlay network.
 func (c *Client) SetOverlayIP(ip string) {
 	c.overlayIP = ip
 }
@@ -72,6 +69,9 @@ func (c *Client) Register(ctx context.Context, spec v1.NodeSpec) error {
 		TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Node"},
 		ObjectMeta: v1.ObjectMeta{Name: c.nodeName},
 		Spec:       spec,
+		Status: v1.NodeStatus{
+			Network: v1.NodeNetworkStatus{OverlayIP: c.overlayIP},
+		},
 	}
 
 	body, err := json.Marshal(node)
@@ -98,6 +98,13 @@ func (c *Client) Register(ctx context.Context, spec v1.NodeSpec) error {
 		return nil
 	case http.StatusConflict:
 		c.logger.Info("Node already registered, continuing", zap.String("node", c.nodeName))
+		if c.overlayIP != "" {
+			if err := c.Heartbeat(ctx, v1.NodeStatus{
+				Network: v1.NodeNetworkStatus{OverlayIP: c.overlayIP},
+			}); err != nil {
+				return fmt.Errorf("refresh overlay address after register conflict: %w", err)
+			}
+		}
 		return nil
 	default:
 		return fmt.Errorf("register: unexpected status %s", resp.Status)
@@ -117,9 +124,14 @@ type heartbeatRequest struct {
 // Passing an empty NodeStatus is valid — the server will update only the
 // LastHeartbeat timestamp.
 func (c *Client) Heartbeat(ctx context.Context, status v1.NodeStatus) error {
+	network := status.Network
+	if network.OverlayIP == "" {
+		network.OverlayIP = c.overlayIP
+	}
+
 	req := heartbeatRequest{
 		State:       status.State,
-		Network:     status.Network,
+		Network:     network,
 		Capacity:    status.Capacity,
 		Allocatable: status.Allocatable,
 	}
