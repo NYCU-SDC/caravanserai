@@ -31,10 +31,9 @@ type AgentConfig struct {
 	// The proxy routes incoming HTTP requests to containers based on the
 	// Host header using ingress rules from project specs.  Defaults to ":8081".
 	ProxyListenAddr string `yaml:"proxy_listen_addr" envconfig:"PROXY_LISTEN_ADDR"`
-	// AdvertiseIP is the IP address the agent advertises to the control plane
-	// in heartbeats.  Used by caractl port-forward to reach the agent.
-	// This is a temporary workaround until Headscale overlay networking is
-	// implemented (see CARA-30).
+	// AdvertiseIP is the legacy underlay address the agent advertises to the
+	// control plane when overlay networking is disabled.  It is kept as a
+	// backwards-compatible fallback until overlay networking is mandatory.
 	AdvertiseIP string `yaml:"advertise_ip" envconfig:"AGENT_ADVERTISE_IP"`
 	// HeadscaleURL is the base URL of the Headscale control plane the agent
 	// joins on startup (e.g. "http://localhost:8081").  Overlay networking is
@@ -151,7 +150,7 @@ func AgentFromFlags(cfg *AgentConfig) (*AgentConfig, error) {
 	flag.StringVar(&flagConfig.DockerHost, "docker-host", "", "Docker daemon endpoint (default: unix:///var/run/docker.sock)")
 	flag.StringVar(&flagConfig.ListenPort, "agent-port", "", "Agent HTTP server port (default: 9090)")
 	flag.StringVar(&flagConfig.ProxyListenAddr, "proxy-listen-addr", "", "Ingress proxy listen address (default: :8081)")
-	flag.StringVar(&flagConfig.AdvertiseIP, "advertise-ip", "", "IP address to advertise to the control plane (required)")
+	flag.StringVar(&flagConfig.AdvertiseIP, "advertise-ip", "", "legacy underlay IP address to advertise when overlay networking is disabled")
 	flag.StringVar(&flagConfig.HeadscaleURL, "headscale-url", "", "Headscale control-plane URL to join on startup (enables overlay networking)")
 	flag.StringVar(&flagConfig.PreauthKeyFile, "preauth-key-file", "", "path to a file containing the Headscale pre-auth key")
 	flag.StringVar(&flagConfig.OverlayHostname, "overlay-hostname", "", "hostname to register with Headscale (default: node name)")

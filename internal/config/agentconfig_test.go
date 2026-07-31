@@ -16,6 +16,7 @@ func TestAgentConfig_Validate_Overlay(t *testing.T) {
 		name           string
 		headscaleURL   string
 		preauthKeyFile string
+		advertiseIP    *string
 		wantErr        bool
 	}{
 		{
@@ -25,6 +26,17 @@ func TestAgentConfig_Validate_Overlay(t *testing.T) {
 			name:           "overlay enabled: both set",
 			headscaleURL:   "http://localhost:8081",
 			preauthKeyFile: "/etc/cara/preauth.key",
+		},
+		{
+			name:           "overlay enabled: advertise IP not required",
+			headscaleURL:   "http://localhost:8081",
+			preauthKeyFile: "/etc/cara/preauth.key",
+			advertiseIP:    ptr(""),
+		},
+		{
+			name:        "overlay disabled: advertise IP required",
+			advertiseIP: ptr(""),
+			wantErr:     true,
 		},
 		{
 			name:         "half-configured: only URL set",
@@ -43,6 +55,9 @@ func TestAgentConfig_Validate_Overlay(t *testing.T) {
 			cfg := base()
 			cfg.HeadscaleURL = tt.headscaleURL
 			cfg.PreauthKeyFile = tt.preauthKeyFile
+			if tt.advertiseIP != nil {
+				cfg.AdvertiseIP = *tt.advertiseIP
+			}
 
 			err := cfg.Validate()
 			if tt.wantErr {
@@ -52,4 +67,8 @@ func TestAgentConfig_Validate_Overlay(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }
