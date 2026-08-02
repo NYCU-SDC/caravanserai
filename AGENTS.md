@@ -71,6 +71,7 @@ proposing changes.
 | Location | What you'll find |
 |----------|-----------------|
 | `README.md` | Architecture diagram, API reference (all REST endpoints), project lifecycle, Docker naming conventions, configuration tables |
+| `docs/design/` | Design docs for cross-cutting features. Currently: [`headscale-overlay.md`](docs/design/headscale-overlay.md) (CARA-47 epic — Headscale-based overlay networking for agents behind NAT) |
 | `examples/` | Sample YAML manifests (`nginx-project.yaml`, `multi-service.yaml`) for testing deployments |
 | `.github/PULL_REQUEST_TEMPLATE.md` | PR format — types: Feature / Fix / Docs / Refactor / CI / Test / Chore |
 | `.opencode/skills/dev-environment/` | Step-by-step guide to start the full dev stack (PostgreSQL + cara-server + cara-agent), including background-process mode for LLM agents |
