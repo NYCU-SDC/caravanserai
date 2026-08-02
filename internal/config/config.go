@@ -55,5 +55,12 @@ func (c *AgentConfig) Validate() error {
 	if c.AdvertiseIP == "" {
 		return errors.New("advertise_ip is required (set AGENT_ADVERTISE_IP or --advertise-ip)")
 	}
+	// Overlay networking is opt-in: either both HeadscaleURL and
+	// PreauthKeyFile are set (overlay enabled) or neither is (overlay
+	// skipped).  A half-configured overlay is almost always a mistake, so
+	// reject it rather than silently skipping the join.
+	if (c.HeadscaleURL == "") != (c.PreauthKeyFile == "") {
+		return errors.New("headscale_url and preauth_key_file must be set together (or both left empty to disable overlay networking)")
+	}
 	return nil
 }

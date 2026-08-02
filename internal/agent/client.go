@@ -31,6 +31,12 @@ type Client struct {
 	nodeName   string
 	httpClient *http.Client
 	logger     *zap.Logger
+
+	// overlayIP is the Headscale-assigned overlay IP set after the agent
+	// joins the overlay network (CARA-55).  It is stored here so that a
+	// follow-up ticket (CARA-53) can include it in the registration and
+	// heartbeat payloads.  Empty when overlay networking is disabled.
+	overlayIP string
 }
 
 // NewClient creates a Client that will identify itself as nodeName and dial
@@ -44,6 +50,19 @@ func NewClient(logger *zap.Logger, serverURL, nodeName string) *Client {
 		},
 		logger: logger,
 	}
+}
+
+// SetOverlayIP records the overlay IP assigned to this agent after joining the
+// Headscale overlay network.  A follow-up ticket (CARA-53) reports it to the
+// control plane; this call only makes it available on the Client.
+func (c *Client) SetOverlayIP(ip string) {
+	c.overlayIP = ip
+}
+
+// OverlayIP returns the overlay IP recorded by SetOverlayIP, or the empty
+// string when overlay networking is disabled.
+func (c *Client) OverlayIP() string {
+	return c.overlayIP
 }
 
 // Register calls POST /api/v1/nodes to self-register the node.
