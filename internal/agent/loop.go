@@ -85,7 +85,7 @@ func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatI
 			status := v1.NodeStatus{
 				State: v1.NodeStateReady,
 				Network: v1.NodeNetworkStatus{
-					IP:        advertiseIP,
+					OverlayIP: advertiseIP,
 					AgentPort: agentPort,
 				},
 			}

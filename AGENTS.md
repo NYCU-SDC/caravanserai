@@ -85,6 +85,7 @@ proposing changes.
 | `internal/store/interface.go` | Store contract + sentinel errors (`ErrNotFound`, `ErrAlreadyExists`) |
 | `internal/server/controller/controller.go` | `Controller` and `Seeder` interfaces — the core reconciliation contract |
 | `internal/server/controller/manager.go` | Controller Manager — work-queue, worker pools, error-backoff requeue |
+| `internal/server/agentdialer/dialer.go` | Single point of resolution for server→agent HTTP calls. It resolves the stored node agent address and supports injected transports for future Headscale/tsnet overlay work. Every future call site (port-forward proxy, exec, active health probes) MUST use this instead of building URLs from raw Node status fields |
 | `internal/event/bus.go` | In-process event bus for inter-component signaling |
 
 ## Code Style

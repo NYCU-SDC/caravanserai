@@ -232,10 +232,12 @@ All endpoints are under `/api/v1/`.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/v1/nodes` | Register a node |
+| `PUT` | `/api/v1/nodes/{name}` | Update a node's spec |
 | `GET` | `/api/v1/nodes` | List all nodes |
 | `GET` | `/api/v1/nodes/{name}` | Get a single node |
 | `DELETE` | `/api/v1/nodes/{name}` | Delete a node |
 | `POST` | `/api/v1/nodes/{name}/heartbeat` | Send a heartbeat |
+| `POST` | `/api/v1/nodes/{name}/probe` | Server-side reachability probe — server dials the agent's `/healthz` via the agent dialer (see `internal/server/agentdialer/`) and reports latency + status. Today this uses the stored `Status.Network.IP`; Headscale/tsnet transport can be injected by follow-up overlay work. Also surfaced as `caractl node probe <name>`. |
 
 ### Projects
 
