@@ -380,6 +380,65 @@ func TestNodeHeartbeatStateValidation(t *testing.T) {
 	drainBody(resp)
 }
 
+func TestNodeOverlayAddressRegistrationAndHeartbeat(t *testing.T) {
+	const nodeName = "e2e-overlay-node"
+
+	createBody := mustMarshal(t, v1.Node{
+		ObjectMeta: v1.ObjectMeta{Name: nodeName},
+		Spec:       v1.NodeSpec{Hostname: "overlay-host"},
+		Status: v1.NodeStatus{
+			Network: v1.NodeNetworkStatus{OverlayIP: "100.64.0.5"},
+		},
+	})
+	resp := doRequest(t, http.MethodPost, "/api/v1/nodes", createBody)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "create node: expected 201")
+
+	var created v1.Node
+	mustDecodeBody(t, resp, &created)
+	assert.Equal(t, "100.64.0.5", created.Status.Network.OverlayIP)
+	assert.Equal(t, v1.NodeStateNotReady, created.Status.State, "initial state must still default to NotReady")
+
+	heartbeatBody := mustMarshal(t, map[string]any{
+		"state": string(v1.NodeStateReady),
+		"network": map[string]any{
+			"overlayIP": "100.64.0.6",
+			"agentPort": 9090,
+		},
+	})
+	resp = doRequest(t, http.MethodPost, "/api/v1/nodes/"+nodeName+"/heartbeat", heartbeatBody)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode, "heartbeat: expected 204")
+	drainBody(resp)
+
+	resp = doRequest(t, http.MethodGet, "/api/v1/nodes/"+nodeName, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var afterOverlayUpdate v1.Node
+	mustDecodeBody(t, resp, &afterOverlayUpdate)
+	assert.Equal(t, "100.64.0.6", afterOverlayUpdate.Status.Network.OverlayIP)
+	assert.Equal(t, 9090, afterOverlayUpdate.Status.Network.AgentPort)
+
+	missingOverlayBody := mustMarshal(t, map[string]any{
+		"network": map[string]any{
+			"agentPort": 9091,
+		},
+	})
+	resp = doRequest(t, http.MethodPost, "/api/v1/nodes/"+nodeName+"/heartbeat", missingOverlayBody)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode, "missing overlay heartbeat: expected 204")
+	drainBody(resp)
+
+	resp = doRequest(t, http.MethodGet, "/api/v1/nodes/"+nodeName, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var afterMissingOverlay v1.Node
+	mustDecodeBody(t, resp, &afterMissingOverlay)
+	assert.Equal(t, "100.64.0.6", afterMissingOverlay.Status.Network.OverlayIP)
+	assert.Equal(t, 9091, afterMissingOverlay.Status.Network.AgentPort)
+
+	resp = doRequest(t, http.MethodDelete, "/api/v1/nodes/"+nodeName, nil)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+	drainBody(resp)
+}
+
 // TestNodeNameValidation verifies that node creation rejects names that violate
 // DNS subdomain naming rules and accepts valid names.
 func TestNodeNameValidation(t *testing.T) {

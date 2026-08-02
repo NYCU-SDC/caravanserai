@@ -121,10 +121,10 @@ func latestConditionReason(conditions []v1.Condition) string {
 }
 
 // printNodeTable writes a human-readable table with columns:
-// NAME  STATE  IP  AGE
+// NAME  STATE  OVERLAY IP  AGE
 func (p *Printer) printNodeTable(nodes []v1.Node) error {
 	w := tabwriter.NewWriter(p.Out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSTATE\tIP\tAGE")
+	fmt.Fprintln(w, "NAME\tSTATE\tOVERLAY IP\tAGE")
 
 	for _, n := range nodes {
 		name := n.Name

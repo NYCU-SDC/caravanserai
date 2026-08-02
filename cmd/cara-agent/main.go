@@ -114,9 +114,6 @@ func main() {
 		if err != nil {
 			logger.Fatal("Failed to join Headscale overlay", zap.Error(err))
 		}
-		// Expose the overlay IP on the agent client so a later ticket
-		// (CARA-53) can report it to the control plane; this ticket only
-		// performs the join.
 		agentClient.SetOverlayIP(result.OverlayIP)
 		logger.Info("Joined Headscale overlay",
 			zap.String("overlay_ip", result.OverlayIP),
