@@ -84,7 +84,7 @@ func TestReconcileProjectsSkipsBusyProject(t *testing.T) {
 		},
 	}
 
-	reconcileProjects(context.Background(), client, rt, nil, nil, coordinator, zap.NewNop())
+	reconcileProjects(context.Background(), client, rt, nil, &BackupSupport{Coordinator: coordinator}, zap.NewNop())
 
 	assert.Empty(t, *updates, "a Project with an operation in flight must produce no status write")
 }
@@ -101,7 +101,7 @@ func TestReconcileProjectsProcessesUnclaimedProject(t *testing.T) {
 		},
 	}
 
-	reconcileProjects(context.Background(), client, rt, nil, nil, coordinator, zap.NewNop())
+	reconcileProjects(context.Background(), client, rt, nil, &BackupSupport{Coordinator: coordinator}, zap.NewNop())
 
 	require.Len(t, *updates, 1)
 	assert.Equal(t, v1.ProjectPhaseFailed, (*updates)[0].Phase)
@@ -124,7 +124,7 @@ func TestReconcileProjectsSkipsOnlyTheBusyProject(t *testing.T) {
 		},
 	}
 
-	reconcileProjects(context.Background(), client, rt, nil, nil, coordinator, zap.NewNop())
+	reconcileProjects(context.Background(), client, rt, nil, &BackupSupport{Coordinator: coordinator}, zap.NewNop())
 
 	require.Len(t, *updates, 1, "only the unclaimed Project is processed")
 	assert.Equal(t, "wiki", (*updates)[0].ProjectName)
@@ -206,7 +206,7 @@ func TestReconcileProjectsWithoutBackupSupport(t *testing.T) {
 		},
 	}
 
-	reconcileProjects(context.Background(), client, rt, nil, nil, nil, zap.NewNop())
+	reconcileProjects(context.Background(), client, rt, nil, nil, zap.NewNop())
 
 	require.Len(t, *updates, 1)
 	assert.Equal(t, v1.ProjectPhaseFailed, (*updates)[0].Phase)

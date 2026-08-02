@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"fmt"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/restore"
 	"NYCU-SDC/caravanserai/internal/config"
 	"NYCU-SDC/caravanserai/internal/objectstore"
 
@@ -34,6 +36,12 @@ func (c conditionReporter) SetMaintenance(ctx context.Context, key backup.Resour
 func (c conditionReporter) ClearMaintenance(ctx context.Context, key backup.ResourceKey) error {
 	return c.client.ClearProjectCondition(ctx, key.Name, v1.ConditionTypeMaintenance)
 }
+
+// restoreTimeout bounds a single Project's restore. Generous, because it
+// covers downloading and extracting every Managed volume the Project owns over
+// whatever link the node has; the point is only to stop a stalled transfer from
+// pinning the Project's coordinator slot forever.
+const restoreTimeout = 30 * time.Minute
 
 // NewBackupSupport wires up Managed volume backups from the agent's config.
 //
@@ -100,8 +108,17 @@ func NewBackupSupport(
 		zap.String("bucket", cfg.S3.Bucket),
 		zap.String("endpoint", cfg.S3.Endpoint))
 
+	// The restorer reads from the same bucket the runner writes to — a
+	// generation is only restorable from where it was uploaded.
+	restorer := restore.NewRestorer(store, restore.Config{
+		DataRoot: cfg.DataRoot,
+		Timeout:  restoreTimeout,
+	}, logger)
+
 	return &BackupSupport{
 		Supervisor:  backup.NewSupervisor(runner, logger),
 		Coordinator: coordinator,
+		Restorer:    restorer,
+		DataRoot:    cfg.DataRoot,
 	}, nil
 }

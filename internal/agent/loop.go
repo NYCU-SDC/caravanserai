@@ -10,6 +10,7 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/restore"
 
 	"go.uber.org/zap"
 )
@@ -28,16 +29,19 @@ type busyChecker interface {
 	TryClaim(key backup.ResourceKey, op backup.Operation) (release func(), ok bool)
 }
 
-// BackupSupport bundles the optional Managed volume backup wiring. It is nil
+// BackupSupport bundles the optional Managed volume data wiring. It is nil
 // when the agent has no object store configured, in which case the poll loop
 // behaves exactly as it did before backups existed.
 //
-// The two fields travel together by necessity: the Supervisor decides when a
-// backup runs, and the Coordinator is how every other part of the agent
-// learns that one is in progress.
+// The fields travel together by necessity: the Supervisor decides when a
+// backup runs, the Restorer puts volumes back before containers start, and the
+// Coordinator is how each learns the other is working on the same Project.
 type BackupSupport struct {
 	Supervisor  *backup.Supervisor
 	Coordinator *backup.Coordinator
+	Restorer    *restore.Restorer
+	// DataRoot is where Managed volume data and restore markers live.
+	DataRoot string
 }
 
 // RouteUpdater is the narrow interface consumed by the agent loop to maintain
@@ -89,16 +93,19 @@ func Run(ctx context.Context, cfg RunConfig) {
 
 	client, runtime, routes, logger := cfg.Client, cfg.Runtime, cfg.Routes, cfg.Logger
 
-	var (
-		supervisor *backup.Supervisor
-		busy       busyChecker
-	)
 	if cfg.Backups != nil {
-		supervisor = cfg.Backups.Supervisor
-		if cfg.Backups.Coordinator != nil {
-			busy = cfg.Backups.Coordinator
+		if cfg.Backups.Supervisor != nil {
+			defer cfg.Backups.Supervisor.Stop()
 		}
-		defer supervisor.Stop()
+
+		// Sweep the leftovers of a restore that died mid-swap. Done once, before
+		// any reconcile, so the space is reclaimed before a fresh restore asks
+		// for it. Deliberately not fatal: leftovers waste disk but corrupt
+		// nothing, and refusing to start the agent over wasted disk is worse
+		// than running with it.
+		if err := restore.CleanDisplaced(cfg.Backups.DataRoot); err != nil {
+			logger.Warn("Failed to clean displaced volume data", zap.Error(err))
+		}
 	}
 
 	spec := v1.NodeSpec{
@@ -159,7 +166,7 @@ func Run(ctx context.Context, cfg RunConfig) {
 			}
 
 		case <-pollTicker.C:
-			reconcileProjects(ctx, client, runtime, routes, supervisor, busy, logger)
+			reconcileProjects(ctx, client, runtime, routes, cfg.Backups, logger)
 		}
 	}
 }
@@ -226,20 +233,26 @@ func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docke
 //   - Scheduled → reconcile (create/start) containers
 //
 // backups may be nil when the agent has no object store configured. When
-// present it is consulted twice: to skip Projects with an agent-local
-// operation in flight, and to keep the per-Project backup goroutines in step
-// with the Projects this node currently holds.
-func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *backup.Supervisor, busy busyChecker, logger *zap.Logger) {
+// present it is consulted three times: to skip Projects with an agent-local
+// operation in flight, to keep the per-Project backup goroutines in step with
+// the Projects this node currently holds, and to put Managed volume data in
+// place before a Project's containers are created.
+func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, logger *zap.Logger) {
 	projects, err := client.ListProjectsForReconcile(ctx)
 	if err != nil {
 		logger.Warn("Failed to list projects for reconcile", zap.Error(err))
 		return
 	}
 
+	var busy busyChecker
+	if backups != nil && backups.Coordinator != nil {
+		busy = backups.Coordinator
+	}
+
 	// Sync before the early return: an empty list means every Project left
 	// this node, and their backup goroutines must be cancelled.
-	if backups != nil {
-		backups.Sync(ctx, projects)
+	if backups != nil && backups.Supervisor != nil {
+		backups.Supervisor.Sync(ctx, projects)
 	}
 
 	if len(projects) == 0 {
@@ -270,7 +283,7 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 		case v1.ProjectPhaseRunning:
 			healthCheckOne(ctx, client, runtime, routes, p, logger)
 		default:
-			reconcileOne(ctx, client, runtime, routes, p, logger)
+			reconcileOne(ctx, client, runtime, routes, backups, p, logger)
 		}
 	}
 }
@@ -283,7 +296,7 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 //     report Running on success or Failed on error.
 //
 // After a successful transition to Running, proxy routes are updated.
-func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, p *v1.Project, logger *zap.Logger) {
+func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, p *v1.Project, logger *zap.Logger) {
 	log := logger.With(zap.String("project", p.Name))
 
 	states, err := runtime.InspectProject(ctx, p)
@@ -336,6 +349,26 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 		zap.Int("running", runningCount),
 		zap.Int("expected", len(p.Spec.Services)),
 	)
+
+	// Managed volume data must be in place before any container can mount it.
+	// Reaching here means containers are about to be created or started, which
+	// is the last moment the volumes can be populated without a service seeing
+	// an empty directory.
+	if backups != nil {
+		err := ensureVolumeData(ctx, backups.Restorer, backups.Coordinator, backups.DataRoot, p, logger)
+		switch {
+		case err == nil:
+		case errors.Is(err, errDeferred):
+			// Another operation holds the Project. Leave its status untouched
+			// and let the next tick try again — losing a race is not a fault.
+			return
+		default:
+			log.Error("Failed to prepare volume data", zap.Error(err))
+			_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "RestoreError", err.Error())
+			return
+		}
+	}
+
 	if err := runtime.ReconcileProject(ctx, p); err != nil {
 		log.Error("Failed to reconcile project", zap.Error(err))
 		_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "ReconcileError", err.Error())
