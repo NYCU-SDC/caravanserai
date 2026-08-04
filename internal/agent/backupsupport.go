@@ -97,9 +97,10 @@ func NewBackupSupport(
 		conditionReporter{client: client},
 		NewRouteRefresher(runtime, routes, logger),
 		backup.Config{
-			DataRoot:    cfg.DataRoot,
-			NodeName:    cfg.NodeName,
-			CaraVersion: caraVersion,
+			DataRoot:     cfg.DataRoot,
+			NodeName:     cfg.NodeName,
+			CaraVersion:  caraVersion,
+			MinFreeBytes: cfg.MinFreeBytes,
 		},
 		logger,
 	)
@@ -111,8 +112,9 @@ func NewBackupSupport(
 	// The restorer reads from the same bucket the runner writes to — a
 	// generation is only restorable from where it was uploaded.
 	restorer := restore.NewRestorer(store, restore.Config{
-		DataRoot: cfg.DataRoot,
-		Timeout:  restoreTimeout,
+		DataRoot:     cfg.DataRoot,
+		MinFreeBytes: cfg.MinFreeBytes,
+		Timeout:      restoreTimeout,
 	}, logger)
 
 	return &BackupSupport{

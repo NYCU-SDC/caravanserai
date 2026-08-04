@@ -456,3 +456,36 @@ func TestRestoreRespectsTimeout(t *testing.T) {
 	err := h.restorer.RestoreGeneration(context.Background(), h.project, h.backupID)
 	require.Error(t, err, "an expired deadline must surface rather than hang")
 }
+
+// TestInitializeEmptyClearsStaging covers the case where an interrupted
+// restore and a vanished generation coincide.
+//
+// Staging outranks the marker in Decide, so leaving it here would turn a
+// one-off crash signal into a permanent one: every later pass would restore,
+// and the first generation written after this point would overwrite whatever
+// the containers produced in the meantime.
+func TestInitializeEmptyClearsStaging(t *testing.T) {
+	dataRoot := t.TempDir()
+	r := NewRestorer(newFakeStore(), Config{DataRoot: dataRoot}, zap.NewNop())
+	project := &v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: "blog", Namespace: "default"},
+		Spec: v1.ProjectSpec{
+			Volumes: []v1.VolumeDef{{Name: "db-data", Type: v1.VolumeTypeManaged}},
+		},
+	}
+
+	staging, err := StagingDir(dataRoot, project.Namespace, project.Name)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(staging, 0o700))
+
+	require.NoError(t, r.InitializeEmpty(project))
+
+	present, err := StagingPresent(dataRoot, project.Namespace, project.Name)
+	require.NoError(t, err)
+	assert.False(t, present, "an established placement must not keep the distrust signal")
+
+	marker, err := ReadMarker(dataRoot, project.Namespace, project.Name)
+	require.NoError(t, err)
+	require.NotNil(t, marker)
+	assert.Empty(t, marker.BackupID, "empty volumes came from no generation")
+}

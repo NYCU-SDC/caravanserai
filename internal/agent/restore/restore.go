@@ -337,7 +337,26 @@ func (r *Restorer) InitializeEmpty(project *v1.Project) error {
 		}
 	}
 
-	return WriteMarker(r.cfg.DataRoot, namespace, name, "", r.now())
+	if err := WriteMarker(r.cfg.DataRoot, namespace, name, "", r.now()); err != nil {
+		return err
+	}
+
+	// This path is reachable with staging still on disk: a restore died
+	// mid-flight and the generation it was fetching later went missing, so the
+	// next pass resolves "never backed up" instead. Leaving staging would turn
+	// a one-off crash signal into a permanent one — Decide ranks staging above
+	// the marker, so every future pass would restore, and the first generation
+	// written after this point would overwrite whatever the containers have
+	// produced in the meantime. The volumes are established now, so the signal
+	// has served its purpose.
+	staging, err := StagingDir(r.cfg.DataRoot, namespace, name)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(staging); err != nil {
+		return fmt.Errorf("restore: clear staging %q: %w", staging, err)
+	}
+	return nil
 }
 
 // matchVolumes reconciles the generation against the current spec.

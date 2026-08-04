@@ -14,6 +14,10 @@ import (
 // carries S3 credentials: owner read/write only.
 const secretFileMaxMode os.FileMode = 0o600
 
+// defaultMinFreeBytes is the free-space floor applied to Managed volume
+// backups and restores when the config does not set one.
+const defaultMinFreeBytes uint64 = 2 << 30 // 2 GiB
+
 // AgentConfig holds the runtime configuration for cara-agent.
 // It replaces the listen-address fields with the control-plane server URL that
 // the agent dials out to.
@@ -46,6 +50,17 @@ type AgentConfig struct {
 	// It must be on a filesystem with room for both volume data and backup
 	// staging.
 	DataRoot string `yaml:"data_root" envconfig:"AGENT_DATA_ROOT"`
+	// MinFreeBytes is the free-space floor on the DataRoot filesystem, below
+	// which a backup or a restore is refused before it touches anything.
+	// Defaults to 2 GiB; set to 0 to disable the check.
+	//
+	// A restore transiently needs roughly 2-3x the volume set's size — the
+	// compressed archives, the extracted staging copy, and the displaced
+	// previous contents all exist at once — and a backup needs room for the
+	// archives it is building. A flat floor cannot express that, so it is a
+	// backstop against starting work on an already-full disk rather than a
+	// guarantee the work will fit.
+	MinFreeBytes uint64 `yaml:"min_free_bytes" envconfig:"AGENT_MIN_FREE_BYTES"`
 	// S3 configures the object store used for Managed volume backups.
 	// Leaving Endpoint empty disables backups; see S3Config.
 	S3 S3Config `yaml:"s3"`
@@ -119,6 +134,7 @@ func LoadAgent() (AgentConfig, *LogBuffer) {
 		ListenPort:        "9090",
 		ProxyListenAddr:   ":8081",
 		DataRoot:          "/var/lib/cara",
+		MinFreeBytes:      defaultMinFreeBytes,
 	}
 
 	var err error

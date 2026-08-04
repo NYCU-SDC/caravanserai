@@ -145,6 +145,58 @@ func TestExtractRejectsWriteThroughSymlink(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "nothing may be written outside the destination")
 }
 
+// TestExtractRejectsSymlinkPivot covers the escape that the per-entry-type
+// path checks used to miss.
+//
+// `a -> "."` is legitimate on its own: it points at the destination root, so
+// every lexical check passes. But it makes `a` a doorway back to the root,
+// which means `a/b -> ".."` is written at `root/b` while every check evaluates
+// it as if it lived under `root/a` — one directory level of discrepancy
+// between the name being checked and the path being written. A third entry
+// then traverses `b`.
+//
+// The regular-file and symlink cases were covered before because they resolved
+// the parent after creating it; directory and hardlink entries were not.
+func TestExtractRejectsSymlinkPivot(t *testing.T) {
+	pivot := []tarEntry{
+		{name: "a", typeflag: tar.TypeSymlink, linkname: ".", mode: 0o777},
+		{name: "a/b", typeflag: tar.TypeSymlink, linkname: "..", mode: 0o777},
+	}
+
+	t.Run("directory entry", func(t *testing.T) {
+		archive := filepath.Join(t.TempDir(), "evil.tar.gz")
+		buildArchive(t, archive, append(pivot,
+			tarEntry{name: "b/pwned/", typeflag: tar.TypeDir, mode: 0o755}))
+
+		outer := t.TempDir()
+		err := Extract(archive, filepath.Join(outer, "dest"), 1<<20)
+		require.Error(t, err, "extraction must not succeed")
+
+		_, statErr := os.Stat(filepath.Join(outer, "pwned"))
+		assert.True(t, os.IsNotExist(statErr), "no directory may appear outside the destination")
+	})
+
+	t.Run("hardlink entry", func(t *testing.T) {
+		// The more damaging half: a hardlink is the same inode under a second
+		// name, so pulling a host file into the volume hands its contents to
+		// the container that owns the volume.
+		outer := t.TempDir()
+		secret := filepath.Join(outer, "secret.txt")
+		require.NoError(t, os.WriteFile(secret, []byte("host-only"), 0o600))
+
+		archive := filepath.Join(t.TempDir(), "evil.tar.gz")
+		buildArchive(t, archive, append(pivot,
+			tarEntry{name: "stolen", typeflag: tar.TypeLink, linkname: "b/secret.txt"}))
+
+		dest := filepath.Join(outer, "dest")
+		err := Extract(archive, dest, 1<<20)
+		require.Error(t, err, "extraction must not succeed")
+
+		_, statErr := os.Stat(filepath.Join(dest, "stolen"))
+		assert.True(t, os.IsNotExist(statErr), "no host file may be linked into the volume")
+	})
+}
+
 func TestExtractAllowsInternalSymlink(t *testing.T) {
 	// A symlink pointing within the volume is legitimate and must survive a
 	// backup/restore round trip.

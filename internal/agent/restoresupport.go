@@ -32,7 +32,10 @@ func ensureVolumeData(
 	p *v1.Project,
 	logger *zap.Logger,
 ) error {
-	if restorer == nil {
+	// Both are checked because reconcileProjects treats a nil Coordinator on
+	// the same BackupSupport as a supported state; the two call sites must not
+	// disagree about whether the field is optional.
+	if restorer == nil || coordinator == nil {
 		return nil
 	}
 	if !hasManagedVolume(p.Spec.Volumes) {

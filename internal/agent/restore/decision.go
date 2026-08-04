@@ -81,11 +81,15 @@ func Decide(stagingPresent, markerPresent, volumesHaveData bool) Decision {
 	}
 }
 
-// StagingPresent reports whether a previous restore left staging behind.
+// StagingPresent reports whether a restore left staging behind.
 //
-// A Restorer removes its staging directory on every exit path, so anything
-// still there belongs to a process that no longer exists — the restore was
-// interrupted part-way and the volumes may be split across generations.
+// Staging is removed only when a restore succeeds — deliberately not on the
+// failure path, and never with a defer. A failed restore may have swapped some
+// volumes and not others, so leaving staging is what records that the volumes
+// may be split across generations. Anything still here therefore means either
+// a restore that failed or one whose process died part-way; both are grounds
+// to distrust what is on disk. Do not "fix" this by clearing staging on error:
+// TestRestoreGenerationKeepsStagingAfterFailure exists to catch that.
 func StagingPresent(dataRoot, namespace, project string) (bool, error) {
 	dir, err := StagingDir(dataRoot, namespace, project)
 	if err != nil {

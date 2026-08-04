@@ -20,22 +20,32 @@ var ErrArchiveTooLarge = errors.New("restore: archive exceeds maximum extracted 
 // destination directory.
 var ErrUnsafePath = errors.New("restore: archive entry escapes destination")
 
-// Extract unpacks a .tar.gz produced by internal/agent/backup into destDir,
-// refusing anything that would write outside it.
+// Extract unpacks a .tar.gz produced by internal/agent/backup into destDir.
 //
 // The threat model is not a malicious operator — it is a compromised
 // container. Containers write freely into their Managed volume, so whatever
-// they plant there is faithfully archived by the backup and arrives here.
-// Three classes of entry are therefore rejected rather than trusted:
+// they plant there is faithfully archived by the backup (symlinks included,
+// see backup.archiveVolume) and arrives here.
 //
-//   - paths containing ".." or absolute paths, which would land outside destDir
-//   - symlinks and hardlinks pointing outside destDir, which turn a later
-//     innocuous-looking entry into a write to an arbitrary host path
-//   - archives that expand past maxBytes, which would fill the disk
+// Containment is delegated to os.Root rather than hand-rolled path checks.
+// Every write goes through a handle to destDir whose methods refuse any name
+// resolving outside it, symlinks included — on Linux that is the kernel doing
+// the resolution. This matters because the previous approach validated paths
+// per entry type, and safety then depended on remembering to call the check in
+// every branch of the switch below. Two branches did not, and an archive that
+// planted `a -> "."` followed by `a/b -> ".."` could reach one directory above
+// destDir: each check passed lexically because `a` looked like a subdirectory
+// while actually being the root itself. With os.Root the escape is not blocked
+// by a check, it is unrepresentable.
 //
-// Extraction additionally re-checks each entry's parent directory after
-// resolving symlinks, so an entry cannot be written *through* a symlink
-// created earlier in the same archive.
+// Two things os.Root deliberately does not do, which are still handled here:
+//
+//   - It does not validate a symlink's target at creation time, only traversal
+//     through it later. A stored link that points outside the volume is refused
+//     outright: an absolute target meant something inside the container's
+//     filesystem and means something else entirely on the host.
+//   - It has no notion of an extraction budget, so archive bombs are capped
+//     separately.
 func Extract(archivePath, destDir string, maxBytes int64) error {
 	f, err := os.Open(archivePath)
 	if err != nil {
@@ -52,13 +62,11 @@ func Extract(archivePath, destDir string, maxBytes int64) error {
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		return fmt.Errorf("restore: create destination %q: %w", destDir, err)
 	}
-	// Resolve destDir once so containment checks compare like with like —
-	// on macOS /var is itself a symlink, and an unresolved prefix check would
-	// reject every entry.
-	root, err := filepath.EvalSymlinks(destDir)
+	root, err := os.OpenRoot(destDir)
 	if err != nil {
-		return fmt.Errorf("restore: resolve destination %q: %w", destDir, err)
+		return fmt.Errorf("restore: open destination %q: %w", destDir, err)
 	}
+	defer func() { _ = root.Close() }()
 
 	tr := tar.NewReader(gz)
 	var written int64
@@ -72,47 +80,50 @@ func Extract(archivePath, destDir string, maxBytes int64) error {
 			return fmt.Errorf("restore: read archive %q: %w", archivePath, err)
 		}
 
-		target, err := safeTargetPath(root, header.Name)
+		// A lexical pre-check, so the obvious cases fail with a clear error
+		// naming the offending entry. os.Root is what actually enforces
+		// containment for everything that gets past this.
+		name, err := checkEntryName(header.Name)
 		if err != nil {
 			return fmt.Errorf("restore: %q in %q: %w", header.Name, archivePath, err)
 		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, header.FileInfo().Mode().Perm()); err != nil {
-				return fmt.Errorf("restore: create dir %q: %w", target, err)
+			if err := root.MkdirAll(name, header.FileInfo().Mode().Perm()); err != nil {
+				return fmt.Errorf("restore: create dir %q: %w", header.Name, err)
 			}
 
 		case tar.TypeReg:
-			n, err := extractFile(tr, target, root, header, maxBytes-written)
+			n, err := extractFile(tr, root, name, header, maxBytes-written)
 			if err != nil {
 				return err
 			}
 			written += n
 
 		case tar.TypeSymlink:
-			if err := checkLinkTarget(root, target, header.Linkname); err != nil {
+			if err := checkSymlinkTarget(name, header.Linkname); err != nil {
 				return fmt.Errorf("restore: symlink %q → %q: %w", header.Name, header.Linkname, err)
 			}
-			if err := ensureParent(target, root); err != nil {
+			if err := ensureParent(root, name); err != nil {
 				return err
 			}
-			if err := os.Symlink(header.Linkname, target); err != nil {
-				return fmt.Errorf("restore: create symlink %q: %w", target, err)
+			if err := root.Symlink(header.Linkname, name); err != nil {
+				return fmt.Errorf("restore: create symlink %q: %w", header.Name, err)
 			}
 
 		case tar.TypeLink:
 			// A hardlink's target is another entry in this archive, named
 			// relative to the archive root.
-			linkTarget, err := safeTargetPath(root, header.Linkname)
+			linkTarget, err := checkEntryName(header.Linkname)
 			if err != nil {
 				return fmt.Errorf("restore: hardlink %q → %q: %w", header.Name, header.Linkname, err)
 			}
-			if err := ensureParent(target, root); err != nil {
+			if err := ensureParent(root, name); err != nil {
 				return err
 			}
-			if err := os.Link(linkTarget, target); err != nil {
-				return fmt.Errorf("restore: create hardlink %q: %w", target, err)
+			if err := root.Link(linkTarget, name); err != nil {
+				return fmt.Errorf("restore: create hardlink %q: %w", header.Name, err)
 			}
 
 		default:
@@ -124,72 +135,75 @@ func Extract(archivePath, destDir string, maxBytes int64) error {
 	}
 }
 
-// safeTargetPath joins name onto root and confirms the result stays inside it.
-func safeTargetPath(root, name string) (string, error) {
+// checkEntryName rejects entry names that are obviously outside the
+// destination and returns the cleaned, root-relative form.
+//
+// os.Root would refuse these too, but with an error naming the syscall rather
+// than the archive entry. Catching them here keeps the failure legible when an
+// operator has to work out which archive is bad.
+func checkEntryName(name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("%w: empty entry name", ErrUnsafePath)
+	}
 	if filepath.IsAbs(name) {
 		return "", fmt.Errorf("%w: absolute path", ErrUnsafePath)
 	}
 
-	target := filepath.Join(root, name)
-	if target != root && !strings.HasPrefix(target, root+string(os.PathSeparator)) {
-		return "", fmt.Errorf("%w: resolves to %q", ErrUnsafePath, target)
+	cleaned := filepath.Clean(name)
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%w: resolves to %q", ErrUnsafePath, cleaned)
 	}
-	return target, nil
+	return cleaned, nil
 }
 
-// checkLinkTarget rejects a symlink whose target lands outside root.
+// checkSymlinkTarget rejects a symlink whose target lands outside the volume.
 //
-// An absolute target is refused outright: inside a container it would have
-// referred to that container's filesystem, and recreating it on the host
-// points somewhere entirely different.
-func checkLinkTarget(root, linkPath, linkname string) error {
+// os.Root allows creating such a link — it only refuses to traverse one — but
+// storing it is still wrong. An absolute target referred to the container's
+// filesystem when it was created and points somewhere unrelated on the host,
+// and a relative one that climbs out of the volume cannot survive the volume
+// being restored onto a different node.
+func checkSymlinkTarget(entryName, linkname string) error {
+	if linkname == "" {
+		return fmt.Errorf("%w: empty symlink target", ErrUnsafePath)
+	}
 	if filepath.IsAbs(linkname) {
 		return fmt.Errorf("%w: absolute symlink target", ErrUnsafePath)
 	}
 
-	resolved := filepath.Join(filepath.Dir(linkPath), linkname)
-	if resolved != root && !strings.HasPrefix(resolved, root+string(os.PathSeparator)) {
+	resolved := filepath.Join(filepath.Dir(entryName), linkname)
+	if resolved == ".." || strings.HasPrefix(resolved, ".."+string(os.PathSeparator)) {
 		return fmt.Errorf("%w: target resolves to %q", ErrUnsafePath, resolved)
 	}
 	return nil
 }
 
-// ensureParent creates an entry's parent directory and confirms that, after
-// resolving any symlinks, it is still inside root.
-//
-// This is what stops the two-step attack: an archive plants a symlink
-// pointing outside, then a later entry writes to a path that traverses it.
-// The first entry is caught by checkLinkTarget; this catches the second even
-// if a symlink somehow got created another way.
-func ensureParent(target, root string) error {
-	parent := filepath.Dir(target)
-	if err := os.MkdirAll(parent, 0o700); err != nil {
+// ensureParent creates an entry's parent directory. Archives do not reliably
+// carry an entry for every directory they reference.
+func ensureParent(root *os.Root, name string) error {
+	parent := filepath.Dir(name)
+	if parent == "." || parent == string(os.PathSeparator) {
+		return nil
+	}
+	if err := root.MkdirAll(parent, 0o700); err != nil {
 		return fmt.Errorf("restore: create parent %q: %w", parent, err)
-	}
-
-	resolved, err := filepath.EvalSymlinks(parent)
-	if err != nil {
-		return fmt.Errorf("restore: resolve parent %q: %w", parent, err)
-	}
-	if resolved != root && !strings.HasPrefix(resolved, root+string(os.PathSeparator)) {
-		return fmt.Errorf("%w: parent %q resolves outside destination", ErrUnsafePath, parent)
 	}
 	return nil
 }
 
 // extractFile writes one regular file, refusing to exceed the remaining size
 // budget. It returns the number of bytes written.
-func extractFile(tr io.Reader, target, root string, header *tar.Header, budget int64) (int64, error) {
+func extractFile(tr io.Reader, root *os.Root, name string, header *tar.Header, budget int64) (int64, error) {
 	if budget <= 0 {
 		return 0, ErrArchiveTooLarge
 	}
-	if err := ensureParent(target, root); err != nil {
+	if err := ensureParent(root, name); err != nil {
 		return 0, err
 	}
 
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, header.FileInfo().Mode().Perm())
+	out, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, header.FileInfo().Mode().Perm())
 	if err != nil {
-		return 0, fmt.Errorf("restore: create %q: %w", target, err)
+		return 0, fmt.Errorf("restore: create %q: %w", name, err)
 	}
 	defer func() { _ = out.Close() }()
 
@@ -197,7 +211,7 @@ func extractFile(tr io.Reader, target, root string, header *tar.Header, budget i
 	// than silently truncated to the limit.
 	n, err := io.Copy(out, io.LimitReader(tr, budget+1))
 	if err != nil {
-		return n, fmt.Errorf("restore: write %q: %w", target, err)
+		return n, fmt.Errorf("restore: write %q: %w", name, err)
 	}
 	if n > budget {
 		return n, ErrArchiveTooLarge
