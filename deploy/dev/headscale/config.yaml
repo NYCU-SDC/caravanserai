@@ -3,7 +3,7 @@
 # This file intentionally avoids production concerns such as TLS, HA, ACLs, and
 # real DNS. It is used by docker-compose.yaml via make dev-up/dev-reset.
 
-server_url: http://localhost:8081
+server_url: http://localhost:8082
 listen_addr: 0.0.0.0:8080
 metrics_listen_addr: 0.0.0.0:9090
 grpc_listen_addr: 0.0.0.0:50443
