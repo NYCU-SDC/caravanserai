@@ -26,6 +26,8 @@ type mockRuntime struct {
 	getContainerIPs func(ctx context.Context, project *v1.Project) (map[string]string, error)
 	stopFn          func(ctx context.Context, project *v1.Project) error
 	startFn         func(ctx context.Context, project *v1.Project) error
+	listLocalFn     func(ctx context.Context) ([]string, error)
+	removeOrphanFn  func(ctx context.Context, projectName string) error
 }
 
 func (m *mockRuntime) InspectProject(ctx context.Context, project *v1.Project) ([]docker.ContainerState, error) {
@@ -66,6 +68,20 @@ func (m *mockRuntime) StopProject(ctx context.Context, project *v1.Project) erro
 func (m *mockRuntime) StartProject(ctx context.Context, project *v1.Project) error {
 	if m.startFn != nil {
 		return m.startFn(ctx, project)
+	}
+	return nil
+}
+
+func (m *mockRuntime) ListLocalProjects(ctx context.Context) ([]string, error) {
+	if m.listLocalFn != nil {
+		return m.listLocalFn(ctx)
+	}
+	return nil, nil
+}
+
+func (m *mockRuntime) RemoveOrphanProject(ctx context.Context, projectName string) error {
+	if m.removeOrphanFn != nil {
+		return m.removeOrphanFn(ctx, projectName)
 	}
 	return nil
 }

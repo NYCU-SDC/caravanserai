@@ -197,6 +197,87 @@ func (r *DockerRuntime) RemoveProject(ctx context.Context, namespace, projectNam
 	return nil
 }
 
+// ListLocalProjects implements Runtime.
+func (r *DockerRuntime) ListLocalProjects(ctx context.Context) ([]string, error) {
+	// Filtering on the bare label key (no "=value") matches every container the
+	// agent created, whatever project it belongs to.
+	f := filters.NewArgs(filters.Arg("label", labelProject))
+	containers, err := r.client.ContainerList(ctx, container.ListOptions{
+		// All includes stopped containers. An orphan whose process died is
+		// still an orphan: its network and volumes remain, and it restarts on
+		// the next daemon start unless it is removed.
+		All:     true,
+		Filters: f,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
+
+	seen := make(map[string]struct{}, len(containers))
+	names := make([]string, 0, len(containers))
+	for _, c := range containers {
+		name := c.Labels[labelProject]
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+// RemoveOrphanProject implements Runtime.
+func (r *DockerRuntime) RemoveOrphanProject(ctx context.Context, projectName string) error {
+	log := r.logger.With(zap.String("project", projectName))
+	f := filters.NewArgs(filters.Arg("label", labelProject+"="+projectName))
+
+	containers, err := r.client.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: f,
+	})
+	if err != nil {
+		return fmt.Errorf("list containers: %w", err)
+	}
+	for _, c := range containers {
+		log.Info("Stopping orphaned container", zap.String("id", c.ID[:12]))
+		timeout := stopTimeoutSeconds
+		if err := r.client.ContainerStop(ctx, c.ID, container.StopOptions{Timeout: &timeout}); err != nil {
+			log.Warn("Failed to stop orphaned container", zap.String("id", c.ID[:12]), zap.Error(err))
+		}
+		if err := r.client.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true}); err != nil {
+			log.Warn("Failed to remove orphaned container", zap.String("id", c.ID[:12]), zap.Error(err))
+		}
+	}
+
+	netName := NetworkName(projectName)
+	if err := r.client.NetworkRemove(ctx, netName); err != nil {
+		if !isNotFound(err) {
+			log.Warn("Failed to remove orphaned network", zap.String("network", netName), zap.Error(err))
+		}
+	}
+
+	// Only Ephemeral volumes (and legacy pre-CARA-66 named volumes) carry this
+	// label. Managed volume data lives in a host directory that no Docker
+	// volume filter can reach, so it survives this sweep by construction.
+	vols, err := r.client.VolumeList(ctx, volume.ListOptions{Filters: f})
+	if err != nil {
+		return fmt.Errorf("list volumes: %w", err)
+	}
+	for _, v := range vols.Volumes {
+		if err := r.client.VolumeRemove(ctx, v.Name, false); err != nil {
+			if !isNotFound(err) {
+				log.Warn("Failed to remove orphaned volume", zap.String("volume", v.Name), zap.Error(err))
+			}
+		}
+	}
+
+	log.Info("Orphaned project resources removed")
+	return nil
+}
+
 // StopProject implements Runtime.
 //
 // Services are stopped in reverse spec order so a dependent service goes down

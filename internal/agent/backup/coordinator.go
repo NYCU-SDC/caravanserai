@@ -154,24 +154,22 @@ const (
 //	moved to Terminating                 → do NOT restart, yield to teardown
 //	drain completed / assignment lost    → do NOT restart
 //
-// When ownership cannot be determined the containers are restarted. This is
-// a trade-off between two outcomes that are both currently permanent, not a
-// safe default:
+// When ownership cannot be determined the containers are restarted:
 //
 //   - Restarting is correct in the common case (a brief blip during which
-//     nothing was reassigned). It is wrong only if the Project really did
-//     move, and that orphan does NOT clean itself up today:
-//     ListProjectsForReconcile filters by nodeRef, so a reassigned Project
-//     disappears from this node's view entirely and its containers keep
-//     running until an operator intervenes. Fixing that is NT-A's job.
+//     nothing was reassigned). If the Project really did move, the containers
+//     started here are orphans — but the agent's orphan sweep now removes them
+//     once the Project has been absent from ListProjectsForReconcile for the
+//     grace period (see internal/agent/orphan.go), so the mistake is temporary
+//     rather than permanent.
 //   - Refusing to restart is wrong in the common case: it turns a transient
 //     control-plane blip into a stopped service that nothing brings back,
 //     because a Failed Project is not currently auto-recovered. Fixing that
 //     is NT-B's job.
 //
-// Restarting is chosen because it is correct in the common case and wrong
-// only in the rare one. Revisit once NT-A lands and the orphan becomes
-// self-healing.
+// Restarting is chosen because it is correct in the common case, and because
+// the case where it is wrong is now self-healing while the alternative's
+// failure is not.
 func ShouldRestartContainers(reason ExitReason, ownership Ownership) bool {
 	switch ownership {
 	case OwnershipReassigned, OwnershipTerminating, OwnershipLost:

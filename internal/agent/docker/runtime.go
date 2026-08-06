@@ -76,4 +76,27 @@ type Runtime interface {
 	// attachment to the project bridge network (cara-{projectName}).
 	// Services whose containers do not exist or have no IP are omitted.
 	GetContainerIPs(ctx context.Context, project *v1.Project) (map[string]string, error)
+
+	// ListLocalProjects returns the name of every project that has containers
+	// on this host, discovered from the cara.project label rather than from any
+	// server response. Names are unique and include projects whose containers
+	// are stopped, so a project the control plane no longer assigns here is
+	// still visible to the caller.
+	//
+	// This is what makes orphan detection possible: the reconcile list only
+	// contains projects the server still assigns to this node, so a project
+	// that moved away can only be found by asking Docker directly.
+	ListLocalProjects(ctx context.Context) ([]string, error)
+
+	// RemoveOrphanProject tears down every Docker resource labelled for the
+	// project — containers, the bridge network, and named volumes — without
+	// needing its spec.
+	//
+	// RemoveProject cannot be used for an orphan: it derives volume handling
+	// from the spec, and the spec of a project the server no longer returns is
+	// exactly what the agent does not have. Working from labels alone also
+	// keeps Managed volume data safe by construction, because Managed volumes
+	// are host bind directories rather than Docker volumes and so are not
+	// reachable through a label filter at all.
+	RemoveOrphanProject(ctx context.Context, projectName string) error
 }

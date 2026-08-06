@@ -141,6 +141,10 @@ func Run(ctx context.Context, cfg RunConfig) {
 	pollTicker := time.NewTicker(pollInterval)
 	defer pollTicker.Stop()
 
+	// Orphan sweep state lives across ticks: a project must be observed absent
+	// for the whole grace period, which spans many polls.
+	orphans := newOrphanTracker(realClock{})
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -166,7 +170,7 @@ func Run(ctx context.Context, cfg RunConfig) {
 			}
 
 		case <-pollTicker.C:
-			reconcileProjects(ctx, client, runtime, routes, cfg.Backups, logger)
+			reconcileProjects(ctx, client, runtime, routes, cfg.Backups, orphans, logger)
 		}
 	}
 }
@@ -237,11 +241,23 @@ func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docke
 // operation in flight, to keep the per-Project backup goroutines in step with
 // the Projects this node currently holds, and to put Managed volume data in
 // place before a Project's containers are created.
-func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, logger *zap.Logger) {
+//
+// orphans carries the sweep's cross-tick state. It may be nil, which disables
+// the sweep.
+func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, orphans *orphanTracker, logger *zap.Logger) {
 	projects, err := client.ListProjectsForReconcile(ctx)
 	if err != nil {
+		// No sweep this tick, and no clock advanced: the agent cannot tell an
+		// unreachable server from a project that genuinely moved away.
 		logger.Warn("Failed to list projects for reconcile", zap.Error(err))
 		return
+	}
+
+	// Sweep before the early return below: a node that lost every project still
+	// has orphans to clean up, and that is exactly the case an empty list
+	// describes.
+	if orphans != nil {
+		sweepOrphans(ctx, runtime, routes, orphans, projects, logger)
 	}
 
 	var busy busyChecker
