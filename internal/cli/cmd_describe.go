@@ -206,6 +206,20 @@ func describeProject(w io.Writer, project *v1.Project) {
 		}
 	}
 
+	// Backup
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  Backup:")
+	if project.Spec.Backup == nil {
+		fmt.Fprintln(w, "    <none>")
+	} else {
+		printField(w, "    Interval", stringOrNone(project.Spec.Backup.Interval))
+		onMissing := string(project.Spec.Backup.OnMissing)
+		if onMissing == "" {
+			onMissing = string(v1.VolumeOnMissingInitializeEmpty) + " (default)"
+		}
+		printField(w, "    On Missing", onMissing)
+	}
+
 	// Ingress
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  Ingress:")

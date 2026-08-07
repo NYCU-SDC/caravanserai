@@ -192,6 +192,24 @@
       "title": "Project",
       "description": "Project is the central workload resource."
     },
+    "ProjectBackupConfig": {
+      "properties": {
+        "interval": {
+          "type": "string",
+          "description": "Interval is the time between backup runs, e.g. \"168h\", \"1h\". Parsed with\ntime.ParseDuration; must be positive."
+        },
+        "onMissing": {
+          "$ref": "#/$defs/VolumeOnMissing",
+          "description": "OnMissing selects behaviour when no backup exists at restore time.\nDefaults to InitializeEmpty when empty."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "interval"
+      ],
+      "description": "ProjectBackupConfig configures periodic object-store backup of a Project's Managed volumes."
+    },
     "ProjectPhase": {
       "type": "string",
       "enum": [
@@ -219,6 +237,10 @@
           },
           "type": "array",
           "description": "Volumes are named storage units shared across services."
+        },
+        "backup": {
+          "$ref": "#/$defs/ProjectBackupConfig",
+          "description": "Backup configures periodic backup of every Managed volume in this\nProject. Omitting it means the volumes persist on the node but are\nnever uploaded."
         },
         "ingress": {
           "items": {
@@ -330,9 +352,17 @@
       ],
       "description": "VolumeMount associates a named Volume with a container mount path."
     },
+    "VolumeOnMissing": {
+      "type": "string",
+      "enum": [
+        "InitializeEmpty"
+      ],
+      "description": "What to do when a Managed volume has no backup at restore time."
+    },
     "VolumeType": {
       "type": "string",
       "enum": [
+        "Managed",
         "Ephemeral"
       ],
       "description": "Governs the lifecycle and backup behaviour of a Volume."
