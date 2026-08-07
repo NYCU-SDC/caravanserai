@@ -59,6 +59,15 @@ var migrationsFS embed.FS
 const (
 	kindNode    = "Node"
 	kindProject = "Project"
+
+	// defaultNamespace is the only namespace value 1.0 ever writes or reads.
+	// Node rows are always written with this value even though NodeStore's
+	// API surface doesn't expose namespace as a parameter (Node is
+	// cluster-scoped). Project lookups by bare name (Get/Update/Delete/List)
+	// filter on this constant since routes don't accept a namespace segment
+	// yet; api/v1.ValidateNamespace rejects anything else before it reaches
+	// the store.
+	defaultNamespace = v1.DefaultNamespace
 )
 
 // Store is the PostgreSQL-backed implementation of store.Store.
@@ -169,9 +178,9 @@ func (s *Store) CreateNode(ctx context.Context, node *v1.Node) error {
 	}
 
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO resources (kind, name, phase, spec, status, labels, annotations, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		kindNode, node.Name, string(node.Status.State),
+		INSERT INTO resources (kind, name, namespace, phase, spec, status, labels, annotations, created_at, updated_at, resource_version)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1)`,
+		kindNode, node.Name, defaultNamespace, string(node.Status.State),
 		spec, status, labels, annotations,
 		now, now,
 	)
@@ -181,6 +190,8 @@ func (s *Store) CreateNode(ctx context.Context, node *v1.Node) error {
 		}
 		return fmt.Errorf("postgres: create node %q: %w", node.Name, err)
 	}
+	node.ObjectMeta.Namespace = defaultNamespace
+	node.ObjectMeta.ResourceVersion = 1
 	s.publish(event.TopicNodeCreated, node.Name)
 	return nil
 }
@@ -192,17 +203,19 @@ func (s *Store) GetNode(ctx context.Context, name string) (*v1.Node, error) {
 
 func (s *Store) getNode(ctx context.Context, name string) (*v1.Node, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT spec, status, labels, annotations, created_at, updated_at
+		SELECT namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources
 		WHERE kind = $1 AND name = $2`,
 		kindNode, name,
 	)
 
 	var (
+		namespace                                     string
+		resourceVersion                               int64
 		rawSpec, rawStatus, rawLabels, rawAnnotations []byte
 		createdAt, updatedAt                          time.Time
 	)
-	if err := row.Scan(&rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&namespace, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
@@ -210,8 +223,11 @@ func (s *Store) getNode(ctx context.Context, name string) (*v1.Node, error) {
 	}
 
 	node := &v1.Node{
-		TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindNode},
-		ObjectMeta: v1.ObjectMeta{Name: name, CreatedAt: createdAt, UpdatedAt: updatedAt},
+		TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindNode},
+		ObjectMeta: v1.ObjectMeta{
+			Name: name, Namespace: namespace, ResourceVersion: resourceVersion,
+			CreatedAt: createdAt, UpdatedAt: updatedAt,
+		},
 	}
 	if err := unmarshalFields(name, rawSpec, &node.Spec, rawStatus, &node.Status, rawLabels, &node.Labels, rawAnnotations, &node.Annotations); err != nil {
 		return nil, fmt.Errorf("postgres: unmarshal node %q: %w", name, err)
@@ -222,7 +238,7 @@ func (s *Store) getNode(ctx context.Context, name string) (*v1.Node, error) {
 // ListNodes implements store.NodeStore.
 func (s *Store) ListNodes(ctx context.Context) ([]*v1.Node, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources WHERE kind = $1`, kindNode)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list nodes: %w", err)
@@ -232,16 +248,20 @@ func (s *Store) ListNodes(ctx context.Context) ([]*v1.Node, error) {
 	var nodes []*v1.Node
 	for rows.Next() {
 		var (
-			name                                          string
+			name, namespace                               string
+			resourceVersion                               int64
 			rawSpec, rawStatus, rawLabels, rawAnnotations []byte
 			createdAt, updatedAt                          time.Time
 		)
-		if err := rows.Scan(&name, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&name, &namespace, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("postgres: scan node row: %w", err)
 		}
 		node := &v1.Node{
-			TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindNode},
-			ObjectMeta: v1.ObjectMeta{Name: name, CreatedAt: createdAt, UpdatedAt: updatedAt},
+			TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindNode},
+			ObjectMeta: v1.ObjectMeta{
+				Name: name, Namespace: namespace, ResourceVersion: resourceVersion,
+				CreatedAt: createdAt, UpdatedAt: updatedAt,
+			},
 		}
 		if err := unmarshalFields(name, rawSpec, &node.Spec, rawStatus, &node.Status, rawLabels, &node.Labels, rawAnnotations, &node.Annotations); err != nil {
 			return nil, fmt.Errorf("postgres: unmarshal node %q: %w", name, err)
@@ -272,18 +292,20 @@ func (s *Store) UpdateNode(ctx context.Context, node *v1.Node) error {
 		return fmt.Errorf("postgres: marshal annotations: %w", err)
 	}
 
-	tag, err := s.pool.Exec(ctx, `
+	err = s.pool.QueryRow(ctx, `
 		UPDATE resources
-		SET phase = $1, spec = $2, status = $3, labels = $4, annotations = $5, updated_at = $6
-		WHERE kind = $7 AND name = $8`,
+		SET phase = $1, spec = $2, status = $3, labels = $4, annotations = $5, updated_at = $6,
+		    resource_version = resource_version + 1
+		WHERE kind = $7 AND name = $8
+		RETURNING resource_version`,
 		string(node.Status.State), spec, status, labels, annotations,
 		node.ObjectMeta.UpdatedAt, kindNode, node.Name,
-	)
+	).Scan(&node.ObjectMeta.ResourceVersion)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: node %q", store.ErrNotFound, node.Name)
+		}
 		return fmt.Errorf("postgres: update node %q: %w", node.Name, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: node %q", store.ErrNotFound, node.Name)
 	}
 	return nil
 }
@@ -307,17 +329,19 @@ func (s *Store) UpdateNodeSpec(ctx context.Context, node *v1.Node) error {
 		return fmt.Errorf("postgres: marshal node annotations: %w", err)
 	}
 
-	tag, err := s.pool.Exec(ctx, `
+	err = s.pool.QueryRow(ctx, `
 		UPDATE resources
-		SET spec = $1, labels = $2, annotations = $3, updated_at = $4
-		WHERE kind = $5 AND name = $6`,
+		SET spec = $1, labels = $2, annotations = $3, updated_at = $4,
+		    resource_version = resource_version + 1
+		WHERE kind = $5 AND name = $6
+		RETURNING resource_version`,
 		spec, labels, annotations, now, kindNode, node.Name,
-	)
+	).Scan(&node.ObjectMeta.ResourceVersion)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: node %q", store.ErrNotFound, node.Name)
+		}
 		return fmt.Errorf("postgres: update node spec %q: %w", node.Name, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: node %q", store.ErrNotFound, node.Name)
 	}
 	s.publish(event.TopicNodeUpdated, node.Name)
 	return nil
@@ -356,7 +380,7 @@ func (s *Store) UpdateNodeStatus(ctx context.Context, name string, status v1.Nod
 			SELECT phase FROM resources WHERE kind = $4 AND name = $5
 		)
 		UPDATE resources
-		SET phase = $1, status = $2, updated_at = $3
+		SET phase = $1, status = $2, updated_at = $3, resource_version = resource_version + 1
 		WHERE kind = $4 AND name = $5
 		RETURNING (SELECT phase FROM old) AS old_phase`,
 		string(status.State), raw, time.Now().UTC(), kindNode, name,
@@ -383,6 +407,9 @@ func (s *Store) CreateProject(ctx context.Context, project *v1.Project) error {
 	now := time.Now().UTC()
 	project.ObjectMeta.CreatedAt = now
 	project.ObjectMeta.UpdatedAt = now
+	if project.ObjectMeta.Namespace == "" {
+		project.ObjectMeta.Namespace = defaultNamespace
+	}
 
 	spec, err := json.Marshal(project.Spec)
 	if err != nil {
@@ -402,9 +429,9 @@ func (s *Store) CreateProject(ctx context.Context, project *v1.Project) error {
 	}
 
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO resources (kind, name, phase, spec, status, labels, annotations, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		kindProject, project.Name, string(project.Status.Phase),
+		INSERT INTO resources (kind, name, namespace, phase, spec, status, labels, annotations, created_at, updated_at, resource_version)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1)`,
+		kindProject, project.Name, project.ObjectMeta.Namespace, string(project.Status.Phase),
 		spec, status, labels, annotations,
 		now, now,
 	)
@@ -414,6 +441,7 @@ func (s *Store) CreateProject(ctx context.Context, project *v1.Project) error {
 		}
 		return fmt.Errorf("postgres: create project %q: %w", project.Name, err)
 	}
+	project.ObjectMeta.ResourceVersion = 1
 	s.publish(event.TopicProjectCreated, project.Name)
 	return nil
 }
@@ -425,17 +453,19 @@ func (s *Store) GetProject(ctx context.Context, name string) (*v1.Project, error
 
 func (s *Store) getProject(ctx context.Context, name string) (*v1.Project, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT spec, status, labels, annotations, created_at, updated_at
+		SELECT namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources
-		WHERE kind = $1 AND name = $2`,
-		kindProject, name,
+		WHERE kind = $1 AND namespace = $2 AND name = $3`,
+		kindProject, defaultNamespace, name,
 	)
 
 	var (
+		namespace                                     string
+		resourceVersion                               int64
 		rawSpec, rawStatus, rawLabels, rawAnnotations []byte
 		createdAt, updatedAt                          time.Time
 	)
-	if err := row.Scan(&rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&namespace, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
@@ -443,8 +473,11 @@ func (s *Store) getProject(ctx context.Context, name string) (*v1.Project, error
 	}
 
 	project := &v1.Project{
-		TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindProject},
-		ObjectMeta: v1.ObjectMeta{Name: name, CreatedAt: createdAt, UpdatedAt: updatedAt},
+		TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindProject},
+		ObjectMeta: v1.ObjectMeta{
+			Name: name, Namespace: namespace, ResourceVersion: resourceVersion,
+			CreatedAt: createdAt, UpdatedAt: updatedAt,
+		},
 	}
 	if err := unmarshalFields(name, rawSpec, &project.Spec, rawStatus, &project.Status, rawLabels, &project.Labels, rawAnnotations, &project.Annotations); err != nil {
 		return nil, fmt.Errorf("postgres: unmarshal project %q: %w", name, err)
@@ -455,8 +488,8 @@ func (s *Store) getProject(ctx context.Context, name string) (*v1.Project, error
 // ListProjects implements store.ProjectStore.
 func (s *Store) ListProjects(ctx context.Context) ([]*v1.Project, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, spec, status, labels, annotations, created_at, updated_at
-		FROM resources WHERE kind = $1`, kindProject)
+		SELECT name, namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		FROM resources WHERE kind = $1 AND namespace = $2`, kindProject, defaultNamespace)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list projects: %w", err)
 	}
@@ -469,9 +502,9 @@ func (s *Store) ListProjects(ctx context.Context) ([]*v1.Project, error) {
 // Uses the promoted phase column + idx_resources_kind_phase index.
 func (s *Store) ListProjectsByPhase(ctx context.Context, phase v1.ProjectPhase) ([]*v1.Project, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, spec, status, labels, annotations, created_at, updated_at
-		FROM resources WHERE kind = $1 AND phase = $2`,
-		kindProject, string(phase),
+		SELECT name, namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		FROM resources WHERE kind = $1 AND namespace = $2 AND phase = $3`,
+		kindProject, defaultNamespace, string(phase),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list projects by phase %q: %w", phase, err)
@@ -495,9 +528,9 @@ func (s *Store) ListProjectsByPhases(ctx context.Context, phases []v1.ProjectPha
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, spec, status, labels, annotations, created_at, updated_at
-		FROM resources WHERE kind = $1 AND phase = ANY($2)`,
-		kindProject, phaseStrings,
+		SELECT name, namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		FROM resources WHERE kind = $1 AND namespace = $2 AND phase = ANY($3)`,
+		kindProject, defaultNamespace, phaseStrings,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list projects by phases %v: %w", phases, err)
@@ -523,10 +556,10 @@ func (s *Store) ListProjectsByNodeRef(ctx context.Context, nodeRef string, phase
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources
-		WHERE kind = $1 AND phase = ANY($2) AND status->>'nodeRef' = $3`,
-		kindProject, phaseStrings, nodeRef,
+		WHERE kind = $1 AND namespace = $2 AND phase = ANY($3) AND status->>'nodeRef' = $4`,
+		kindProject, defaultNamespace, phaseStrings, nodeRef,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list projects by node_ref %q phases %v: %w", nodeRef, phases, err)
@@ -539,6 +572,9 @@ func (s *Store) ListProjectsByNodeRef(ctx context.Context, nodeRef string, phase
 // UpdateProject implements store.ProjectStore.
 func (s *Store) UpdateProject(ctx context.Context, project *v1.Project) error {
 	project.ObjectMeta.UpdatedAt = time.Now().UTC()
+	if project.ObjectMeta.Namespace == "" {
+		project.ObjectMeta.Namespace = defaultNamespace
+	}
 
 	spec, err := json.Marshal(project.Spec)
 	if err != nil {
@@ -557,18 +593,20 @@ func (s *Store) UpdateProject(ctx context.Context, project *v1.Project) error {
 		return fmt.Errorf("postgres: marshal annotations: %w", err)
 	}
 
-	tag, err := s.pool.Exec(ctx, `
+	err = s.pool.QueryRow(ctx, `
 		UPDATE resources
-		SET phase = $1, spec = $2, status = $3, labels = $4, annotations = $5, updated_at = $6
-		WHERE kind = $7 AND name = $8`,
+		SET phase = $1, spec = $2, status = $3, labels = $4, annotations = $5, updated_at = $6,
+		    resource_version = resource_version + 1
+		WHERE kind = $7 AND namespace = $8 AND name = $9
+		RETURNING resource_version`,
 		string(project.Status.Phase), spec, status, labels, annotations,
-		project.ObjectMeta.UpdatedAt, kindProject, project.Name,
-	)
+		project.ObjectMeta.UpdatedAt, kindProject, project.ObjectMeta.Namespace, project.Name,
+	).Scan(&project.ObjectMeta.ResourceVersion)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: project %q", store.ErrNotFound, project.Name)
+		}
 		return fmt.Errorf("postgres: update project %q: %w", project.Name, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: project %q", store.ErrNotFound, project.Name)
 	}
 	return nil
 }
@@ -576,7 +614,7 @@ func (s *Store) UpdateProject(ctx context.Context, project *v1.Project) error {
 // DeleteProject implements store.ProjectStore.
 func (s *Store) DeleteProject(ctx context.Context, name string) error {
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM resources WHERE kind = $1 AND name = $2`, kindProject, name)
+		`DELETE FROM resources WHERE kind = $1 AND namespace = $2 AND name = $3`, kindProject, defaultNamespace, name)
 	if err != nil {
 		return fmt.Errorf("postgres: delete project %q: %w", name, err)
 	}
@@ -596,9 +634,9 @@ func (s *Store) UpdateProjectStatus(ctx context.Context, name string, status v1.
 
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE resources
-		SET phase = $1, status = $2, updated_at = $3
-		WHERE kind = $4 AND name = $5`,
-		string(status.Phase), raw, time.Now().UTC(), kindProject, name,
+		SET phase = $1, status = $2, updated_at = $3, resource_version = resource_version + 1
+		WHERE kind = $4 AND namespace = $5 AND name = $6`,
+		string(status.Phase), raw, time.Now().UTC(), kindProject, defaultNamespace, name,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: update project status %q: %w", name, err)
@@ -617,6 +655,9 @@ func (s *Store) UpdateProjectStatus(ctx context.Context, name string, status v1.
 // otherwise.
 func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) error {
 	now := time.Now().UTC()
+	if project.ObjectMeta.Namespace == "" {
+		project.ObjectMeta.Namespace = defaultNamespace
+	}
 
 	spec, err := json.Marshal(project.Spec)
 	if err != nil {
@@ -633,9 +674,9 @@ func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) erro
 
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE resources
-		SET spec = $1, labels = $2, annotations = $3, updated_at = $4
-		WHERE kind = $5 AND name = $6 AND phase = ANY($7)`,
-		spec, labels, annotations, now, kindProject, project.Name,
+		SET spec = $1, labels = $2, annotations = $3, updated_at = $4, resource_version = resource_version + 1
+		WHERE kind = $5 AND namespace = $6 AND name = $7 AND phase = ANY($8)`,
+		spec, labels, annotations, now, kindProject, project.ObjectMeta.Namespace, project.Name,
 		[]string{string(v1.ProjectPhasePending), string(v1.ProjectPhaseFailed)},
 	)
 	if err != nil {
@@ -662,16 +703,20 @@ func scanProjects(rows pgx.Rows) ([]*v1.Project, error) {
 	var projects []*v1.Project
 	for rows.Next() {
 		var (
-			name                                          string
+			name, namespace                               string
+			resourceVersion                               int64
 			rawSpec, rawStatus, rawLabels, rawAnnotations []byte
 			createdAt, updatedAt                          time.Time
 		)
-		if err := rows.Scan(&name, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&name, &namespace, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("postgres: scan project row: %w", err)
 		}
 		project := &v1.Project{
-			TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindProject},
-			ObjectMeta: v1.ObjectMeta{Name: name, CreatedAt: createdAt, UpdatedAt: updatedAt},
+			TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindProject},
+			ObjectMeta: v1.ObjectMeta{
+				Name: name, Namespace: namespace, ResourceVersion: resourceVersion,
+				CreatedAt: createdAt, UpdatedAt: updatedAt,
+			},
 		}
 		if err := unmarshalFields(name, rawSpec, &project.Spec, rawStatus, &project.Status, rawLabels, &project.Labels, rawAnnotations, &project.Annotations); err != nil {
 			return nil, fmt.Errorf("postgres: unmarshal project %q: %w", name, err)

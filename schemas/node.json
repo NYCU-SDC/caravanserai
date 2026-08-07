@@ -210,6 +210,14 @@
           "type": "string",
           "description": "Name is the unique identifier within its Kind namespace."
         },
+        "namespace": {
+          "type": "string",
+          "description": "Namespace scopes this resource within its Kind. 1.0 locks every write to\n\"\" or \"default\" (enforced in ValidateNamespace); see api/v1/validation.go\nfor the removal pointer once namespaces open up post-1.0."
+        },
+        "resourceVersion": {
+          "type": "integer",
+          "description": "ResourceVersion is set by the server and incremented on every write. It\nis currently a pure write-counter; optimistic-concurrency conflict\nchecking is a separate post-1.0 task."
+        },
         "labels": {
           "additionalProperties": {
             "type": "string"

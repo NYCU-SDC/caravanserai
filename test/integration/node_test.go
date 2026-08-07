@@ -149,6 +149,8 @@ func TestNodeCRUD(t *testing.T) {
 	mustDecodeBody(t, resp, &created)
 	assert.Equal(t, nodeName, created.Name)
 	assert.Equal(t, v1.NodeStateNotReady, created.Status.State, "initial state must be NotReady")
+	assert.Equal(t, "default", created.Namespace, "node namespace is always default")
+	assert.Equal(t, int64(1), created.ResourceVersion, "resource_version should start at 1")
 
 	// ── 2. Create duplicate → 409 ──────────────────────────────────────────────
 
@@ -243,6 +245,7 @@ func TestNodeUpdate(t *testing.T) {
 	assert.Equal(t, "updated-host", updated.Spec.Hostname, "spec.hostname should be updated")
 	assert.True(t, updated.Spec.Unschedulable, "spec.unschedulable should be true")
 	assert.Equal(t, v1.NodeStateReady, updated.Status.State, "status.state must be preserved")
+	assert.Equal(t, int64(3), updated.ResourceVersion, "resource_version should be 3: create(1) + heartbeat(2) + this PUT(3)")
 
 	// ── 2. PUT on non-existent node → 404 ─────────────────────────────────────
 
@@ -516,6 +519,50 @@ func TestNodeNameValidation(t *testing.T) {
 		assert.Equal(t, http.StatusNoContent, resp.StatusCode, "cleanup delete %q", name)
 		drainBody(resp)
 	}
+}
+
+// TestNodeNamespaceValidation verifies that CARA-46 locks Node creation and
+// update to the default namespace the same way Project does: empty and
+// "default" are accepted, anything else is rejected with a descriptive 400
+// instead of being silently overwritten.
+func TestNodeNamespaceValidation(t *testing.T) {
+	// ── create ───────────────────────────────────────────────────────────────
+
+	body := mustMarshal(t, v1.Node{
+		ObjectMeta: v1.ObjectMeta{Name: "e2e-node-ns-rejected", Namespace: "blog-team"},
+		Spec:       v1.NodeSpec{Hostname: "test-host"},
+	})
+	resp := doRequest(t, http.MethodPost, "/api/v1/nodes", body)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, "create with non-default namespace: expected 400")
+
+	var p problemResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&p))
+	assert.Contains(t, p.Detail, "namespace support lands post-1.0",
+		"detail should explain why the namespace was rejected")
+
+	// ── update ───────────────────────────────────────────────────────────────
+
+	nodeName := "e2e-node-ns-update"
+	createBody := mustMarshal(t, v1.Node{
+		ObjectMeta: v1.ObjectMeta{Name: nodeName},
+		Spec:       v1.NodeSpec{Hostname: "test-host"},
+	})
+	resp = doRequest(t, http.MethodPost, "/api/v1/nodes", createBody)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "create node: expected 201")
+	drainBody(resp)
+
+	updateBody := mustMarshal(t, v1.Node{
+		ObjectMeta: v1.ObjectMeta{Name: nodeName, Namespace: "blog-team"},
+		Spec:       v1.NodeSpec{Hostname: "test-host"},
+	})
+	resp = doRequest(t, http.MethodPut, "/api/v1/nodes/"+nodeName, updateBody)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, "update with non-default namespace: expected 400")
+	drainBody(resp)
+
+	// Cleanup: only e2e-node-ns-update was ever successfully created.
+	resp = doRequest(t, http.MethodDelete, "/api/v1/nodes/"+nodeName, nil)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode, "cleanup delete %q", nodeName)
+	drainBody(resp)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

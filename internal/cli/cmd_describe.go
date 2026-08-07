@@ -90,7 +90,9 @@ func newDescribeProjectCmd() *cobra.Command {
 func describeNode(w io.Writer, node *v1.Node) {
 	// Basic info
 	printField(w, "Name", node.Name)
+	printField(w, "Namespace", stringOrNone(node.Namespace))
 	printField(w, "Kind", node.Kind)
+	printField(w, "Resource Version", fmt.Sprintf("%d", node.ResourceVersion))
 	printField(w, "Created", formatTimestamp(node.CreatedAt))
 
 	// Labels
@@ -152,7 +154,9 @@ func describeNode(w io.Writer, node *v1.Node) {
 func describeProject(w io.Writer, project *v1.Project) {
 	// Basic info
 	printField(w, "Name", project.Name)
+	printField(w, "Namespace", stringOrNone(project.Namespace))
 	printField(w, "Kind", project.Kind)
+	printField(w, "Resource Version", fmt.Sprintf("%d", project.ResourceVersion))
 	printField(w, "Created", formatTimestamp(project.CreatedAt))
 
 	// Labels

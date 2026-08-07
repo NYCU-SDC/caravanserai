@@ -19,6 +19,16 @@ type ObjectMeta struct {
 	// Name is the unique identifier within its Kind namespace.
 	Name string `json:"name" yaml:"name"`
 
+	// Namespace scopes this resource within its Kind. 1.0 locks every write to
+	// "" or "default" (enforced in ValidateNamespace); see api/v1/validation.go
+	// for the removal pointer once namespaces open up post-1.0.
+	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+
+	// ResourceVersion is set by the server and incremented on every write. It
+	// is currently a pure write-counter; optimistic-concurrency conflict
+	// checking is a separate post-1.0 task.
+	ResourceVersion int64 `json:"resourceVersion,omitempty" yaml:"resourceVersion,omitempty"`
+
 	// Labels are arbitrary key/value pairs used for selection and grouping.
 	Labels map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 
