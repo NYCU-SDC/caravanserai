@@ -35,6 +35,10 @@ const (
 	labelVolume = "cara.volume"
 	// labelVolumeType records that a container carries a Managed volume.
 	labelVolumeType = "cara.volume.type"
+
+	// stopTimeoutSeconds is how long Docker waits for a container to exit
+	// after SIGTERM before killing it.
+	stopTimeoutSeconds = 10
 )
 
 // DockerRuntime is the production implementation of Runtime backed by the
@@ -167,7 +171,7 @@ func (r *DockerRuntime) RemoveProject(ctx context.Context, namespace, projectNam
 	}
 	for _, c := range containers {
 		log.Info("Stopping container", zap.String("id", c.ID[:12]))
-		timeout := 10 // seconds
+		timeout := stopTimeoutSeconds
 		if err := r.client.ContainerStop(ctx, c.ID, container.StopOptions{Timeout: &timeout}); err != nil {
 			log.Warn("Failed to stop container", zap.String("id", c.ID[:12]), zap.Error(err))
 		}
@@ -202,6 +206,50 @@ func (r *DockerRuntime) RemoveProject(ctx context.Context, namespace, projectNam
 	}
 
 	log.Info("Project resources removed")
+	return nil
+}
+
+// StopProject implements Runtime.
+//
+// Services are stopped in reverse spec order so a dependent service goes down
+// before what it depends on — stopping a database out from under a still-live
+// web service invites write errors in the final moments before quiescing.
+func (r *DockerRuntime) StopProject(ctx context.Context, project *v1.Project) error {
+	log := r.logger.With(zap.String("project", project.Name))
+	timeout := stopTimeoutSeconds
+
+	for i := len(project.Spec.Services) - 1; i >= 0; i-- {
+		svc := project.Spec.Services[i]
+		name := ContainerName(project.Name, svc.Name)
+		if err := r.client.ContainerStop(ctx, name, container.StopOptions{Timeout: &timeout}); err != nil {
+			if isNotFound(err) {
+				// Nothing to stop; treat as already satisfied so the caller's
+				// flow is idempotent.
+				continue
+			}
+			return fmt.Errorf("stop container %q: %w", name, err)
+		}
+		log.Debug("Container stopped", zap.String("service", svc.Name))
+	}
+	return nil
+}
+
+// StartProject implements Runtime.
+//
+// Services start in spec order, the mirror of StopProject.
+func (r *DockerRuntime) StartProject(ctx context.Context, project *v1.Project) error {
+	log := r.logger.With(zap.String("project", project.Name))
+
+	for _, svc := range project.Spec.Services {
+		name := ContainerName(project.Name, svc.Name)
+		if err := r.client.ContainerStart(ctx, name, container.StartOptions{}); err != nil {
+			if isNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("start container %q: %w", name, err)
+		}
+		log.Debug("Container started", zap.String("service", svc.Name))
+	}
 	return nil
 }
 

@@ -8,6 +8,8 @@
 //	GET    /api/v1/projects/{name}           — get a single Project
 //	DELETE /api/v1/projects/{name}           — delete a Project (supports ?force=true for immediate hard-delete)
 //	PATCH  /api/v1/projects/{name}/status    — Agent reports observed phase (Running / Failed / Terminated)
+//	PATCH  /api/v1/projects/{name}/conditions/{type}  — Agent sets one condition without touching phase
+//	DELETE /api/v1/projects/{name}/conditions/{type}  — Agent clears one condition
 package project
 
 import (
@@ -55,6 +57,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("GET /api/v1/projects/{name}", mid.HandlerFunc(h.getProject))
 	mux.HandleFunc("DELETE /api/v1/projects/{name}", mid.HandlerFunc(h.deleteProject))
 	mux.HandleFunc("PATCH /api/v1/projects/{name}/status", mid.HandlerFunc(h.patchStatus))
+	mux.HandleFunc("PATCH /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.patchCondition))
+	mux.HandleFunc("DELETE /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.deleteCondition))
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
@@ -569,6 +573,125 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 	logger.Info("Project status patched",
 		zap.String("project", name),
 		zap.String("phase", string(req.Phase)),
+	)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// agentWritableConditions are the condition types an agent may write.
+//
+// Conditions are a shared namespace: Phase, NotReadyAt and TerminatingAt are
+// owned by controllers and drive scheduling decisions. Letting an agent write
+// those through this endpoint would let a buggy or compromised node forge the
+// timers the rescheduler reads, so the endpoint accepts only the conditions
+// agents legitimately own.
+var agentWritableConditions = map[v1.ConditionType]bool{
+	v1.ConditionTypeMaintenance: true,
+}
+
+// conditionPatchRequest is the body sent to
+// PATCH /api/v1/projects/{name}/conditions/{type}.
+type conditionPatchRequest struct {
+	Status  v1.ConditionStatus `json:"status"`
+	Reason  string             `json:"reason,omitempty"`
+	Message string             `json:"message,omitempty"`
+}
+
+// patchCondition handles PATCH /api/v1/projects/{name}/conditions/{type}.
+//
+// It merges exactly one condition without touching phase, which is what lets
+// an agent advertise Maintenance during a backup while the Project stays
+// Running. Reporting the backup by moving the phase instead would unlock the
+// apply and delete paths that are deliberately closed for a Running Project.
+func (h *Handler) patchCondition(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "patchCondition")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
+	name := r.PathValue("name")
+	condType := v1.ConditionType(r.PathValue("type"))
+
+	if !agentWritableConditions[condType] {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("type", string(condType),
+				fmt.Sprintf("condition type %q is not agent-writable", condType)), logger)
+		return
+	}
+
+	var req conditionPatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return
+	}
+
+	switch req.Status {
+	case v1.ConditionTrue, v1.ConditionFalse, v1.ConditionUnknown:
+	default:
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("status", string(req.Status),
+				`status must be "True", "False", or "Unknown"`), logger)
+		return
+	}
+
+	now := time.Now().UTC()
+	condition := v1.Condition{
+		Type:               condType,
+		Status:             req.Status,
+		Reason:             req.Reason,
+		Message:            req.Message,
+		LastHeartbeatTime:  now,
+		LastTransitionTime: now,
+	}
+
+	if err := h.store.PatchProjectCondition(traceCtx, name, condition); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		}
+		logger.Error("PatchProjectCondition failed", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	logger.Info("Project condition patched",
+		zap.String("project", name),
+		zap.String("condition", string(condType)),
+		zap.String("status", string(req.Status)),
+	)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteCondition handles DELETE /api/v1/projects/{name}/conditions/{type}.
+func (h *Handler) deleteCondition(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "deleteCondition")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
+	name := r.PathValue("name")
+	condType := v1.ConditionType(r.PathValue("type"))
+
+	if !agentWritableConditions[condType] {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("type", string(condType),
+				fmt.Sprintf("condition type %q is not agent-writable", condType)), logger)
+		return
+	}
+
+	if err := h.store.ClearProjectCondition(traceCtx, name, condType); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		}
+		logger.Error("ClearProjectCondition failed", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	logger.Info("Project condition cleared",
+		zap.String("project", name),
+		zap.String("condition", string(condType)),
 	)
 	w.WriteHeader(http.StatusNoContent)
 }

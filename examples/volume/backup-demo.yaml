@@ -1,0 +1,39 @@
+# CARA-59 demo: periodic Project-level backup to an S3-compatible store.
+#
+# The interval is deliberately short so a backup happens while you watch.
+# Production should use something like 168h (weekly) — see the ticket's
+# rationale about downtime cost versus RPO.
+#
+# One backup run captures BOTH Managed volumes as a single generation under
+# one backupID, which is the guarantee that a restore can never pair one
+# volume's new archive with another's old one.
+apiVersion: caravanserai/v1
+kind: Project
+metadata:
+  name: backup-demo
+  namespace: default
+spec:
+  services:
+    - name: db
+      image: postgres:17
+      env:
+        - name: POSTGRES_PASSWORD
+          value: demo
+      volumeMounts:
+        - name: db-data
+          mountPath: /var/lib/postgresql/data
+    - name: web
+      image: nginx:alpine
+      volumeMounts:
+        - name: uploads
+          mountPath: /usr/share/nginx/html
+
+  volumes:
+    - name: db-data
+      type: Managed
+    - name: uploads
+      type: Managed
+
+  backup:
+    interval: 1m
+    onMissing: InitializeEmpty

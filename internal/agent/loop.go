@@ -8,10 +8,37 @@ import (
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
 
 	"go.uber.org/zap"
 )
+
+// busyChecker reports whether a Project has an agent-local operation in
+// flight, and lets a caller claim one of its own. Satisfied by
+// *backup.Coordinator.
+//
+// terminateOne claims OpTerminate before tearing down a Project's Docker
+// resources so a backup supervisor tick cannot start mid-teardown: the
+// Coordinator only protects against overlap between operations that actually
+// claim it, and until terminate claimed too, a backup could start while
+// containers were being removed out from under it.
+type busyChecker interface {
+	IsBusy(key backup.ResourceKey) bool
+	TryClaim(key backup.ResourceKey, op backup.Operation) (release func(), ok bool)
+}
+
+// BackupSupport bundles the optional Managed volume backup wiring. It is nil
+// when the agent has no object store configured, in which case the poll loop
+// behaves exactly as it did before backups existed.
+//
+// The two fields travel together by necessity: the Supervisor decides when a
+// backup runs, and the Coordinator is how every other part of the agent
+// learns that one is in progress.
+type BackupSupport struct {
+	Supervisor  *backup.Supervisor
+	Coordinator *backup.Coordinator
+}
 
 // RouteUpdater is the narrow interface consumed by the agent loop to maintain
 // proxy routes.  It is satisfied by *proxy.RouteTable.
@@ -24,11 +51,31 @@ type RouteUpdater interface {
 	Remove(projectName string)
 }
 
+// RunConfig configures Run. Client, Runtime, HeartbeatInterval, and Logger are
+// required; Routes and Backups are optional.
+type RunConfig struct {
+	Client            *Client
+	Runtime           docker.Runtime
+	HeartbeatInterval time.Duration
+	AgentPort         int
+	AdvertiseIP       string
+
+	// Routes maintains proxy routes for projects with ingress definitions.
+	// Nil disables proxy route maintenance.
+	Routes RouteUpdater
+
+	// Backups schedules Managed volume backups per Project and makes the poll
+	// loop skip Projects with an operation in flight. Nil disables backups.
+	Backups *BackupSupport
+
+	Logger *zap.Logger
+}
+
 // Run registers the node with the control-plane and then runs two concurrent
 // loops until ctx is cancelled:
 //
-//  1. Heartbeat loop — sends a heartbeat every heartbeatInterval to keep the
-//     node marked as Ready.
+//  1. Heartbeat loop — sends a heartbeat every cfg.HeartbeatInterval to keep
+//     the node marked as Ready.
 //
 //  2. Project poll loop — every pollInterval, fetches Projects that have been
 //     scheduled onto this node and reconciles them (runs workloads, reports
@@ -37,11 +84,22 @@ type RouteUpdater interface {
 // The initial registration is retried with a fixed 5-second back-off until it
 // succeeds or ctx is cancelled, so that the agent can start before the server
 // is ready.
-//
-// If routes is non-nil, the agent will maintain proxy routes for projects that
-// have ingress definitions.
-func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatInterval time.Duration, agentPort int, advertiseIP string, routes RouteUpdater, logger *zap.Logger) {
+func Run(ctx context.Context, cfg RunConfig) {
 	const pollInterval = 10 * time.Second
+
+	client, runtime, routes, logger := cfg.Client, cfg.Runtime, cfg.Routes, cfg.Logger
+
+	var (
+		supervisor *backup.Supervisor
+		busy       busyChecker
+	)
+	if cfg.Backups != nil {
+		supervisor = cfg.Backups.Supervisor
+		if cfg.Backups.Coordinator != nil {
+			busy = cfg.Backups.Coordinator
+		}
+		defer supervisor.Stop()
+	}
 
 	spec := v1.NodeSpec{
 		Hostname: client.nodeName,
@@ -69,7 +127,7 @@ func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatI
 	bootstrapRunningProjects(ctx, client, runtime, routes, logger)
 
 	// ── Heartbeat loop ────────────────────────────────────────────────────
-	heartbeatTicker := time.NewTicker(heartbeatInterval)
+	heartbeatTicker := time.NewTicker(cfg.HeartbeatInterval)
 	defer heartbeatTicker.Stop()
 
 	// ── Project poll loop ─────────────────────────────────────────────────
@@ -84,7 +142,7 @@ func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatI
 		case <-heartbeatTicker.C:
 			status := v1.NodeStatus{
 				State:   v1.NodeStateReady,
-				Network: heartbeatNetworkStatus(client, agentPort, advertiseIP),
+				Network: heartbeatNetworkStatus(client, cfg.AgentPort, cfg.AdvertiseIP),
 			}
 			if err := client.Heartbeat(ctx, status); err != nil {
 				if errors.Is(err, ErrNodeNotFound) {
@@ -98,7 +156,7 @@ func Run(ctx context.Context, client *Client, runtime docker.Runtime, heartbeatI
 			}
 
 		case <-pollTicker.C:
-			reconcileProjects(ctx, client, runtime, routes, logger)
+			reconcileProjects(ctx, client, runtime, routes, supervisor, busy, logger)
 		}
 	}
 }
@@ -174,11 +232,22 @@ func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docke
 //   - Terminating → tear down containers
 //   - Running → health-check containers
 //   - Scheduled → reconcile (create/start) containers
-func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, logger *zap.Logger) {
+//
+// backups may be nil when the agent has no object store configured. When
+// present it is consulted twice: to skip Projects with an agent-local
+// operation in flight, and to keep the per-Project backup goroutines in step
+// with the Projects this node currently holds.
+func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *backup.Supervisor, busy busyChecker, logger *zap.Logger) {
 	projects, err := client.ListProjectsForReconcile(ctx)
 	if err != nil {
 		logger.Warn("Failed to list projects for reconcile", zap.Error(err))
 		return
+	}
+
+	// Sync before the early return: an empty list means every Project left
+	// this node, and their backup goroutines must be cancelled.
+	if backups != nil {
+		backups.Sync(ctx, projects)
 	}
 
 	if len(projects) == 0 {
@@ -188,9 +257,24 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 	logger.Info("Reconciling projects", zap.Int("count", len(projects)))
 
 	for _, p := range projects {
+		// A Project whose containers are deliberately stopped — for a backup,
+		// a restore, a terminate — must be skipped entirely for this tick: no
+		// health check, no reconcile, no status write. Without this the
+		// health check would see missing containers and report Failed, which
+		// both misreports a healthy service and unlocks apply/delete paths
+		// that are meant to be closed while the Project is Running.
+		if busy != nil {
+			key := backup.ResourceKey{Namespace: p.Namespace, Name: p.Name}
+			if busy.IsBusy(key) {
+				logger.Debug("Skipping project with an operation in flight",
+					zap.String("project", key.String()))
+				continue
+			}
+		}
+
 		switch p.Status.Phase {
 		case v1.ProjectPhaseTerminating:
-			terminateOne(ctx, client, runtime, routes, p, logger)
+			terminateOne(ctx, client, runtime, routes, busy, p, logger)
 		case v1.ProjectPhaseRunning:
 			healthCheckOne(ctx, client, runtime, routes, p, logger)
 		default:
@@ -282,8 +366,26 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 // the server will then perform the final store deletion.
 //
 // Proxy routes are removed after successful teardown.
-func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, p *v1.Project, logger *zap.Logger) {
+func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, busy busyChecker, p *v1.Project, logger *zap.Logger) {
 	log := logger.With(zap.String("project", p.Name))
+
+	// Claim the Project before touching Docker so a backup supervisor tick
+	// cannot start (or continue) mid-teardown. reconcileProjects already
+	// checked IsBusy before dispatching here, but that check and this claim
+	// are not atomic — a backup goroutine can win the race in between, so the
+	// claim can still legitimately fail. Skip this tick rather than tear down
+	// half of what a concurrent backup is reading; the next poll retries.
+	if busy != nil {
+		key := backup.ResourceKey{Namespace: p.Namespace, Name: p.Name}
+		release, ok := busy.TryClaim(key, backup.OpTerminate)
+		if !ok {
+			log.Debug("Deferring termination: project busy with another operation",
+				zap.String("project", key.String()))
+			return
+		}
+		defer release()
+	}
+
 	log.Info("Removing Docker resources for Terminating project")
 
 	if err := runtime.RemoveProject(ctx, p.Namespace, p.Name, p.Spec); err != nil {

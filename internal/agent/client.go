@@ -233,6 +233,97 @@ func (c *Client) ListProjectsForReconcile(ctx context.Context) ([]*v1.Project, e
 	return projects, nil
 }
 
+// ErrProjectNotFound is returned by GetProject when the server responds 404,
+// meaning the Project no longer exists at all.
+var ErrProjectNotFound = errors.New("project not found")
+
+// GetProject fetches a single Project by name. It returns ErrProjectNotFound
+// if the server responds 404, which callers must distinguish from a transport
+// failure: "deleted" and "unreachable" lead to opposite decisions when a
+// backup is deciding whether to restart containers.
+func (c *Client) GetProject(ctx context.Context, name string) (*v1.Project, error) {
+	url := fmt.Sprintf("%s/api/v1/projects/%s", c.serverURL, name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build get project request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get project request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrProjectNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get project: unexpected status %s", resp.Status)
+	}
+
+	var project v1.Project
+	if err := json.NewDecoder(resp.Body).Decode(&project); err != nil {
+		return nil, fmt.Errorf("decode project: %w", err)
+	}
+	return &project, nil
+}
+
+// conditionPatchRequest is the body sent to
+// PATCH /api/v1/projects/{name}/conditions/{type}.
+type conditionPatchRequest struct {
+	Status  v1.ConditionStatus `json:"status"`
+	Reason  string             `json:"reason,omitempty"`
+	Message string             `json:"message,omitempty"`
+}
+
+// PatchProjectCondition sets one condition on a Project without touching its
+// phase. Used to advertise Maintenance during a backup: the Project must stay
+// Running throughout, so the backup cannot report itself by moving the phase.
+func (c *Client) PatchProjectCondition(ctx context.Context, projectName string, condType v1.ConditionType, status v1.ConditionStatus, reason, message string) error {
+	body, err := json.Marshal(conditionPatchRequest{Status: status, Reason: reason, Message: message})
+	if err != nil {
+		return fmt.Errorf("marshal condition patch request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/projects/%s/conditions/%s", c.serverURL, projectName, condType)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build condition patch request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("condition patch request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("patch condition: unexpected status %s", resp.Status)
+	}
+	return nil
+}
+
+// ClearProjectCondition removes one condition from a Project.
+func (c *Client) ClearProjectCondition(ctx context.Context, projectName string, condType v1.ConditionType) error {
+	url := fmt.Sprintf("%s/api/v1/projects/%s/conditions/%s", c.serverURL, projectName, condType)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("build condition delete request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("condition delete request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("clear condition: unexpected status %s", resp.Status)
+	}
+	return nil
+}
+
 // projectStatusRequest is the body sent to PATCH /api/v1/projects/{name}/status.
 type projectStatusRequest struct {
 	Phase   v1.ProjectPhase `json:"phase"`

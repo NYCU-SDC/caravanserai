@@ -10,6 +10,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// secretFileMaxMode is the most permissive mode allowed for a config file that
+// carries S3 credentials: owner read/write only.
+const secretFileMaxMode os.FileMode = 0o600
+
 // AgentConfig holds the runtime configuration for cara-agent.
 // It replaces the listen-address fields with the control-plane server URL that
 // the agent dials out to.
@@ -55,6 +59,62 @@ type AgentConfig struct {
 	// OverlayHostname optionally overrides the hostname the agent registers
 	// with Headscale.  Defaults to NodeName (the OS hostname) when empty.
 	OverlayHostname string `yaml:"overlay_hostname" envconfig:"OVERLAY_HOSTNAME"`
+	// S3 configures the object store used for Managed volume backups.
+	// Leaving Endpoint empty disables backups; see S3Config.
+	S3 S3Config `yaml:"s3"`
+	// InsecureSecretFile names a config file that carries S3 credentials with
+	// permissions wider than 0600.  It is set during loading and turned into a
+	// startup failure by Validate; it is never read from YAML or env.
+	InsecureSecretFile string `yaml:"-"`
+}
+
+// S3Config holds the object-store settings used for Managed volume backups
+// (CARA-59).  Credentials live in the agent config file for 1.0 and will move
+// to Infisical later, so the file must not be readable beyond its owner —
+// Validate rejects a config file carrying SecretKey with permissions wider
+// than 0600.
+//
+// TLS is derived from the Endpoint scheme (https:// enables it, http://
+// disables it) rather than a separate flag, so a single value describes the
+// connection.
+type S3Config struct {
+	Endpoint  string `yaml:"endpoint"`
+	Bucket    string `yaml:"bucket"`
+	Region    string `yaml:"region"`
+	AccessKey string `yaml:"access_key"`
+	SecretKey string `yaml:"secret_key"`
+}
+
+// Enabled reports whether object-store backups are configured.  Managed
+// volumes are provisioned and mounted regardless; only the upload side is
+// gated on this.
+func (s S3Config) Enabled() bool {
+	return s.Endpoint != ""
+}
+
+// mergeS3 overlays the non-empty fields of override onto base.
+//
+// configutil.Merge only walks top-level fields and replaces a struct field
+// wholesale as soon as any part of it is non-zero, so letting it handle S3
+// would let a lone S3_ENDPOINT env var silently wipe the bucket and
+// credentials loaded from file.  S3 is therefore merged field by field.
+func mergeS3(base, override S3Config) S3Config {
+	if override.Endpoint != "" {
+		base.Endpoint = override.Endpoint
+	}
+	if override.Bucket != "" {
+		base.Bucket = override.Bucket
+	}
+	if override.Region != "" {
+		base.Region = override.Region
+	}
+	if override.AccessKey != "" {
+		base.AccessKey = override.AccessKey
+	}
+	if override.SecretKey != "" {
+		base.SecretKey = override.SecretKey
+	}
+	return base
 }
 
 // LoadAgent reads cara-agent config from file → env → flags.
@@ -110,7 +170,35 @@ func AgentFromFile(filePath string, cfg *AgentConfig, logger *LogBuffer) (*Agent
 		return cfg, err
 	}
 
-	return configutil.Merge[AgentConfig](cfg, &fileConfig)
+	// A config file carrying S3 credentials must not be readable by group or
+	// world.  Record the violation rather than failing here: LoadAgent only
+	// warns on file errors, so an error would silently drop the S3 settings
+	// and leave backups disabled without anyone noticing.
+	if fileConfig.S3.SecretKey != "" {
+		info, statErr := file.Stat()
+		if statErr != nil {
+			logger.Warn("Failed to stat config file for permission check", statErr, map[string]string{"path": filePath})
+		} else if info.Mode().Perm()&^secretFileMaxMode != 0 {
+			fileConfig.InsecureSecretFile = filePath
+		}
+	}
+
+	return mergeAgentConfig(cfg, &fileConfig)
+}
+
+// mergeAgentConfig merges override onto cfg via configutil.Merge, then
+// replaces the wholesale-merged S3 field with a field-by-field merge (see
+// mergeS3) so a partially-set override never wipes previously loaded S3
+// settings. Shared by AgentFromFile and AgentFromEnv, the two layers that can
+// each carry a partial S3Config.
+func mergeAgentConfig(cfg, override *AgentConfig) (*AgentConfig, error) {
+	s3 := mergeS3(cfg.S3, override.S3)
+	merged, err := configutil.Merge[AgentConfig](cfg, override)
+	if err != nil {
+		return cfg, err
+	}
+	merged.S3 = s3
+	return merged, nil
 }
 
 func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
@@ -134,6 +222,13 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 		HeadscaleURL:     os.Getenv("HEADSCALE_URL"),
 		PreauthKeyFile:   os.Getenv("HEADSCALE_PREAUTH_KEY_FILE"),
 		OverlayHostname:  os.Getenv("OVERLAY_HOSTNAME"),
+		S3: S3Config{
+			Endpoint:  os.Getenv("S3_ENDPOINT"),
+			Bucket:    os.Getenv("S3_BUCKET"),
+			Region:    os.Getenv("S3_REGION"),
+			AccessKey: os.Getenv("S3_ACCESS_KEY"),
+			SecretKey: os.Getenv("S3_SECRET_KEY"),
+		},
 	}
 
 	if raw := os.Getenv("HEARTBEAT_INTERVAL"); raw != "" {
@@ -144,7 +239,7 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 		}
 	}
 
-	return configutil.Merge[AgentConfig](cfg, envConfig)
+	return mergeAgentConfig(cfg, envConfig)
 }
 
 func AgentFromFlags(cfg *AgentConfig) (*AgentConfig, error) {
