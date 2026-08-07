@@ -8,6 +8,7 @@
 //	GET    /api/v1/nodes/{name}            — get a single Node
 //	DELETE /api/v1/nodes/{name}            — delete a Node
 //	POST   /api/v1/nodes/{name}/heartbeat  — Agent heartbeat (updates status only)
+//	POST   /api/v1/nodes/{name}/probe      — server→agent reachability probe (via agentdialer)
 package node
 
 import (
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/server/agentdialer"
 	"NYCU-SDC/caravanserai/internal/store"
 
 	handlerutil "github.com/NYCU-SDC/summer/pkg/handler"
@@ -35,22 +37,21 @@ type Handler struct {
 	logger        *zap.Logger
 	store         store.NodeStore
 	projectStore  ProjectLister
+	dialer        agentdialer.Dialer
 	tracer        trace.Tracer
 	problemWriter *problem.HttpWriter
 }
 
-// ProjectLister is the narrow interface the node handler needs to check
-// whether any projects are assigned to a node before allowing deletion.
 type ProjectLister interface {
 	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*v1.Project, error)
 }
 
-// NewHandler creates a Node Handler.
-func NewHandler(logger *zap.Logger, s store.NodeStore, ps ProjectLister, pw *problem.HttpWriter) *Handler {
+func NewHandler(logger *zap.Logger, s store.NodeStore, ps ProjectLister, dialer agentdialer.Dialer, pw *problem.HttpWriter) *Handler {
 	return &Handler{
 		logger:        logger,
 		store:         s,
 		projectStore:  ps,
+		dialer:        dialer,
 		tracer:        otel.Tracer("node/handler"),
 		problemWriter: pw,
 	}
@@ -64,6 +65,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("GET /api/v1/nodes/{name}", mid.HandlerFunc(h.getNode))
 	mux.HandleFunc("DELETE /api/v1/nodes/{name}", mid.HandlerFunc(h.deleteNode))
 	mux.HandleFunc("POST /api/v1/nodes/{name}/heartbeat", mid.HandlerFunc(h.heartbeat))
+	mux.HandleFunc("POST /api/v1/nodes/{name}/probe", mid.HandlerFunc(h.probe))
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
@@ -89,6 +91,12 @@ func (h *Handler) createNode(w http.ResponseWriter, r *http.Request) {
 	if err := v1.ValidateName(node.Name); err != nil {
 		h.problemWriter.WriteError(traceCtx, w,
 			handlerutil.NewValidationError("metadata.name", node.Name, err.Error()), logger)
+		return
+	}
+
+	if err := v1.ValidateNamespace(node.Namespace); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.namespace", node.Namespace, err.Error()), logger)
 		return
 	}
 
@@ -135,6 +143,12 @@ func (h *Handler) updateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	node.Name = name
+
+	if err := v1.ValidateNamespace(node.Namespace); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.namespace", node.Namespace, err.Error()), logger)
+		return
+	}
 
 	// TODO: add metadata.resourceVersion / optimistic concurrency in a future PR.
 
@@ -296,9 +310,9 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 		status.State = req.State
 	}
 	// Merge Network field-by-field so that a heartbeat sending only AgentPort
-	// does not clobber a previously-set IP (or vice versa).
-	if req.Network.IP != "" {
-		status.Network.IP = req.Network.IP
+	// does not clobber a previously-set OverlayIP (or vice versa).
+	if req.Network.OverlayIP != "" {
+		status.Network.OverlayIP = req.Network.OverlayIP
 	}
 	if req.Network.DNSName != "" {
 		status.Network.DNSName = req.Network.DNSName

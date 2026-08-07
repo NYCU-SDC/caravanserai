@@ -232,10 +232,12 @@ All endpoints are under `/api/v1/`.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/v1/nodes` | Register a node |
+| `PUT` | `/api/v1/nodes/{name}` | Update a node's spec |
 | `GET` | `/api/v1/nodes` | List all nodes |
 | `GET` | `/api/v1/nodes/{name}` | Get a single node |
 | `DELETE` | `/api/v1/nodes/{name}` | Delete a node |
 | `POST` | `/api/v1/nodes/{name}/heartbeat` | Send a heartbeat |
+| `POST` | `/api/v1/nodes/{name}/probe` | Server-side reachability probe — server dials the agent's `/healthz` via the agent dialer (see `internal/server/agentdialer/`) and reports latency + status. Today this uses the stored `Status.Network.IP`; Headscale/tsnet transport can be injected by follow-up overlay work. Also surfaced as `caractl node probe <name>`. |
 
 ### Projects
 
@@ -255,6 +257,9 @@ All endpoints are under `/api/v1/`.
 # Set up git hooks (run once after cloning)
 make install-hooks
 
+# Start local PostgreSQL and Headscale
+make dev-up
+
 # Run all unit tests
 make test
 
@@ -272,6 +277,61 @@ make -C cmd/caractl    build
 
 The pre-commit hook automatically regenerates `schemas/` when `api/v1/` or
 `cmd/schemagen/` files are staged, so schema files stay in sync with Go types.
+
+### Local Headscale
+
+`make dev-up` starts a development Headscale control plane at
+`http://localhost:8081` using the pinned `headscale/headscale:v0.29.2` image.
+Its config lives in `deploy/dev/headscale/config.yaml`, and its state is stored
+in the `headscale-data` Docker volume. Use `make dev-reset` to wipe that state.
+
+To create a local agent pre-auth key for future overlay work:
+
+```bash
+docker compose exec headscale headscale users create cara-node
+docker compose exec headscale headscale users list
+docker compose exec headscale headscale preauthkeys create \
+  --user <cara-node-id> \
+  --expiration 24h
+```
+
+The `cara-node` user only needs to be created once per Headscale data volume.
+If it already exists, use the numeric ID from `users list`; Headscale v0.29
+does not accept the username in `preauthkeys create --user`.
+
+#### Joining the overlay from cara-agent
+
+Overlay networking is **opt-in**: `cara-agent` joins the Headscale mesh only
+when both a control-plane URL and a pre-auth key file are configured. With
+neither set, the agent runs on the underlay as before.
+
+Write the pre-auth key to a file (never commit it), then start the agent
+pointing at the dev Headscale:
+
+```bash
+docker compose exec headscale headscale preauthkeys create --user 1 --expiration 24h > preauth.key
+
+./bin/cara-agent \
+  --headscale-url http://localhost:8081 \
+  --preauth-key-file ./preauth.key \
+  --proxy-listen-addr 127.0.0.1:8199   # avoid clashing with Headscale on :8081
+```
+
+On startup the agent blocks until Headscale assigns an overlay IP, logs it
+(`Joined Headscale overlay … overlay_ip=100.64.0.x`), and registers as a node
+you can see with `docker compose exec headscale headscale nodes list`. A join
+failure caused by a bad/expired key fails fast with a readable error; the agent
+never silently falls back to the underlay once overlay is requested.
+
+| Setting | Flag | Env / YAML | Notes |
+|---|---|---|---|
+| Control-plane URL | `--headscale-url` | `HEADSCALE_URL` / `headscale_url` | Enables overlay when set |
+| Pre-auth key file | `--preauth-key-file` | `HEADSCALE_PREAUTH_KEY_FILE` / `preauth_key_file` | Path to a file holding the key; the key is never logged |
+| Overlay hostname | `--overlay-hostname` | `OVERLAY_HOSTNAME` / `overlay_hostname` | Optional; defaults to the node name |
+
+> The dev Headscale listens on host port `8081`, which is also the agent
+> ingress proxy's default. Pass `--proxy-listen-addr` (as above) when running an
+> agent on the same host.
 
 ### Docker resource naming
 
