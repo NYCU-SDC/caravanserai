@@ -26,8 +26,8 @@ func (NetworkMode) JSONSchema() *jsonschema.Schema {
 
 // NodeNetworkStatus reports the overlay-network state of a Node.
 type NodeNetworkStatus struct {
-	// IP is the Headscale-assigned overlay IP (e.g. "100.64.0.5").
-	IP string `json:"ip,omitempty" yaml:"ip,omitempty"`
+	// OverlayIP is the Headscale-assigned overlay IP (e.g. "100.64.0.5").
+	OverlayIP string `json:"overlayIP,omitempty" yaml:"overlayIP,omitempty"`
 
 	// DNSName is the MagicDNS FQDN for service discovery.
 	DNSName string `json:"dnsName,omitempty" yaml:"dnsName,omitempty"`

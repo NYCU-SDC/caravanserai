@@ -5,18 +5,19 @@ description: Start the full Caravanserai development environment (PostgreSQL, ca
 
 ## Components
 
-Three processes must start in this order:
+Four components must start in this order:
 
 1. PostgreSQL 16 — Docker container via `docker-compose.yaml`
-2. cara-server — control-plane API (depends on PostgreSQL)
-3. cara-agent — Docker reconciler (depends on cara-server)
+2. Headscale v0.29.2 — Docker container via `docker-compose.yaml`
+3. cara-server — control-plane API (depends on PostgreSQL)
+4. cara-agent — Docker reconciler (depends on cara-server)
 
 ## Startup procedure
 
 Run all server/agent processes in the background with logs redirected to files.
 
 ```bash
-# 1. Start PostgreSQL (blocks until healthy)
+# 1. Start PostgreSQL and Headscale (blocks until healthy)
 make dev-up
 
 # 2. Build all binaries
@@ -50,13 +51,37 @@ sleep 5
 
 The agent logs `Failed to load agent config from file: open config.yaml: no such file or directory` on startup. This is expected — it falls back to `.env` and environment variables. Do not treat this as an error.
 
+## Local Headscale
+
+The development compose stack exposes Headscale at `http://localhost:8081` and
+stores its state in the `headscale-data` Docker volume. `make dev-down`
+preserves that state; `make dev-reset` removes it.
+
+Create the Headscale user and a one-shot pre-auth key for a future local
+`cara-agent` overlay join with:
+
+```bash
+docker compose exec headscale headscale users create cara-node
+docker compose exec headscale headscale users list
+docker compose exec headscale headscale preauthkeys create \
+  --user <cara-node-id> \
+  --expiration 24h
+```
+
+The `cara-node` user only needs to be created once per Headscale data volume;
+if it already exists, use `users list` to find its ID. `cara-node` is the dev
+equivalent of the overlay design's worker-node identity group. In Headscale
+v0.29, `preauthkeys create --user` expects the numeric user ID shown by
+`users list`, not the username. Because `--reusable` is omitted, the generated
+key is one-shot. CARA-55 will teach `cara-agent` how to consume this key.
+
 ## Shutdown procedure
 
 ```bash
 kill $(pgrep -f "bin/cara-agent") 2>/dev/null
 kill $(pgrep -f "bin/cara-server") 2>/dev/null
-make dev-down      # stop PostgreSQL, preserve data
-# or: make dev-reset  # stop PostgreSQL AND wipe all data
+make dev-down      # stop PostgreSQL + Headscale, preserve data
+# or: make dev-reset  # stop services AND wipe PostgreSQL + Headscale data
 ```
 
 ## Checking logs
@@ -78,7 +103,7 @@ tail -30 /tmp/cara-agent.log
 
 - Docker daemon running (`docker ps` must succeed)
 - Go 1.22+
-- Ports 5432, 8080, and 9090 free
+- Ports 5432, 8080, 8081, and 9090 free
 - `.env` at project root contains:
   ```
   DEBUG=true
@@ -88,6 +113,7 @@ tail -30 /tmp/cara-agent.log
 ## Troubleshooting
 
 - Port 5432 occupied → `docker compose down` then retry `make dev-up`
+- Port 8081 occupied → stop the process using it, then retry `make dev-up`
 - Port 8080 occupied → `kill $(lsof -ti :8080)` then restart cara-server
 - Port 9090 occupied → `kill $(lsof -ti :9090)` then restart cara-agent
 - Agent cannot reach Docker → verify `docker ps` succeeds; if non-default socket, set `DOCKER_HOST`

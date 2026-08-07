@@ -141,11 +141,8 @@ func Run(ctx context.Context, cfg RunConfig) {
 
 		case <-heartbeatTicker.C:
 			status := v1.NodeStatus{
-				State: v1.NodeStateReady,
-				Network: v1.NodeNetworkStatus{
-					IP:        cfg.AdvertiseIP,
-					AgentPort: cfg.AgentPort,
-				},
+				State:   v1.NodeStateReady,
+				Network: heartbeatNetworkStatus(client, cfg.AgentPort, cfg.AdvertiseIP),
 			}
 			if err := client.Heartbeat(ctx, status); err != nil {
 				if errors.Is(err, ErrNodeNotFound) {
@@ -161,6 +158,17 @@ func Run(ctx context.Context, cfg RunConfig) {
 		case <-pollTicker.C:
 			reconcileProjects(ctx, client, runtime, routes, supervisor, busy, logger)
 		}
+	}
+}
+
+func heartbeatNetworkStatus(client *Client, agentPort int, advertiseIP string) v1.NodeNetworkStatus {
+	overlayIP := client.OverlayIP()
+	if overlayIP == "" {
+		overlayIP = advertiseIP
+	}
+	return v1.NodeNetworkStatus{
+		OverlayIP: overlayIP,
+		AgentPort: agentPort,
 	}
 }
 

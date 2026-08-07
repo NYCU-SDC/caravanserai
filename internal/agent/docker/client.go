@@ -123,6 +123,11 @@ type volumeRemovalPlan struct {
 	removeNamedVolumes []string
 	// retainedManagedPaths are host directories left in place on disk.
 	retainedManagedPaths []string
+	// pathErrors holds a HostPath derivation failure per volume that could not
+	// be resolved (should not happen for names that already passed
+	// v1.ValidateName at create time, but the caller still needs to know so it
+	// can log instead of silently skipping the retention log line).
+	pathErrors []error
 }
 
 // planVolumeRemoval decides the fate of each volume without touching Docker or
@@ -139,9 +144,13 @@ func planVolumeRemoval(dataRoot, namespace, projectName string, vols []v1.Volume
 		case v1.VolumeTypeManaged:
 			// Retain the host data; sweep any pre-CARA-66 orphan named volume.
 			plan.removeNamedVolumes = append(plan.removeNamedVolumes, named)
-			if hostPath, err := caravolume.HostPath(dataRoot, namespace, projectName, vol.Name); err == nil {
-				plan.retainedManagedPaths = append(plan.retainedManagedPaths, hostPath)
+			hostPath, err := caravolume.HostPath(dataRoot, namespace, projectName, vol.Name)
+			if err != nil {
+				plan.pathErrors = append(plan.pathErrors,
+					fmt.Errorf("derive host path for volume %q: %w", vol.Name, err))
+				continue
 			}
+			plan.retainedManagedPaths = append(plan.retainedManagedPaths, hostPath)
 		}
 	}
 	return plan
@@ -184,6 +193,9 @@ func (r *DockerRuntime) RemoveProject(ctx context.Context, namespace, projectNam
 		// Managed data is retained on delete — a `caractrl delete` typo must not
 		// destroy a database. Log the host path so an operator can reclaim it.
 		log.Info("Retaining managed volume data on host", zap.String("path", path))
+	}
+	for _, pathErr := range plan.pathErrors {
+		log.Warn("Failed to derive managed volume host path; its data may be orphaned on disk", zap.Error(pathErr))
 	}
 	for _, vName := range plan.removeNamedVolumes {
 		if err := r.client.VolumeRemove(ctx, vName, false); err != nil {
@@ -329,7 +341,7 @@ func (r *DockerRuntime) ensureVolumes(ctx context.Context, namespace, projectNam
 				return err
 			}
 		case v1.VolumeTypeEphemeral:
-			if err := r.ensureEphemeralVolume(ctx, projectName, vol.Name); err != nil {
+			if err := r.ensureEphemeralVolume(ctx, namespace, projectName, vol.Name); err != nil {
 				return err
 			}
 		default:
@@ -370,7 +382,7 @@ func (r *DockerRuntime) ensureManagedDir(namespace, projectName, volumeName stri
 
 // ensureEphemeralVolume creates the Docker named volume for an Ephemeral volume
 // if it does not already exist.
-func (r *DockerRuntime) ensureEphemeralVolume(ctx context.Context, projectName, volumeName string) error {
+func (r *DockerRuntime) ensureEphemeralVolume(ctx context.Context, namespace, projectName, volumeName string) error {
 	vName := VolumeName(projectName, volumeName)
 	_, err := r.client.VolumeInspect(ctx, vName)
 	if err == nil {
@@ -382,8 +394,13 @@ func (r *DockerRuntime) ensureEphemeralVolume(ctx context.Context, projectName, 
 	}
 
 	if _, err := r.client.VolumeCreate(ctx, volume.CreateOptions{
-		Name:   vName,
-		Labels: map[string]string{labelProject: projectName},
+		Name: vName,
+		Labels: map[string]string{
+			labelProject:    projectName,
+			labelNamespace:  namespace,
+			labelVolume:     volumeName,
+			labelVolumeType: string(v1.VolumeTypeEphemeral),
+		},
 	}); err != nil {
 		return fmt.Errorf("create volume %q: %w", vName, err)
 	}
@@ -482,11 +499,11 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 	}
 
 	labels := map[string]string{
-		labelProject: projectName,
-		labelService: svc.Name,
+		labelProject:   projectName,
+		labelService:   svc.Name,
+		labelNamespace: namespace,
 	}
 	if len(managedNames) > 0 {
-		labels[labelNamespace] = namespace
 		labels[labelVolume] = strings.Join(managedNames, ",")
 		labels[labelVolumeType] = string(v1.VolumeTypeManaged)
 	}
