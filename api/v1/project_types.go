@@ -122,9 +122,11 @@ type ServiceDef struct {
 type VolumeType string
 
 const (
-	//// VolumeTypeManaged means Caravanserai owns the full lifecycle:
-	//// provisioning, backup, restore, and deletion.
-	//VolumeTypeManaged VolumeType = "Managed"
+	// VolumeTypeManaged means Caravanserai owns the full lifecycle:
+	// provisioning, backup, restore, and deletion. The agent derives the
+	// host bind directory from (namespace, project, volume); it is never
+	// user-supplied.
+	VolumeTypeManaged VolumeType = "Managed"
 
 	// VolumeTypeEphemeral means the volume is discarded when the Project
 	// is stopped or moved. No backup or restore occurs.
@@ -139,8 +141,27 @@ const (
 func (VolumeType) JSONSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type:        "string",
-		Enum:        []any{string(VolumeTypeEphemeral)},
+		Enum:        []any{string(VolumeTypeManaged), string(VolumeTypeEphemeral)},
 		Description: "Governs the lifecycle and backup behaviour of a Volume.",
+	}
+}
+
+// VolumeOnMissing selects what the agent does when a Managed volume has no
+// backup in the object store at restore time.
+type VolumeOnMissing string
+
+const (
+	// VolumeOnMissingInitializeEmpty starts the Project with a freshly
+	// created empty volume directory when no backup exists.
+	VolumeOnMissingInitializeEmpty VolumeOnMissing = "InitializeEmpty"
+)
+
+// JSONSchema returns a JSON Schema with the allowed VolumeOnMissing values.
+func (VolumeOnMissing) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Enum:        []any{string(VolumeOnMissingInitializeEmpty)},
+		Description: "What to do when a Managed volume has no backup at restore time.",
 	}
 }
 
@@ -194,6 +215,24 @@ type IngressDef struct {
 	Access IngressAccess `json:"access,omitempty" yaml:"access,omitempty"`
 }
 
+// ProjectBackupConfig configures periodic object-store backup of a Project's
+// Managed volumes.
+//
+// The policy lives on the Project rather than on individual volumes because a
+// backup run is a single generation: the whole Project is stopped and every
+// Managed volume is captured and committed together. Per-volume intervals
+// could not be honoured without producing generations whose volumes are from
+// different points in time — exactly what stopping the whole Project avoids.
+type ProjectBackupConfig struct {
+	// Interval is the time between backup runs, e.g. "168h", "1h". Parsed with
+	// time.ParseDuration; must be positive.
+	Interval string `json:"interval" yaml:"interval"`
+
+	// OnMissing selects behaviour when no backup exists at restore time.
+	// Defaults to InitializeEmpty when empty.
+	OnMissing VolumeOnMissing `json:"onMissing,omitempty" yaml:"onMissing,omitempty"`
+}
+
 // ProjectSpec is the desired state declared by the user.
 type ProjectSpec struct {
 	// Services is the ordered list of containers to run.
@@ -201,6 +240,11 @@ type ProjectSpec struct {
 
 	// Volumes are named storage units shared across services.
 	Volumes []VolumeDef `json:"volumes,omitempty" yaml:"volumes,omitempty"`
+
+	// Backup configures periodic backup of every Managed volume in this
+	// Project. Omitting it means the volumes persist on the node but are
+	// never uploaded.
+	Backup *ProjectBackupConfig `json:"backup,omitempty" yaml:"backup,omitempty"`
 
 	// Ingress defines public or internal HTTP routing rules.
 	Ingress []IngressDef `json:"ingress,omitempty" yaml:"ingress,omitempty"`

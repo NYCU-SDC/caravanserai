@@ -649,6 +649,90 @@ func (s *Store) UpdateProjectStatus(ctx context.Context, name string, status v1.
 	return nil
 }
 
+// conditionsExcludingType is a SQL expression yielding a Project's
+// status.conditions array with any entry of type $4 removed. It is the shared
+// half of both the merge and clear paths below.
+const conditionsExcludingType = `COALESCE(
+		(SELECT jsonb_agg(c)
+		 FROM jsonb_array_elements(COALESCE(status->'conditions', '[]'::jsonb)) c
+		 WHERE c->>'type' <> $4),
+		'[]'::jsonb)`
+
+// PatchProjectCondition implements store.ProjectStore.
+//
+// It replaces exactly one named condition inside status.conditions, leaving
+// phase and every other status field untouched. The merge happens inside a
+// single UPDATE rather than as a read-modify-write in Go: the agent writes
+// Maintenance while controllers concurrently write nodeRef and phase onto the
+// same row, and reading the whole status object to rewrite it would silently
+// discard whichever write landed in between.
+//
+// A patch that would not change the stored status is a no-op: no version
+// bump, and no event. Otherwise a backup that re-asserted the same condition
+// would wake every subscriber for nothing.
+func (s *Store) PatchProjectCondition(ctx context.Context, name string, condition v1.Condition) error {
+	raw, err := json.Marshal([]v1.Condition{condition})
+	if err != nil {
+		return fmt.Errorf("postgres: marshal condition: %w", err)
+	}
+
+	newStatus := fmt.Sprintf("jsonb_set(status, '{conditions}', %s || $5::jsonb)", conditionsExcludingType)
+	query := fmt.Sprintf(`
+		UPDATE resources
+		SET status = %s, updated_at = $6, resource_version = resource_version + 1
+		WHERE kind = $1 AND namespace = $2 AND name = $3
+		  AND status IS DISTINCT FROM %s`, newStatus, newStatus)
+
+	tag, err := s.pool.Exec(ctx, query,
+		kindProject, defaultNamespace, name, string(condition.Type), raw, time.Now().UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: patch project condition %q: %w", name, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return s.conditionPatchNoOp(ctx, name)
+	}
+
+	s.publish(event.TopicProjectUpdated, name)
+	return nil
+}
+
+// ClearProjectCondition implements store.ProjectStore.
+//
+// It removes the named condition, again without touching phase or any other
+// status field, and is a no-op when the condition is already absent.
+func (s *Store) ClearProjectCondition(ctx context.Context, name string, conditionType v1.ConditionType) error {
+	newStatus := fmt.Sprintf("jsonb_set(status, '{conditions}', %s)", conditionsExcludingType)
+	query := fmt.Sprintf(`
+		UPDATE resources
+		SET status = %s, updated_at = $5, resource_version = resource_version + 1
+		WHERE kind = $1 AND namespace = $2 AND name = $3
+		  AND status IS DISTINCT FROM %s`, newStatus, newStatus)
+
+	tag, err := s.pool.Exec(ctx, query,
+		kindProject, defaultNamespace, name, string(conditionType), time.Now().UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: clear project condition %q: %w", name, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return s.conditionPatchNoOp(ctx, name)
+	}
+
+	s.publish(event.TopicProjectUpdated, name)
+	return nil
+}
+
+// conditionPatchNoOp resolves the two reasons a condition patch can affect no
+// rows: the Project does not exist, or the patch changed nothing. Only the
+// former is an error.
+func (s *Store) conditionPatchNoOp(ctx context.Context, name string) error {
+	if _, err := s.getProject(ctx, name); err != nil {
+		return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+	}
+	return nil
+}
+
 // UpdateProjectSpec implements store.ProjectStore.
 // Only the spec, labels, annotations, and updated_at columns are written;
 // status and phase are untouched. The update is only allowed when the

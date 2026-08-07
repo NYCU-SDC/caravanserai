@@ -47,14 +47,29 @@ type Runtime interface {
 
 	// RemoveProject tears down all resources that were created for the project:
 	// containers (stop + remove), the bridge network, and Ephemeral volumes.
-	// It is safe to call even if the project was only partially created.
-	RemoveProject(ctx context.Context, projectName string, spec v1.ProjectSpec) error
+	// Managed volume host directories are deliberately retained; their paths are
+	// logged so an operator can reclaim them. namespace is needed to locate
+	// those directories. It is safe to call even if the project was only
+	// partially created.
+	RemoveProject(ctx context.Context, namespace, projectName string, spec v1.ProjectSpec) error
 
 	// InspectProject returns the current state of every service container for
 	// the project.  If a container for a service does not exist yet, it is
 	// omitted from the returned slice (the caller can detect this by comparing
 	// len(result) with len(project.Spec.Services)).
 	InspectProject(ctx context.Context, project *v1.Project) ([]ContainerState, error)
+
+	// StopProject stops every service container without removing it, so the
+	// containers can be started again by StartProject.  Containers are stopped
+	// in reverse spec order, so a service is stopped before whatever it
+	// depends on.  Used by the backup flow, which needs the volumes quiesced
+	// but the containers intact.  Missing containers are not an error.
+	StopProject(ctx context.Context, project *v1.Project) error
+
+	// StartProject starts every existing service container in spec order,
+	// undoing StopProject.  It does not create missing containers — that is
+	// ReconcileProject's job.  Missing containers are not an error.
+	StartProject(ctx context.Context, project *v1.Project) error
 
 	// GetContainerIPs returns a map of serviceName → IP address for each
 	// service container in the project. The IP is read from the container's

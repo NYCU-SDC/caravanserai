@@ -1,10 +1,11 @@
-# Development-only: provides PostgreSQL for cara-server.
+# Development-only: provides PostgreSQL for cara-server and a local
+# Headscale control plane for overlay-networking work.
 # Server and agent are built and run locally via Makefile targets.
 #
 # Usage:
-#   docker compose up -d        # start PostgreSQL
+#   docker compose up -d        # start PostgreSQL + Headscale
 #   docker compose down         # stop (preserves data)
-#   docker compose down -v      # stop and wipe data volume
+#   docker compose down -v      # stop and wipe data volumes
 
 services:
   postgres:
@@ -23,5 +24,22 @@ services:
       timeout: 5s
       retries: 10
 
+  headscale:
+    image: headscale/headscale:v0.29.2
+    command: serve
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./deploy/dev/headscale/config.yaml:/etc/headscale/config.yaml:ro
+      - headscale-data:/var/lib/headscale
+      - headscale-run:/var/run/headscale
+    healthcheck:
+      test: ["CMD", "headscale", "health"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
 volumes:
   pgdata:
+  headscale-data:
+  headscale-run:

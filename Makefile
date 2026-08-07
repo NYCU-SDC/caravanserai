@@ -47,10 +47,10 @@ schemas:
 		|| (echo -e "==> $(RED)Schema generation failed$(NC)" && exit 1)
 
 dev-up:
-	@echo -e ":: $(GREEN)Starting development PostgreSQL...$(NC)"
+	@echo -e ":: $(GREEN)Starting development services (PostgreSQL + Headscale)...$(NC)"
 	@docker compose up -d --wait \
-		&& echo -e "==> $(BLUE)PostgreSQL is ready$(NC)" \
-		|| (echo -e "==> $(RED)Failed to start PostgreSQL$(NC)" && exit 1)
+		&& echo -e "==> $(BLUE)Development services are ready$(NC)" \
+		|| (echo -e "==> $(RED)Failed to start development services$(NC)" && exit 1)
 
 dev-down:
 	@echo -e ":: $(GREEN)Stopping development services...$(NC)"

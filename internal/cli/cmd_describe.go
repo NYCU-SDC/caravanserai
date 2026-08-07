@@ -148,7 +148,7 @@ func describeNode(w io.Writer, node *v1.Node) {
 	// Network
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Network:")
-	printField(w, "  IP", stringOrNone(node.Status.Network.IP))
+	printField(w, "  Overlay IP", stringOrNone(node.Status.Network.OverlayIP))
 	printField(w, "  DNS Name", stringOrNone(node.Status.Network.DNSName))
 	printField(w, "  Mode", stringOrNone(string(node.Status.Network.Mode)))
 	if node.Status.Network.AgentPort != 0 {
@@ -229,6 +229,20 @@ func describeProject(w io.Writer, project *v1.Project) {
 			fmt.Fprintf(w, "    - Name:   %s\n", vol.Name)
 			fmt.Fprintf(w, "      Type:   %s\n", vol.Type)
 		}
+	}
+
+	// Backup
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  Backup:")
+	if project.Spec.Backup == nil {
+		fmt.Fprintln(w, "    <none>")
+	} else {
+		printField(w, "    Interval", stringOrNone(project.Spec.Backup.Interval))
+		onMissing := string(project.Spec.Backup.OnMissing)
+		if onMissing == "" {
+			onMissing = string(v1.VolumeOnMissingInitializeEmpty) + " (default)"
+		}
+		printField(w, "    On Missing", onMissing)
 	}
 
 	// Ingress

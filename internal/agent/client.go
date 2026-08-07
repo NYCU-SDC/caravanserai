@@ -25,17 +25,16 @@ import (
 // indicating the node no longer exists and should re-register.
 var ErrNodeNotFound = errors.New("node not found")
 
-// ErrSecretNotFound is returned by GetSecret when the server responds with
-// 404. resolveSecrets treats this as a terminal condition for the project
-// (Failed, no retry at this layer) rather than a transient fetch error.
-var ErrSecretNotFound = errors.New("secret not found")
-
 // Client is an HTTP client for the cara-server node API.
 type Client struct {
 	serverURL  string
 	nodeName   string
 	httpClient *http.Client
 	logger     *zap.Logger
+
+	// overlayIP is the Headscale-assigned overlay IP set after the agent
+	// joins the overlay network.  Empty when overlay networking is disabled.
+	overlayIP string
 }
 
 // NewClient creates a Client that will identify itself as nodeName and dial
@@ -51,6 +50,18 @@ func NewClient(logger *zap.Logger, serverURL, nodeName string) *Client {
 	}
 }
 
+// SetOverlayIP records the overlay IP assigned to this agent after joining the
+// Headscale overlay network.
+func (c *Client) SetOverlayIP(ip string) {
+	c.overlayIP = ip
+}
+
+// OverlayIP returns the overlay IP recorded by SetOverlayIP, or the empty
+// string when overlay networking is disabled.
+func (c *Client) OverlayIP() string {
+	return c.overlayIP
+}
+
 // Register calls POST /api/v1/nodes to self-register the node.
 // If the node already exists (HTTP 409) the call is treated as a no-op.
 func (c *Client) Register(ctx context.Context, spec v1.NodeSpec) error {
@@ -58,6 +69,9 @@ func (c *Client) Register(ctx context.Context, spec v1.NodeSpec) error {
 		TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Node"},
 		ObjectMeta: v1.ObjectMeta{Name: c.nodeName},
 		Spec:       spec,
+		Status: v1.NodeStatus{
+			Network: v1.NodeNetworkStatus{OverlayIP: c.overlayIP},
+		},
 	}
 
 	body, err := json.Marshal(node)
@@ -84,6 +98,13 @@ func (c *Client) Register(ctx context.Context, spec v1.NodeSpec) error {
 		return nil
 	case http.StatusConflict:
 		c.logger.Info("Node already registered, continuing", zap.String("node", c.nodeName))
+		if c.overlayIP != "" {
+			if err := c.Heartbeat(ctx, v1.NodeStatus{
+				Network: v1.NodeNetworkStatus{OverlayIP: c.overlayIP},
+			}); err != nil {
+				return fmt.Errorf("refresh overlay address after register conflict: %w", err)
+			}
+		}
 		return nil
 	default:
 		return fmt.Errorf("register: unexpected status %s", resp.Status)
@@ -103,9 +124,14 @@ type heartbeatRequest struct {
 // Passing an empty NodeStatus is valid — the server will update only the
 // LastHeartbeat timestamp.
 func (c *Client) Heartbeat(ctx context.Context, status v1.NodeStatus) error {
+	network := status.Network
+	if network.OverlayIP == "" {
+		network.OverlayIP = c.overlayIP
+	}
+
 	req := heartbeatRequest{
 		State:       status.State,
-		Network:     status.Network,
+		Network:     network,
 		Capacity:    status.Capacity,
 		Allocatable: status.Allocatable,
 	}
@@ -207,35 +233,95 @@ func (c *Client) ListProjectsForReconcile(ctx context.Context) ([]*v1.Project, e
 	return projects, nil
 }
 
-// GetSecret fetches a single Secret by name via GET /api/v1/secrets/{name}.
-// The returned Secret carries plaintext values; they must stay in process
-// memory only — never written to disk or logs (see CARA-57 memory-only rule).
-// Returns ErrSecretNotFound when the server responds with 404.
-func (c *Client) GetSecret(ctx context.Context, name string) (*v1.Secret, error) {
-	url := fmt.Sprintf("%s/api/v1/secrets/%s", c.serverURL, name)
+// ErrProjectNotFound is returned by GetProject when the server responds 404,
+// meaning the Project no longer exists at all.
+var ErrProjectNotFound = errors.New("project not found")
+
+// GetProject fetches a single Project by name. It returns ErrProjectNotFound
+// if the server responds 404, which callers must distinguish from a transport
+// failure: "deleted" and "unreachable" lead to opposite decisions when a
+// backup is deciding whether to restart containers.
+func (c *Client) GetProject(ctx context.Context, name string) (*v1.Project, error) {
+	url := fmt.Sprintf("%s/api/v1/projects/%s", c.serverURL, name)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build get secret request: %w", err)
+		return nil, fmt.Errorf("build get project request: %w", err)
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("get secret request: %w", err)
+		return nil, fmt.Errorf("get project request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s", ErrSecretNotFound, name)
+		return nil, ErrProjectNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get secret %q: unexpected status %s", name, resp.Status)
+		return nil, fmt.Errorf("get project: unexpected status %s", resp.Status)
 	}
 
-	var secret v1.Secret
-	if err := json.NewDecoder(resp.Body).Decode(&secret); err != nil {
-		return nil, fmt.Errorf("decode secret %q: %w", name, err)
+	var project v1.Project
+	if err := json.NewDecoder(resp.Body).Decode(&project); err != nil {
+		return nil, fmt.Errorf("decode project: %w", err)
 	}
-	return &secret, nil
+	return &project, nil
+}
+
+// conditionPatchRequest is the body sent to
+// PATCH /api/v1/projects/{name}/conditions/{type}.
+type conditionPatchRequest struct {
+	Status  v1.ConditionStatus `json:"status"`
+	Reason  string             `json:"reason,omitempty"`
+	Message string             `json:"message,omitempty"`
+}
+
+// PatchProjectCondition sets one condition on a Project without touching its
+// phase. Used to advertise Maintenance during a backup: the Project must stay
+// Running throughout, so the backup cannot report itself by moving the phase.
+func (c *Client) PatchProjectCondition(ctx context.Context, projectName string, condType v1.ConditionType, status v1.ConditionStatus, reason, message string) error {
+	body, err := json.Marshal(conditionPatchRequest{Status: status, Reason: reason, Message: message})
+	if err != nil {
+		return fmt.Errorf("marshal condition patch request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/projects/%s/conditions/%s", c.serverURL, projectName, condType)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build condition patch request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("condition patch request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("patch condition: unexpected status %s", resp.Status)
+	}
+	return nil
+}
+
+// ClearProjectCondition removes one condition from a Project.
+func (c *Client) ClearProjectCondition(ctx context.Context, projectName string, condType v1.ConditionType) error {
+	url := fmt.Sprintf("%s/api/v1/projects/%s/conditions/%s", c.serverURL, projectName, condType)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("build condition delete request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("condition delete request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("clear condition: unexpected status %s", resp.Status)
+	}
+	return nil
 }
 
 // projectStatusRequest is the body sent to PATCH /api/v1/projects/{name}/status.
@@ -281,4 +367,40 @@ func (c *Client) UpdateProjectStatus(ctx context.Context, projectName string, ph
 		zap.String("phase", string(phase)),
 	)
 	return nil
+}
+
+// ErrSecretNotFound is returned by GetSecret when the server responds with
+// 404. resolveSecrets treats this as a terminal condition for the project
+// (Failed, no retry at this layer) rather than a transient fetch error.
+var ErrSecretNotFound = errors.New("secret not found")
+
+// GetSecret fetches a single Secret by name via GET /api/v1/secrets/{name}.
+// The returned Secret carries plaintext values; they must stay in process
+// memory only — never written to disk or logs (see CARA-57 memory-only rule).
+// Returns ErrSecretNotFound when the server responds with 404.
+func (c *Client) GetSecret(ctx context.Context, name string) (*v1.Secret, error) {
+	url := fmt.Sprintf("%s/api/v1/secrets/%s", c.serverURL, name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build get secret request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get secret request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("%w: %s", ErrSecretNotFound, name)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get secret %q: unexpected status %s", name, resp.Status)
+	}
+
+	var secret v1.Secret
+	if err := json.NewDecoder(resp.Body).Decode(&secret); err != nil {
+		return nil, fmt.Errorf("decode secret %q: %w", name, err)
+	}
+	return &secret, nil
 }
