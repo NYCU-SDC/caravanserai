@@ -8,7 +8,10 @@ spec:
       image: mysql:8
       env:
         - name: MYSQL_ROOT_PASSWORD
-          value: "secret"
+          valueFrom:
+            secretKeyRef:            # apply examples/secret.yaml first
+              name: wordpress-creds
+              key: db-root-password
         - name: MYSQL_DATABASE
           value: "wp"
       volumeMounts:
@@ -20,7 +23,10 @@ spec:
         - name: WORDPRESS_DB_HOST
           value: db          # resolves via the shared bridge network
         - name: WORDPRESS_DB_PASSWORD
-          value: "secret"
+          valueFrom:
+            secretKeyRef:
+              name: wordpress-creds
+              key: db-root-password
         - name: WORDPRESS_DB_NAME
           value: "wp"
   volumes:

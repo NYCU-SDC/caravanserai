@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,6 +15,11 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// errSecretKeyNotFound is returned by resolveSecrets when a referenced Secret
+// exists but does not contain the requested key. Like ErrSecretNotFound this
+// is terminal for the project (Failed, no retry at this layer).
+var errSecretKeyNotFound = errors.New("secret key not found")
 
 // busyChecker reports whether a Project has an agent-local operation in
 // flight, and lets a caller claim one of its own. Satisfied by
@@ -352,7 +358,25 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 		return
 	}
 
-	// Some containers are missing or not running — reconcile.
+	// Some containers are missing or not running — resolve secret references,
+	// then reconcile. The runtime only ever sees the resolved copy.
+	resolved, err := resolveSecrets(ctx, client, p)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSecretNotFound):
+			log.Warn("Referenced secret does not exist", zap.Error(err))
+			_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "SecretNotFound", err.Error())
+		case errors.Is(err, errSecretKeyNotFound):
+			log.Warn("Referenced secret key does not exist", zap.Error(err))
+			_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "SecretKeyNotFound", err.Error())
+		default:
+			// Transient fetch failure (network, 5xx): do not fail the
+			// project — skip this tick and retry on the next poll.
+			log.Warn("Failed to fetch referenced secrets, will retry next poll", zap.Error(err))
+		}
+		return
+	}
+
 	log.Info("Reconciling project containers",
 		zap.Int("running", runningCount),
 		zap.Int("expected", len(p.Spec.Services)),
@@ -377,7 +401,7 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 		}
 	}
 
-	if err := runtime.ReconcileProject(ctx, p); err != nil {
+	if err := runtime.ReconcileProject(ctx, resolved); err != nil {
 		log.Error("Failed to reconcile project", zap.Error(err))
 		_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "ReconcileError", err.Error())
 		return
@@ -392,6 +416,86 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	}
 
 	updateProxyRoutes(ctx, runtime, routes, p, log)
+}
+
+// resolveSecrets replaces every EnvVar.valueFrom.secretKeyRef in the project
+// with the referenced Secret's literal value, so the container runtime only
+// ever receives plain KEY=VALUE pairs (the kubelet pattern from CARA-57).
+//
+// It operates on a deep copy — the caller's project keeps its secretKeyRef
+// references and never holds plaintext values. Resolved values live only in
+// the returned copy, in memory; they must never be logged or written to disk.
+//
+// Each referenced Secret is fetched at most once per call via the secrets
+// cache, no matter how many services reference it. Errors:
+//   - ErrSecretNotFound (wrapped): the Secret does not exist — terminal.
+//   - errSecretKeyNotFound (wrapped): the key is missing — terminal.
+//   - anything else: transient fetch failure — caller should retry next poll.
+//
+// When the project references no secrets, p is returned unchanged (no copy).
+func resolveSecrets(ctx context.Context, client *Client, p *v1.Project) (*v1.Project, error) {
+	hasRefs := false
+	for _, svc := range p.Spec.Services {
+		for _, env := range svc.Env {
+			if env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil {
+				hasRefs = true
+			}
+		}
+	}
+	if !hasRefs {
+		return p, nil
+	}
+
+	// Deep-copy via JSON round-trip so nested slices are not shared with the
+	// caller's object.
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return nil, fmt.Errorf("resolve secrets: marshal project: %w", err)
+	}
+	resolved := &v1.Project{}
+	if err := json.Unmarshal(raw, resolved); err != nil {
+		return nil, fmt.Errorf("resolve secrets: unmarshal project copy: %w", err)
+	}
+
+	// Per-reconcile cache: one GetSecret per referenced Secret name.
+	secrets := make(map[string]*v1.Secret)
+
+	for si := range resolved.Spec.Services {
+		svc := &resolved.Spec.Services[si]
+		for ei := range svc.Env {
+			env := &svc.Env[ei]
+			if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+				continue
+			}
+			ref := env.ValueFrom.SecretKeyRef
+
+			secret, ok := secrets[ref.Name]
+			if !ok {
+				secret, err = client.GetSecret(ctx, ref.Name)
+				if err != nil {
+					return nil, fmt.Errorf("service %q env %q: %w", svc.Name, env.Name, err)
+				}
+				secrets[ref.Name] = secret
+			}
+
+			value, found := "", false
+			for _, item := range secret.Spec.Data {
+				if item.Key == ref.Key {
+					value, found = item.Value, true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("service %q env %q: secret %q: %w: %q",
+					svc.Name, env.Name, ref.Name, errSecretKeyNotFound, ref.Key)
+			}
+
+			env.Value = value
+			env.ValueFrom = nil
+		}
+	}
+
+	return resolved, nil
 }
 
 // terminateOne tears down all Docker resources for a Terminating project and

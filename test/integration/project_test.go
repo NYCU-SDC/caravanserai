@@ -4,6 +4,7 @@ package integration
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -273,6 +274,76 @@ func TestProjectNamespaceValidation(t *testing.T) {
 		assert.Contains(t, []int{http.StatusNoContent, http.StatusAccepted}, resp.StatusCode,
 			"cleanup delete %q", name)
 		drainBody(resp)
+	}
+}
+
+// TestProjectEnvVarValidation verifies the CARA-57 EnvVar contract at apply
+// time: value/valueFrom are mutually exclusive and secretKeyRef must name both
+// the Secret and the key. Whether the Secret exists is deliberately NOT
+// checked at apply time (the agent resolves it at reconcile).
+func TestProjectEnvVarValidation(t *testing.T) {
+	type testCase struct {
+		name       string
+		env        v1.EnvVar
+		wantStatus int
+	}
+
+	validRef := &v1.EnvVarSource{SecretKeyRef: &v1.SecretKeySelector{Name: "some-secret", Key: "some-key"}}
+
+	testCases := []testCase{
+		{
+			name:       "Literal value returns 201",
+			env:        v1.EnvVar{Name: "MODE", Value: "prod"},
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name:       "secretKeyRef without existing Secret still returns 201",
+			env:        v1.EnvVar{Name: "DB_PASSWORD", ValueFrom: validRef},
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name:       "Both value and valueFrom returns 400",
+			env:        v1.EnvVar{Name: "DB_PASSWORD", Value: "x", ValueFrom: validRef},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "valueFrom without secretKeyRef returns 400",
+			env:        v1.EnvVar{Name: "DB_PASSWORD", ValueFrom: &v1.EnvVarSource{}},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "secretKeyRef with empty key returns 400",
+			env:        v1.EnvVar{Name: "DB_PASSWORD", ValueFrom: &v1.EnvVarSource{SecretKeyRef: &v1.SecretKeySelector{Name: "some-secret"}}},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "secretKeyRef with empty name returns 400",
+			env:        v1.EnvVar{Name: "DB_PASSWORD", ValueFrom: &v1.EnvVarSource{SecretKeyRef: &v1.SecretKeySelector{Key: "some-key"}}},
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for i, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			projectName := fmt.Sprintf("e2e-envvar-%d", i)
+			body := mustMarshal(t, v1.Project{
+				ObjectMeta: v1.ObjectMeta{Name: projectName},
+				Spec: v1.ProjectSpec{
+					Services: []v1.ServiceDef{
+						{Name: "web", Image: "nginx:latest", Env: []v1.EnvVar{tc.env}},
+					},
+				},
+			})
+			resp := doRequest(t, http.MethodPost, "/api/v1/projects", body)
+			require.Equal(t, tc.wantStatus, resp.StatusCode,
+				"%s: expected %d", tc.name, tc.wantStatus)
+			drainBody(resp)
+
+			if tc.wantStatus == http.StatusCreated {
+				resp = doRequest(t, http.MethodDelete, "/api/v1/projects/"+projectName, nil)
+				drainBody(resp)
+			}
+		})
 	}
 }
 
