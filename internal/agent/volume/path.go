@@ -65,6 +65,19 @@ func HostPath(dataRoot, namespace, project, volumeName string) (string, error) {
 	return path, nil
 }
 
+// VolumesRoot returns the directory every Project's Managed volumes live
+// under: {dataRoot}/volumes. Used by sweeps that need to walk the whole tree
+// rather than address one Project.
+func VolumesRoot(dataRoot string) (string, error) {
+	if dataRoot == "" {
+		return "", fmt.Errorf("data root must not be empty")
+	}
+	if !filepath.IsAbs(dataRoot) {
+		return "", fmt.Errorf("data root %q must be an absolute path", dataRoot)
+	}
+	return filepath.Join(filepath.Clean(dataRoot), volumesDir), nil
+}
+
 // ProjectDir returns the directory holding every Managed volume of a Project:
 //
 //	{dataRoot}/volumes/{namespace}/{project}
