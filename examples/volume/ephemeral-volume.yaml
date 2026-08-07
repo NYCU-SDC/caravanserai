@@ -1,0 +1,23 @@
+# CARA-66 contrast: an Ephemeral volume is unchanged by this work.
+#
+# It is still created as a Docker named volume (cara-ephemeral-demo-scratch)
+# and is removed when the project is deleted. Use this alongside the Managed
+# demo to show that only Managed behaviour changed.
+apiVersion: caravanserai/v1
+kind: Project
+metadata:
+  name: ephemeral-demo
+  namespace: default
+spec:
+  services:
+    - name: db
+      image: postgres:17
+      env:
+        - name: POSTGRES_PASSWORD
+          value: demo
+      volumeMounts:
+        - name: scratch
+          mountPath: /var/lib/postgresql/data
+  volumes:
+    - name: scratch
+      type: Ephemeral

@@ -47,8 +47,11 @@ type Runtime interface {
 
 	// RemoveProject tears down all resources that were created for the project:
 	// containers (stop + remove), the bridge network, and Ephemeral volumes.
-	// It is safe to call even if the project was only partially created.
-	RemoveProject(ctx context.Context, projectName string, spec v1.ProjectSpec) error
+	// Managed volume host directories are deliberately retained; their paths are
+	// logged so an operator can reclaim them. namespace is needed to locate
+	// those directories. It is safe to call even if the project was only
+	// partially created.
+	RemoveProject(ctx context.Context, namespace, projectName string, spec v1.ProjectSpec) error
 
 	// InspectProject returns the current state of every service container for
 	// the project.  If a container for a service does not exist yet, it is

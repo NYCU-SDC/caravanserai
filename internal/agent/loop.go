@@ -286,7 +286,7 @@ func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	log := logger.With(zap.String("project", p.Name))
 	log.Info("Removing Docker resources for Terminating project")
 
-	if err := runtime.RemoveProject(ctx, p.Name, p.Spec); err != nil {
+	if err := runtime.RemoveProject(ctx, p.Namespace, p.Name, p.Spec); err != nil {
 		log.Error("Failed to remove project resources", zap.Error(err))
 		_ = client.UpdateProjectStatus(ctx, p.Name,
 			v1.ProjectPhaseFailed,

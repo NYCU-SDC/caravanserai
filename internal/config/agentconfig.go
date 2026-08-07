@@ -35,6 +35,12 @@ type AgentConfig struct {
 	// control plane when overlay networking is disabled.  It is kept as a
 	// backwards-compatible fallback until overlay networking is mandatory.
 	AdvertiseIP string `yaml:"advertise_ip" envconfig:"AGENT_ADVERTISE_IP"`
+	// DataRoot is the directory the agent owns for Managed volume data.
+	// Volumes live at {DataRoot}/volumes/{namespace}/{project}/{volume}/data
+	// and are bind-mounted into containers.  Defaults to "/var/lib/cara".
+	// It must be on a filesystem with room for both volume data and backup
+	// staging.
+	DataRoot string `yaml:"data_root" envconfig:"AGENT_DATA_ROOT"`
 	// HeadscaleURL is the base URL of the Headscale control plane the agent
 	// joins on startup (e.g. "http://localhost:8081").  Overlay networking is
 	// opt-in in 1.0: when HeadscaleURL and PreauthKeyFile are both empty the
@@ -65,6 +71,7 @@ func LoadAgent() (AgentConfig, *LogBuffer) {
 		DockerHost:        "unix:///var/run/docker.sock",
 		ListenPort:        "9090",
 		ProxyListenAddr:   ":8081",
+		DataRoot:          "/var/lib/cara",
 	}
 
 	var err error
