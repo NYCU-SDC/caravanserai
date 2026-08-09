@@ -19,6 +19,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/agent/proxy"
 	"NYCU-SDC/caravanserai/internal/appinit"
 	"NYCU-SDC/caravanserai/internal/config"
+	"NYCU-SDC/caravanserai/internal/overlay"
 	"NYCU-SDC/caravanserai/internal/trace"
 
 	"github.com/NYCU-SDC/summer/pkg/problem"
@@ -80,6 +81,47 @@ func main() {
 	defer stop()
 
 	agentClient := agent.NewClient(logger, cfg.ServerURL, cfg.NodeName)
+
+	// ── Headscale overlay join ────────────────────────────────────────────
+	// Overlay networking is opt-in in 1.0 (CARA-55): the agent joins the
+	// Headscale mesh only when both HeadscaleURL and PreauthKeyFile are
+	// configured.  When they are unset the agent runs on the underlay as
+	// before.  This is expected to become mandatory once the Headscale epic
+	// (CARA-47) is complete.  A join failure is fatal — the agent must not
+	// silently fall back to the underlay when overlay was requested.
+	if cfg.HeadscaleURL != "" && cfg.PreauthKeyFile != "" {
+		overlayHostname := cfg.OverlayHostname
+		if overlayHostname == "" {
+			overlayHostname = cfg.NodeName
+		}
+
+		overlayClient, err := overlay.NewTsnetClient(overlay.TsnetConfig{
+			ControlURL:     cfg.HeadscaleURL,
+			PreauthKeyFile: cfg.PreauthKeyFile,
+			Hostname:       overlayHostname,
+		}, logger)
+		if err != nil {
+			logger.Fatal("Invalid overlay configuration", zap.Error(err))
+		}
+		defer func() {
+			if closeErr := overlayClient.Close(); closeErr != nil {
+				logger.Warn("Failed to leave overlay network", zap.Error(closeErr))
+			}
+		}()
+
+		logger.Info("Joining Headscale overlay...", zap.String("control_url", cfg.HeadscaleURL))
+		result, err := overlay.JoinWithRetry(ctx, overlayClient, logger)
+		if err != nil {
+			logger.Fatal("Failed to join Headscale overlay", zap.Error(err))
+		}
+		agentClient.SetOverlayIP(result.OverlayIP)
+		logger.Info("Joined Headscale overlay",
+			zap.String("overlay_ip", result.OverlayIP),
+			zap.String("dns_name", result.DNSName),
+		)
+	} else {
+		logger.Info("Overlay networking disabled (headscale_url/preauth_key_file not set), running on underlay")
+	}
 
 	dockerRuntime, err := docker.NewDockerRuntime(cfg.DockerHost, cfg.DataRoot, logger)
 	if err != nil {

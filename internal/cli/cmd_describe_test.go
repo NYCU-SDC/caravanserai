@@ -13,7 +13,7 @@ import (
 
 // collectFieldPaths recursively collects all leaf field paths in a struct type.
 // Embedded (anonymous) structs are flattened. The paths use dot notation,
-// e.g. "Spec.Hostname", "Status.Network.IP".
+// e.g. "Spec.Hostname", "Status.Network.OverlayIP".
 func collectFieldPaths(t reflect.Type, prefix string) []string {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
@@ -97,7 +97,7 @@ var describeNodeCoveredFields = newStringSet(
 	"Status.Info.OSImage",
 	"Status.Info.AgentVersion",
 	// Status.Network
-	"Status.Network.IP",
+	"Status.Network.OverlayIP",
 	"Status.Network.DNSName",
 	"Status.Network.Mode",
 	"Status.Network.AgentPort",
@@ -132,6 +132,43 @@ var describeProjectCoveredFields = newStringSet(
 	"Status.NodeRef",
 	"Status.Conditions",
 )
+
+// describeSecretCoveredFields lists every field path that describeSecret
+// explicitly handles. "Spec.Data" covers the whole slice: describeSecret
+// prints each item's Key but must never print Value, so there is no separate
+// "Spec.Data.Value" path to register.
+var describeSecretCoveredFields = newStringSet(
+	// TypeMeta (embedded)
+	"APIVersion",
+	"Kind",
+	// ObjectMeta (embedded)
+	"Name",
+	"Namespace",
+	"ResourceVersion",
+	"Labels",
+	"Annotations",
+	"CreatedAt",
+	"UpdatedAt",
+	// Spec
+	"Spec.Data",
+)
+
+func TestDescribeSecretFieldCoverage(t *testing.T) {
+	actual := collectFieldPaths(reflect.TypeOf(v1.Secret{}), "")
+	sort.Strings(actual)
+
+	var missing []string
+	for _, path := range actual {
+		if !describeSecretCoveredFields.has(path) {
+			missing = append(missing, path)
+		}
+	}
+
+	assert.Empty(t, missing,
+		"describeSecret does not cover these Secret fields — add formatting in "+
+			"cmd_describe.go and register the paths in describeSecretCoveredFields:\n  %s",
+		strings.Join(missing, "\n  "))
+}
 
 func TestDescribeNodeFieldCoverage(t *testing.T) {
 	actual := collectFieldPaths(reflect.TypeOf(v1.Node{}), "")

@@ -128,6 +128,20 @@ func TestPlanVolumeRemoval(t *testing.T) {
 			"/var/lib/cara/volumes/default/blog/db-data/data",
 		}, plan.retainedManagedPaths)
 	})
+
+	t.Run("unresolvable host path is reported instead of silently dropped", func(t *testing.T) {
+		// A volume name this malformed should never reach planVolumeRemoval in
+		// practice (v1.ValidateName rejects it at create time), but the legacy
+		// named volume must still be scheduled for removal, and the path
+		// failure must be surfaced rather than silently skipped.
+		plan := planVolumeRemoval(dataRoot, namespace, project,
+			[]v1.VolumeDef{{Name: "../escape", Type: v1.VolumeTypeManaged}})
+
+		assert.Equal(t, []string{"cara-blog-../escape"}, plan.removeNamedVolumes)
+		assert.Empty(t, plan.retainedManagedPaths)
+		require.Len(t, plan.pathErrors, 1)
+		assert.ErrorContains(t, plan.pathErrors[0], "../escape")
+	})
 }
 
 func TestEnsureManagedDir(t *testing.T) {

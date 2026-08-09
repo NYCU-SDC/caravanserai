@@ -21,7 +21,31 @@ func NewDeleteCmd() *cobra.Command {
 
 	deleteCmd.AddCommand(newDeleteNodeCmd())
 	deleteCmd.AddCommand(newDeleteProjectCmd())
+	deleteCmd.AddCommand(newDeleteSecretCmd())
 	return deleteCmd
+}
+
+func newDeleteSecretCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "secret <name>",
+		Short:   "Delete a secret",
+		Aliases: []string{"secrets"},
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
+			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
+			name := args[0]
+
+			client := NewClient(serverURL)
+			ctx := context.Background()
+
+			if err := client.DeleteSecret(ctx, name); err != nil {
+				return fmt.Errorf("delete secret %q: %w", name, err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "secret %q deleted\n", name)
+			return nil
+		},
+	}
 }
 
 func newDeleteNodeCmd() *cobra.Command {

@@ -46,6 +46,7 @@ func init() {
 	rootCmd.AddCommand(cli.NewApplyCmd())
 	rootCmd.AddCommand(cli.NewPortForwardCmd())
 	rootCmd.AddCommand(cli.NewLogsCmd())
+	rootCmd.AddCommand(cli.NewNodeCmd())
 }
 
 func main() {

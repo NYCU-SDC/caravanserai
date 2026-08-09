@@ -68,9 +68,32 @@ func (ProjectPhase) JSONSchema() *jsonschema.Schema {
 }
 
 // EnvVar is a single environment variable to inject into a container.
+// Exactly one of Value or ValueFrom may be set (enforced at apply time).
 type EnvVar struct {
 	Name  string `json:"name"            yaml:"name"`
 	Value string `json:"value,omitempty" yaml:"value,omitempty"`
+
+	// ValueFrom sources the value from another object instead of a literal.
+	// The agent resolves it to a plain Value before the spec reaches the
+	// container runtime; the Runtime layer never sees a ValueFrom.
+	ValueFrom *EnvVarSource `json:"valueFrom,omitempty" yaml:"valueFrom,omitempty"`
+}
+
+// EnvVarSource holds the possible indirect sources for an EnvVar value.
+// Only secretKeyRef exists in 1.0; the wrapper struct mirrors Kubernetes so
+// future sources (configMapKeyRef, fieldRef, …) slot in without breaking the
+// manifest shape.
+type EnvVarSource struct {
+	SecretKeyRef *SecretKeySelector `json:"secretKeyRef,omitempty" yaml:"secretKeyRef,omitempty"`
+}
+
+// SecretKeySelector points at a single key inside a named Secret.
+type SecretKeySelector struct {
+	// Name is the Secret's metadata.name.
+	Name string `json:"name" yaml:"name"`
+
+	// Key selects one entry in the Secret's spec.data.
+	Key string `json:"key" yaml:"key"`
 }
 
 // VolumeMount associates a named Volume with a container mount path.

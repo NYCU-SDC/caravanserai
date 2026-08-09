@@ -31,6 +31,10 @@ type Client struct {
 	nodeName   string
 	httpClient *http.Client
 	logger     *zap.Logger
+
+	// overlayIP is the Headscale-assigned overlay IP set after the agent
+	// joins the overlay network.  Empty when overlay networking is disabled.
+	overlayIP string
 }
 
 // NewClient creates a Client that will identify itself as nodeName and dial
@@ -46,6 +50,18 @@ func NewClient(logger *zap.Logger, serverURL, nodeName string) *Client {
 	}
 }
 
+// SetOverlayIP records the overlay IP assigned to this agent after joining the
+// Headscale overlay network.
+func (c *Client) SetOverlayIP(ip string) {
+	c.overlayIP = ip
+}
+
+// OverlayIP returns the overlay IP recorded by SetOverlayIP, or the empty
+// string when overlay networking is disabled.
+func (c *Client) OverlayIP() string {
+	return c.overlayIP
+}
+
 // Register calls POST /api/v1/nodes to self-register the node.
 // If the node already exists (HTTP 409) the call is treated as a no-op.
 func (c *Client) Register(ctx context.Context, spec v1.NodeSpec) error {
@@ -53,6 +69,9 @@ func (c *Client) Register(ctx context.Context, spec v1.NodeSpec) error {
 		TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Node"},
 		ObjectMeta: v1.ObjectMeta{Name: c.nodeName},
 		Spec:       spec,
+		Status: v1.NodeStatus{
+			Network: v1.NodeNetworkStatus{OverlayIP: c.overlayIP},
+		},
 	}
 
 	body, err := json.Marshal(node)
@@ -79,6 +98,13 @@ func (c *Client) Register(ctx context.Context, spec v1.NodeSpec) error {
 		return nil
 	case http.StatusConflict:
 		c.logger.Info("Node already registered, continuing", zap.String("node", c.nodeName))
+		if c.overlayIP != "" {
+			if err := c.Heartbeat(ctx, v1.NodeStatus{
+				Network: v1.NodeNetworkStatus{OverlayIP: c.overlayIP},
+			}); err != nil {
+				return fmt.Errorf("refresh overlay address after register conflict: %w", err)
+			}
+		}
 		return nil
 	default:
 		return fmt.Errorf("register: unexpected status %s", resp.Status)
@@ -98,9 +124,14 @@ type heartbeatRequest struct {
 // Passing an empty NodeStatus is valid — the server will update only the
 // LastHeartbeat timestamp.
 func (c *Client) Heartbeat(ctx context.Context, status v1.NodeStatus) error {
+	network := status.Network
+	if network.OverlayIP == "" {
+		network.OverlayIP = c.overlayIP
+	}
+
 	req := heartbeatRequest{
 		State:       status.State,
-		Network:     status.Network,
+		Network:     network,
 		Capacity:    status.Capacity,
 		Allocatable: status.Allocatable,
 	}
@@ -336,4 +367,40 @@ func (c *Client) UpdateProjectStatus(ctx context.Context, projectName string, ph
 		zap.String("phase", string(phase)),
 	)
 	return nil
+}
+
+// ErrSecretNotFound is returned by GetSecret when the server responds with
+// 404. resolveSecrets treats this as a terminal condition for the project
+// (Failed, no retry at this layer) rather than a transient fetch error.
+var ErrSecretNotFound = errors.New("secret not found")
+
+// GetSecret fetches a single Secret by name via GET /api/v1/secrets/{name}.
+// The returned Secret carries plaintext values; they must stay in process
+// memory only — never written to disk or logs (see CARA-57 memory-only rule).
+// Returns ErrSecretNotFound when the server responds with 404.
+func (c *Client) GetSecret(ctx context.Context, name string) (*v1.Secret, error) {
+	url := fmt.Sprintf("%s/api/v1/secrets/%s", c.serverURL, name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build get secret request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get secret request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("%w: %s", ErrSecretNotFound, name)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get secret %q: unexpected status %s", name, resp.Status)
+	}
+
+	var secret v1.Secret
+	if err := json.NewDecoder(resp.Body).Decode(&secret); err != nil {
+		return nil, fmt.Errorf("decode secret %q: %w", name, err)
+	}
+	return &secret, nil
 }

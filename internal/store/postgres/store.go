@@ -59,6 +59,7 @@ var migrationsFS embed.FS
 const (
 	kindNode    = "Node"
 	kindProject = "Project"
+	kindSecret  = "Secret"
 
 	// defaultNamespace is the only namespace value 1.0 ever writes or reads.
 	// Node rows are always written with this value even though NodeStore's
@@ -779,8 +780,189 @@ func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) erro
 }
 
 // ============================================================
+// SecretStore
+// ============================================================
+
+// Secrets share the resources table with everything else (kind='Secret').
+// They have no lifecycle phase, so the promoted phase column is always the
+// empty string, and no events are published — nothing subscribes to Secret
+// changes. Namespace/resource_version handling mirrors ProjectStore.
+
+// CreateSecret implements store.SecretStore.
+func (s *Store) CreateSecret(ctx context.Context, secret *v1.Secret) error {
+	now := time.Now().UTC()
+	secret.ObjectMeta.CreatedAt = now
+	secret.ObjectMeta.UpdatedAt = now
+	if secret.ObjectMeta.Namespace == "" {
+		secret.ObjectMeta.Namespace = defaultNamespace
+	}
+
+	spec, err := json.Marshal(secret.Spec)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal secret spec: %w", err)
+	}
+	status, err := json.Marshal(secret.Status)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal secret status: %w", err)
+	}
+	labels, err := json.Marshal(secret.Labels)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal secret labels: %w", err)
+	}
+	annotations, err := json.Marshal(secret.Annotations)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal secret annotations: %w", err)
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO resources (kind, name, namespace, phase, spec, status, labels, annotations, created_at, updated_at, resource_version)
+		VALUES ($1, $2, $3, '', $4, $5, $6, $7, $8, $9, 1)`,
+		kindSecret, secret.Name, secret.ObjectMeta.Namespace,
+		spec, status, labels, annotations,
+		now, now,
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return store.ErrAlreadyExists
+		}
+		return fmt.Errorf("postgres: create secret %q: %w", secret.Name, err)
+	}
+	secret.ObjectMeta.ResourceVersion = 1
+	return nil
+}
+
+// GetSecret implements store.SecretStore.
+func (s *Store) GetSecret(ctx context.Context, name string) (*v1.Secret, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		FROM resources
+		WHERE kind = $1 AND namespace = $2 AND name = $3`,
+		kindSecret, defaultNamespace, name,
+	)
+
+	var (
+		namespace                                     string
+		resourceVersion                               int64
+		rawSpec, rawStatus, rawLabels, rawAnnotations []byte
+		createdAt, updatedAt                          time.Time
+	)
+	if err := row.Scan(&namespace, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, fmt.Errorf("postgres: get secret %q: %w", name, err)
+	}
+
+	secret := &v1.Secret{
+		TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindSecret},
+		ObjectMeta: v1.ObjectMeta{
+			Name: name, Namespace: namespace, ResourceVersion: resourceVersion,
+			CreatedAt: createdAt, UpdatedAt: updatedAt,
+		},
+	}
+	if err := unmarshalFields(name, rawSpec, &secret.Spec, rawStatus, &secret.Status, rawLabels, &secret.Labels, rawAnnotations, &secret.Annotations); err != nil {
+		return nil, fmt.Errorf("postgres: unmarshal secret %q: %w", name, err)
+	}
+	return secret, nil
+}
+
+// ListSecrets implements store.SecretStore.
+func (s *Store) ListSecrets(ctx context.Context) ([]*v1.Secret, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT name, namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		FROM resources WHERE kind = $1 AND namespace = $2`, kindSecret, defaultNamespace)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list secrets: %w", err)
+	}
+	defer rows.Close()
+
+	return scanSecrets(rows)
+}
+
+// UpdateSecret implements store.SecretStore.
+// Full-record replace used by the create-or-update PUT path (credential
+// rotation). Increments resource_version and returns the new value.
+func (s *Store) UpdateSecret(ctx context.Context, secret *v1.Secret) error {
+	secret.ObjectMeta.UpdatedAt = time.Now().UTC()
+	if secret.ObjectMeta.Namespace == "" {
+		secret.ObjectMeta.Namespace = defaultNamespace
+	}
+
+	spec, err := json.Marshal(secret.Spec)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal secret spec: %w", err)
+	}
+	labels, err := json.Marshal(secret.Labels)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal secret labels: %w", err)
+	}
+	annotations, err := json.Marshal(secret.Annotations)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal secret annotations: %w", err)
+	}
+
+	err = s.pool.QueryRow(ctx, `
+		UPDATE resources
+		SET spec = $1, labels = $2, annotations = $3, updated_at = $4,
+		    resource_version = resource_version + 1
+		WHERE kind = $5 AND namespace = $6 AND name = $7
+		RETURNING resource_version`,
+		spec, labels, annotations, secret.ObjectMeta.UpdatedAt,
+		kindSecret, secret.ObjectMeta.Namespace, secret.Name,
+	).Scan(&secret.ObjectMeta.ResourceVersion)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: secret %q", store.ErrNotFound, secret.Name)
+		}
+		return fmt.Errorf("postgres: update secret %q: %w", secret.Name, err)
+	}
+	return nil
+}
+
+// DeleteSecret implements store.SecretStore.
+func (s *Store) DeleteSecret(ctx context.Context, name string) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM resources WHERE kind = $1 AND namespace = $2 AND name = $3`, kindSecret, defaultNamespace, name)
+	if err != nil {
+		return fmt.Errorf("postgres: delete secret %q: %w", name, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: secret %q", store.ErrNotFound, name)
+	}
+	return nil
+}
+
+// ============================================================
 // Helpers
 // ============================================================
+
+// scanSecrets iterates over query rows and decodes each secret.
+func scanSecrets(rows pgx.Rows) ([]*v1.Secret, error) {
+	var secrets []*v1.Secret
+	for rows.Next() {
+		var (
+			name, namespace                               string
+			resourceVersion                               int64
+			rawSpec, rawStatus, rawLabels, rawAnnotations []byte
+			createdAt, updatedAt                          time.Time
+		)
+		if err := rows.Scan(&name, &namespace, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("postgres: scan secret row: %w", err)
+		}
+		secret := &v1.Secret{
+			TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindSecret},
+			ObjectMeta: v1.ObjectMeta{
+				Name: name, Namespace: namespace, ResourceVersion: resourceVersion,
+				CreatedAt: createdAt, UpdatedAt: updatedAt,
+			},
+		}
+		if err := unmarshalFields(name, rawSpec, &secret.Spec, rawStatus, &secret.Status, rawLabels, &secret.Labels, rawAnnotations, &secret.Annotations); err != nil {
+			return nil, fmt.Errorf("postgres: unmarshal secret %q: %w", name, err)
+		}
+		secrets = append(secrets, secret)
+	}
+	return secrets, rows.Err()
+}
 
 // scanProjects iterates over query rows and decodes each project.
 func scanProjects(rows pgx.Rows) ([]*v1.Project, error) {

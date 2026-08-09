@@ -111,6 +111,8 @@ func (c *Client) ApplyResource(ctx context.Context, raw []byte) (ApplyResult, er
 		return c.applyNode(ctx, raw)
 	case "Project":
 		return c.applyProject(ctx, raw)
+	case "Secret":
+		return c.applySecret(ctx, raw)
 	default:
 		return ApplyResult{}, fmt.Errorf("unsupported kind %q", meta.Kind)
 	}
@@ -324,6 +326,138 @@ func (c *Client) applyProject(ctx context.Context, raw []byte) (ApplyResult, err
 		return ApplyResult{}, fmt.Errorf("decode response: %w", err)
 	}
 	return ApplyResult{Resource: project, Created: true}, nil
+}
+
+// GetSecrets fetches all secrets from the server.
+//
+// The returned objects carry real secret values (the API does not redact); it
+// is the CLI presentation layer's responsibility never to print them.
+func (c *Client) GetSecrets(ctx context.Context) (v1.SecretList, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/api/v1/secrets", nil)
+	if err != nil {
+		return v1.SecretList{}, fmt.Errorf("build request: %w", err)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return v1.SecretList{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return v1.SecretList{}, err
+	}
+
+	var list v1.SecretList
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return v1.SecretList{}, fmt.Errorf("decode response: %w", err)
+	}
+	return list, nil
+}
+
+// GetSecret fetches a single secret by name. The returned object carries real
+// values — callers must redact before display.
+func (c *Client) GetSecret(ctx context.Context, name string) (v1.Secret, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/api/v1/secrets/"+name, nil)
+	if err != nil {
+		return v1.Secret{}, fmt.Errorf("build request: %w", err)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return v1.Secret{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return v1.Secret{}, err
+	}
+
+	var secret v1.Secret
+	if err := json.NewDecoder(resp.Body).Decode(&secret); err != nil {
+		return v1.Secret{}, fmt.Errorf("decode response: %w", err)
+	}
+	return secret, nil
+}
+
+// DeleteSecret removes a secret by name.
+func (c *Client) DeleteSecret(ctx context.Context, name string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+"/api/v1/secrets/"+name, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	return checkStatus(resp)
+}
+
+// applySecret creates or updates a Secret manifest. It tries POST first; on 409
+// Conflict it falls back to PUT to update the existing resource (rotation).
+func (c *Client) applySecret(ctx context.Context, raw []byte) (ApplyResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/secrets",
+		bytes.NewReader(raw))
+	if err != nil {
+		return ApplyResult{}, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return ApplyResult{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// On 409, fall back to PUT for update.
+	if resp.StatusCode == http.StatusConflict {
+		_ = resp.Body.Close()
+
+		var meta struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			return ApplyResult{}, fmt.Errorf("decode name for update: %w", err)
+		}
+
+		putReq, err := http.NewRequestWithContext(ctx, http.MethodPut,
+			c.BaseURL+"/api/v1/secrets/"+meta.Metadata.Name, bytes.NewReader(raw))
+		if err != nil {
+			return ApplyResult{}, fmt.Errorf("build PUT request: %w", err)
+		}
+		putReq.Header.Set("Content-Type", "application/json")
+
+		putResp, err := c.HTTPClient.Do(putReq)
+		if err != nil {
+			return ApplyResult{}, fmt.Errorf("PUT request failed: %w", err)
+		}
+		defer putResp.Body.Close()
+
+		if err := checkStatus(putResp); err != nil {
+			return ApplyResult{}, err
+		}
+
+		var secret v1.Secret
+		if err := json.NewDecoder(putResp.Body).Decode(&secret); err != nil {
+			return ApplyResult{}, fmt.Errorf("decode response: %w", err)
+		}
+		return ApplyResult{Resource: secret, Created: false}, nil
+	}
+
+	if err := checkStatus(resp); err != nil {
+		return ApplyResult{}, err
+	}
+
+	var secret v1.Secret
+	if err := json.NewDecoder(resp.Body).Decode(&secret); err != nil {
+		return ApplyResult{}, fmt.Errorf("decode response: %w", err)
+	}
+	return ApplyResult{Resource: secret, Created: true}, nil
 }
 
 // APIError represents a parsed RFC 9457 Problem Details response from the

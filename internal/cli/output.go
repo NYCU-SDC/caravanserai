@@ -44,6 +44,12 @@ func (p *Printer) PrintNode(node v1.Node) error {
 
 // PrintAny renders an arbitrary value (used by apply) in the configured format.
 func (p *Printer) PrintAny(v any) error {
+	// A Secret must never be printed with real values in any format. Route it
+	// through PrintSecret, which redacts before json/yaml/table output.
+	if secret, ok := v.(v1.Secret); ok {
+		return p.PrintSecret(secret)
+	}
+
 	switch p.Format {
 	case "json":
 		return printJSON(p.Out, v)
@@ -111,6 +117,75 @@ func (p *Printer) printProjectTable(projects []v1.Project) error {
 	return w.Flush()
 }
 
+// redactedValue is printed in place of every real Secret value in CLI output.
+const redactedValue = "<redacted>"
+
+// redactSecret returns a copy of s with every data value replaced by
+// redactedValue. The copy is deep over the Data slice so the caller's original
+// (which still holds real values) is never mutated. Used by every Secret print
+// path so no CLI output format ever emits a real value.
+func redactSecret(s v1.Secret) v1.Secret {
+	redacted := s
+	redacted.Spec.Data = make([]v1.SecretDataItem, len(s.Spec.Data))
+	for i, item := range s.Spec.Data {
+		redacted.Spec.Data[i] = v1.SecretDataItem{Key: item.Key, Value: redactedValue}
+	}
+	return redacted
+}
+
+// PrintSecretList renders a SecretList in the configured format, always with
+// values redacted.
+func (p *Printer) PrintSecretList(list v1.SecretList) error {
+	switch p.Format {
+	case "json", "yaml":
+		redacted := list
+		redacted.Items = make([]v1.Secret, len(list.Items))
+		for i, s := range list.Items {
+			redacted.Items[i] = redactSecret(s)
+		}
+		if p.Format == "yaml" {
+			return printYAML(p.Out, redacted)
+		}
+		return printJSON(p.Out, redacted)
+	default:
+		return p.printSecretTable(list.Items)
+	}
+}
+
+// PrintSecret renders a single Secret in the configured format, always with
+// values redacted.
+func (p *Printer) PrintSecret(secret v1.Secret) error {
+	switch p.Format {
+	case "json":
+		return printJSON(p.Out, redactSecret(secret))
+	case "yaml":
+		return printYAML(p.Out, redactSecret(secret))
+	default:
+		return p.printSecretTable([]v1.Secret{secret})
+	}
+}
+
+// printSecretTable writes a human-readable table with columns:
+// NAME  KEYS  AGE — key names only, never values.
+func (p *Printer) printSecretTable(secrets []v1.Secret) error {
+	w := tabwriter.NewWriter(p.Out, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "NAME\tKEYS\tAGE")
+
+	for _, s := range secrets {
+		keys := make([]string, len(s.Spec.Data))
+		for i, item := range s.Spec.Data {
+			keys[i] = item.Key
+		}
+		keyList := strings.Join(keys, ",")
+		if keyList == "" {
+			keyList = "<none>"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\n", s.Name, keyList, humanAge(s.CreatedAt))
+	}
+
+	return w.Flush()
+}
+
 // latestConditionReason returns the Reason of the last condition in the slice,
 // or "-" if there are none.
 func latestConditionReason(conditions []v1.Condition) string {
@@ -121,10 +196,10 @@ func latestConditionReason(conditions []v1.Condition) string {
 }
 
 // printNodeTable writes a human-readable table with columns:
-// NAME  STATE  IP  AGE
+// NAME  STATE  OVERLAY IP  AGE
 func (p *Printer) printNodeTable(nodes []v1.Node) error {
 	w := tabwriter.NewWriter(p.Out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSTATE\tIP\tAGE")
+	fmt.Fprintln(w, "NAME\tSTATE\tOVERLAY IP\tAGE")
 
 	for _, n := range nodes {
 		name := n.Name
@@ -132,7 +207,7 @@ func (p *Printer) printNodeTable(nodes []v1.Node) error {
 		if state == "" {
 			state = "<unknown>"
 		}
-		ip := n.Status.Network.IP
+		ip := n.Status.Network.OverlayIP
 		if ip == "" {
 			ip = "<none>"
 		}

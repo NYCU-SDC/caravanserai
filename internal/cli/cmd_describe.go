@@ -35,7 +35,32 @@ func NewDescribeCmd() *cobra.Command {
 
 	describeCmd.AddCommand(newDescribeNodeCmd())
 	describeCmd.AddCommand(newDescribeProjectCmd())
+	describeCmd.AddCommand(newDescribeSecretCmd())
 	return describeCmd
+}
+
+func newDescribeSecretCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "secret <name>",
+		Short:   "Show detailed information about a secret (values are never shown)",
+		Aliases: []string{"secrets"},
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
+			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
+
+			client := NewClient(serverURL)
+			ctx := context.Background()
+
+			secret, err := client.GetSecret(ctx, args[0])
+			if err != nil {
+				return fmt.Errorf("describe secret %q: %w", args[0], err)
+			}
+
+			describeSecret(os.Stdout, &secret)
+			return nil
+		},
+	}
 }
 
 func newDescribeNodeCmd() *cobra.Command {
@@ -123,7 +148,7 @@ func describeNode(w io.Writer, node *v1.Node) {
 	// Network
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Network:")
-	printField(w, "  IP", stringOrNone(node.Status.Network.IP))
+	printField(w, "  Overlay IP", stringOrNone(node.Status.Network.OverlayIP))
 	printField(w, "  DNS Name", stringOrNone(node.Status.Network.DNSName))
 	printField(w, "  Mode", stringOrNone(string(node.Status.Network.Mode)))
 	if node.Status.Network.AgentPort != 0 {
@@ -251,6 +276,34 @@ func describeProject(w io.Writer, project *v1.Project) {
 	// Conditions
 	fmt.Fprintln(w)
 	printConditions(w, project.Status.Conditions)
+}
+
+// describeSecret writes a kubectl-style detailed view of a Secret. Values are
+// never printed — each key is shown with a <redacted> placeholder.
+func describeSecret(w io.Writer, secret *v1.Secret) {
+	// Basic info
+	printField(w, "Name", secret.Name)
+	printField(w, "Namespace", stringOrNone(secret.Namespace))
+	printField(w, "Kind", secret.Kind)
+	printField(w, "Resource Version", fmt.Sprintf("%d", secret.ResourceVersion))
+	printField(w, "Created", formatTimestamp(secret.CreatedAt))
+
+	// Labels
+	printMapField(w, "Labels", secret.Labels)
+
+	// Annotations
+	printMapField(w, "Annotations", secret.Annotations)
+
+	// Data — key names only, values redacted.
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Data:")
+	if len(secret.Spec.Data) == 0 {
+		fmt.Fprintln(w, "  <none>")
+		return
+	}
+	for _, item := range secret.Spec.Data {
+		printField(w, "  "+item.Key, redactedValue)
+	}
 }
 
 // --- helpers ----------------------------------------------------------------

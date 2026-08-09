@@ -162,9 +162,9 @@ func resolveNodeAddr(serverURL, nodeName string) (string, error) {
 		return "", fmt.Errorf("get node %q: %w", nodeName, err)
 	}
 
-	ip := node.Status.Network.IP
+	ip := node.Status.Network.OverlayIP
 	if ip == "" {
-		return "", fmt.Errorf("node %q has no IP address; use --node host:port to specify the agent address directly", nodeName)
+		return "", fmt.Errorf("node %q has no overlay IP address; use --node host:port to specify the agent address directly", nodeName)
 	}
 
 	agentPort := node.Status.Network.AgentPort

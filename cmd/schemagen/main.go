@@ -24,6 +24,7 @@ func main() {
 	resources := []resource{
 		{instance: &v1.Node{}, filename: "node.json", title: "Node"},
 		{instance: &v1.Project{}, filename: "project.json", title: "Project"},
+		{instance: &v1.Secret{}, filename: "secret.json", title: "Secret"},
 	}
 
 	r := new(jsonschema.Reflector)
