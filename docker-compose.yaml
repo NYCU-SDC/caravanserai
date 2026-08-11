@@ -8,9 +8,13 @@
 #   docker compose down -v      # stop and wipe data volumes
 #
 # `down -v` removes the backups along with the database. To exercise a real
-# restore, remove only the pgdata volume and leave minio-data alone — see
-# docs/runbooks/control-plane-restore.md (CARA-70).
+# restore, remove only the pgdata volume and leave minio-data alone — a restore
+# that still has the original disk proves nothing. The scripted procedure for
+# that is CARA-70's.
 #
+# MinIO binds to localhost by default because its credentials are fixed in this
+# file; set MINIO_BIND=0.0.0.0 to reach it from another machine, which the
+# two-node agent testing does need.
 # Host ports can be overridden when something is already listening:
 #   POSTGRES_PORT=5434 MINIO_PORT=9100 docker compose up -d
 
@@ -77,8 +81,8 @@ services:
       MINIO_ROOT_USER: caraadmin
       MINIO_ROOT_PASSWORD: caraadmin123
     ports:
-      - "${MINIO_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${MINIO_BIND:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+      - "${MINIO_BIND:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
     healthcheck:

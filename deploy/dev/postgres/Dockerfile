@@ -10,7 +10,11 @@
 # compose (development) or by the deployment (production, see CARA-77); baking
 # them into a layer would leave them recoverable from the image forever.
 
-FROM postgres:16
+# Pinned to a patch version, not the moving `16` tag. Restore correctness does
+# not require it — PGDATA compatibility is a major-version property — but a
+# backup system's value rests on the restore path behaving exactly as it did
+# when it was tested, and a rebuilt image that quietly differs undermines that.
+FROM postgres:16.13
 
 # Pinned deliberately. `latest` would make the image's contents depend on when
 # it happened to be built, which is the opposite of what a backup tool needs.
