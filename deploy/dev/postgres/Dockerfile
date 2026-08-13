@@ -10,11 +10,19 @@
 # compose (development) or by the deployment (production, see CARA-77); baking
 # them into a layer would leave them recoverable from the image forever.
 
-# Pinned to a patch version, not the moving `16` tag. Restore correctness does
-# not require it — PGDATA compatibility is a major-version property — but a
-# backup system's value rests on the restore path behaving exactly as it did
-# when it was tested, and a rebuilt image that quietly differs undermines that.
-FROM postgres:16.13
+# The major version is pinned because PGDATA compatibility is a major-version
+# property; the patch version deliberately is not. PostgreSQL guarantees minor
+# releases keep the on-disk format, and those releases are mostly security and
+# bug fixes — so with no dependency-bump automation in this repo, pinning a
+# patch version would freeze known vulnerabilities in place with nothing to
+# signal it. Drifting forward is also the safe direction: an older PGDATA
+# starts on a newer minor, not the reverse.
+#
+# Note this differs from how WAL-G is pinned below, on purpose. WAL-G arrives
+# as a release tarball with no other integrity check, so pinning it is supply
+# chain protection rather than reproducibility, and it would never be patched
+# automatically either way.
+FROM postgres:16
 
 # Pinned deliberately. `latest` would make the image's contents depend on when
 # it happened to be built, which is the opposite of what a backup tool needs.
