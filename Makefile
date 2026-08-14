@@ -80,6 +80,12 @@ dev-server: dev-up build
 dev-logs:
 	@docker compose logs -f
 
+walg-backup:
+	@echo -e ":: $(GREEN)Taking a control-plane base backup...$(NC)"
+	@./scripts/walg-backup.sh \
+		&& echo -e "==> $(BLUE)Backup complete$(NC)" \
+		|| (echo -e "==> $(RED)Backup failed$(NC)" && exit 1)
+
 install-hooks:
 	@echo -e ":: $(GREEN)Installing git hooks...$(NC)"
 	@git config core.hooksPath .githooks \
@@ -88,3 +94,4 @@ install-hooks:
 
 .PHONY: all prepare build run-server run-agent run-cli test test-integration schemas
 .PHONY: dev-up dev-down dev-reset dev-server dev-logs install-hooks
+.PHONY: walg-backup
