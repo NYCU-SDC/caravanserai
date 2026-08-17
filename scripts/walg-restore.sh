@@ -321,7 +321,10 @@ if [ "$MODE" = "takeover" ]; then
     # record is the only account of what happened, and stale checkpoint lines
     # from days earlier read as if they were part of it.
     START_MARK="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    docker compose start "$COMPOSE_SERVICE" >/dev/null \
+    # 'up -d' rather than 'start': the container may not exist at all. On a
+    # fresh machine it never has, and the bare-disk verification removes it in
+    # order to delete the volume underneath. 'start' fails in both cases.
+    docker compose up -d "$COMPOSE_SERVICE" >/dev/null 2>&1 \
         || die "could not start ${COMPOSE_SERVICE}"
     target_psql() { docker compose exec -T -u postgres "$COMPOSE_SERVICE" psql -U postgres "$@" </dev/null; }
     target_logs() { docker compose logs --no-log-prefix --since "$START_MARK" "$COMPOSE_SERVICE"; }
@@ -331,18 +334,40 @@ else
     # recovery ends, and with archiving on it would publish that timeline into
     # the production archive — two throwaway instances would then collide on
     # identically named segments holding different data.
-    log "starting scratch instance on port ${RESTORE_PORT}"
+    if [ "$MODE" = "inspect" ]; then
+        log "starting scratch instance on port ${RESTORE_PORT}"
+    else
+        log "starting scratch instance (no published port; queried through docker exec)"
+    fi
     # Let compose name the container. Passing --name produces a name compose
     # does not recognise as one of its services, so every later compose command
     # — including ones unrelated to a restore — warns about an orphan container
     # for as long as an inspect instance is left running. Noise during a
     # recovery is worth avoiding; the id is captured instead.
+    # stderr is captured rather than discarded: the usual failure here is the
+    # port already being held by an earlier inspect instance, and that reason
+    # only exists in Docker's message.
+    # Only inspect publishes a port. verify is queried through 'docker exec' and
+    # nobody connects to it from the host, so publishing would give it a way to
+    # collide with a long-lived inspect instance for no benefit at all.
+    publish=()
+    [ "$MODE" = "inspect" ] && publish=(--publish "${RESTORE_PORT}:5432")
+
+    start_err="$(mktemp)"
+    # '|| true' is load-bearing under 'set -e': a failing command substitution
+    # in an assignment aborts the script at that line, which is how the real
+    # Docker message ended up being discarded rather than reported.
     RESTORE_CONTAINER="$(docker compose run -d \
-        --publish "${RESTORE_PORT}:5432" \
+        "${publish[@]}" \
         --env PGDATA="$SCRATCH_PGDATA" \
         --volume "${SCRATCH_VOLUME}:${SCRATCH_PGDATA}" \
-        "$COMPOSE_SERVICE" postgres -c archive_mode=off 2>/dev/null | tr -d '\r')"
-    [ -n "$RESTORE_CONTAINER" ] || die "could not start the scratch instance"
+        "$COMPOSE_SERVICE" postgres -c archive_mode=off 2>"$start_err" | tr -d '\r')" || true
+    if [ -z "$RESTORE_CONTAINER" ]; then
+        log "$(cat "$start_err")"
+        rm -f "$start_err"
+        die "could not start the scratch instance; if port ${RESTORE_PORT} is taken, find the holder with: docker ps --filter publish=${RESTORE_PORT}"
+    fi
+    rm -f "$start_err"
     record "container" "$RESTORE_CONTAINER"
     target_psql() { docker exec -u postgres "$RESTORE_CONTAINER" psql -U postgres "$@" </dev/null; }
     target_logs() { docker logs "$RESTORE_CONTAINER" 2>&1; }
