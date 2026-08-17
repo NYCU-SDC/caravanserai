@@ -20,6 +20,8 @@
 #   RESTORE_JOURNAL     where to record this run           (default: /tmp/cara-restore-<ts>.log)
 #   RESTORE_PORT        host port for scratch instances    (default: 5433)
 #   RECOVERY_TIMEOUT    seconds to wait for replay         (default: 600)
+#   LOCK_FILE           maintenance lock, shared with the backup script
+#                       (default: /tmp/cara-control-plane-maintenance.lock)
 
 set -euo pipefail
 
@@ -32,6 +34,7 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RESTORE_JOURNAL="${RESTORE_JOURNAL:-/tmp/cara-restore-${RUN_ID}.log}"
 RESTORE_PORT="${RESTORE_PORT:-5433}"
 RECOVERY_TIMEOUT="${RECOVERY_TIMEOUT:-600}"
+LOCK_FILE="${LOCK_FILE:-/tmp/cara-control-plane-maintenance.lock}"
 
 # PGDATA inside the one-off container. Production restores land on the service's
 # own volume at its usual path; scratch restores mount a separate volume
@@ -149,11 +152,27 @@ _restore_exec() {
 
 # --- preflight -------------------------------------------------------------
 
+# The same lock the backup script takes. Two concurrent takeovers would clear
+# and refill one PGDATA at the same time, and a backup reading PGDATA while a
+# takeover deletes it wastes an upload at best. Scratch modes take it too: they
+# read the same archive and would otherwise race retention.
+exec 9>"$LOCK_FILE"
+flock -n 9 || die "another backup or restore holds ${LOCK_FILE}; wait for it to finish"
+
 if [ "$MODE" = "takeover" ]; then
     # A running postmaster owns the production volume; compose run would mount
     # it underneath a live server. Refuse before anything else.
     if docker compose ps --status running --services 2>/dev/null | grep -qx "$COMPOSE_SERVICE"; then
         die "service '${COMPOSE_SERVICE}' is running; stop it before a takeover restore"
+    fi
+
+    # cara-server keeps its own view of the database. If it is still running it
+    # will reconnect to a cluster that has been replaced underneath it. This
+    # only catches the case where it is a compose service; when it runs as a
+    # host binary or a separate unit, stopping it is a runbook step and nothing
+    # here can verify it.
+    if docker compose ps --status running --services 2>/dev/null | grep -qx "cara-server"; then
+        die "cara-server is running; stop it before replacing the database"
     fi
 else
     docker volume create "$SCRATCH_VOLUME" >/dev/null \
@@ -324,8 +343,13 @@ if [ "$MODE" = "takeover" ]; then
     # 'up -d' rather than 'start': the container may not exist at all. On a
     # fresh machine it never has, and the bare-disk verification removes it in
     # order to delete the volume underneath. 'start' fails in both cases.
-    docker compose up -d "$COMPOSE_SERVICE" >/dev/null 2>&1 \
-        || die "could not start ${COMPOSE_SERVICE}"
+    up_err="$(mktemp)"
+    if ! docker compose up -d "$COMPOSE_SERVICE" >/dev/null 2>"$up_err"; then
+        log "$(cat "$up_err")"
+        rm -f "$up_err"
+        die "could not start ${COMPOSE_SERVICE}"
+    fi
+    rm -f "$up_err"
     target_psql() { docker compose exec -T -u postgres "$COMPOSE_SERVICE" psql -U postgres "$@" </dev/null; }
     target_logs() { docker compose logs --no-log-prefix --since "$START_MARK" "$COMPOSE_SERVICE"; }
     target_alive() { docker compose ps --status running --services 2>/dev/null | grep -qx "$COMPOSE_SERVICE"; }
@@ -445,6 +469,10 @@ case "$MODE" in
         # replay rather than one that has to cross a branch point. It runs in
         # the background on purpose: the control plane is already serving, and
         # RTO ends here. Time to backup completion is a separate measurement.
+        # Release the maintenance lock first. The backup script takes the same
+        # one, and with flock -n it would fail immediately rather than wait —
+        # silently, in the background, where nobody would see it.
+        exec 9>&-
         log "triggering a background base backup (does not gate service restoration)"
         nohup "${SCRIPT_DIR}/walg-backup.sh" >>"${RESTORE_JOURNAL}.backup" 2>&1 &
         record "post-restore backup" "pid $!, log ${RESTORE_JOURNAL}.backup"

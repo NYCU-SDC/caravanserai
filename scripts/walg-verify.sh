@@ -20,6 +20,11 @@
 # while reading local files and never contacting the object store at all. This
 # deletes the volume.
 #
+# Markers live in a database of their own, created here and dropped at the end,
+# so nothing accumulates in the control-plane database and no test row can ever
+# be mistaken for real state. The cluster-wide backup covers it either way,
+# which is exactly what the round trip needs.
+#
 #   COMPOSE_SERVICE   compose service running Postgres   (default: postgres)
 
 set -euo pipefail
@@ -30,8 +35,10 @@ cd "$REPO_ROOT"
 
 COMPOSE_SERVICE="${COMPOSE_SERVICE:-postgres}"
 PROD_PGDATA="/var/lib/postgresql/data"
+PROBE_DB="walg_verify"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 CONFIRM_DESTROY="no"
+TEST_RUN=""
 
 [ "${1:-}" = "--confirm-destroy" ] && CONFIRM_DESTROY="yes"
 
@@ -39,7 +46,21 @@ log()  { printf '%s  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 pass() { printf '\n  PASS  %s\n\n' "$*"; }
 die()  { printf '\n  FAIL  %s\n\n' "$*" >&2; exit 1; }
 
-pg() { docker compose exec -T -u postgres "$COMPOSE_SERVICE" psql -U postgres "$@" </dev/null; }
+# Whatever a test leaves half-finished gets cleaned up here rather than in each
+# failure path. The restore script cleans up after itself, but this script takes
+# ownership of the inspect instance it deliberately asked to be left running.
+SCRATCH_CONTAINER=""
+SCRATCH_VOLUME=""
+cleanup() {
+    [ -n "$SCRATCH_CONTAINER" ] && docker rm -f "$SCRATCH_CONTAINER" >/dev/null 2>&1
+    [ -n "$SCRATCH_VOLUME" ] && docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1
+    drop_probe_db
+    return 0
+}
+trap cleanup EXIT
+
+pg()    { docker compose exec -T -u postgres "$COMPOSE_SERVICE" psql -U postgres "$@" </dev/null; }
+probe() { pg -d "$PROBE_DB" "$@"; }
 
 # The point-in-time test restores in inspect mode, which publishes a port so the
 # instance can be queried. Somebody else's inspect instance left running is a
@@ -58,26 +79,31 @@ ensure_running() {
     docker compose up -d --wait >/dev/null 2>&1 || die "could not bring the stack up"
 }
 
-ensure_probe_table() {
-    pg -qc "CREATE TABLE IF NOT EXISTS walg_verify_probe(
-                id serial primary key,
-                run text not null,
-                marker text not null,
-                at timestamptz not null default now())" >/dev/null
+ensure_probe_db() {
+    if [ "$(pg -tAc "SELECT 1 FROM pg_database WHERE datname = '${PROBE_DB}'" | tr -d '\r')" != "1" ]; then
+        pg -qc "CREATE DATABASE ${PROBE_DB}" >/dev/null
+    fi
+    probe -qc "CREATE TABLE IF NOT EXISTS probe(
+                   id serial primary key,
+                   run text not null,
+                   marker text not null,
+                   at timestamptz not null default now())" >/dev/null
 }
 
-# Each test tags its rows with its own run label. Sharing one label across both
-# tests means the second one also sees the first one's markers, which reads as a
-# restore fault when it is only bookkeeping.
-TEST_RUN=""
+drop_probe_db() {
+    docker compose ps --status running --services 2>/dev/null | grep -qx "$COMPOSE_SERVICE" || return 0
+    pg -qc "DROP DATABASE IF EXISTS ${PROBE_DB}" >/dev/null 2>&1 || true
+}
 
 write_marker() {
-    pg -qc "INSERT INTO walg_verify_probe(run, marker) VALUES ('${TEST_RUN}', '$1')" >/dev/null
+    probe -qc "INSERT INTO probe(run, marker) VALUES ('${TEST_RUN}', '$1')" >/dev/null
 }
 
-markers() {
-    pg -tAc "SELECT string_agg(marker, ',' ORDER BY id)
-             FROM walg_verify_probe WHERE run = '${TEST_RUN}'" | tr -d '\r'
+markers_from() {
+    # $1 is a psql invocation prefix, so the same assertion works against the
+    # live cluster and against a restored instance in another container.
+    "$@" -d "$PROBE_DB" -tAc \
+        "SELECT string_agg(marker, ',' ORDER BY id) FROM probe WHERE run = '${TEST_RUN}'" | tr -d '\r'
 }
 
 # Force the segment holding the most recent writes out, then wait for the
@@ -111,7 +137,7 @@ test_point_in_time() {
     log "=== point-in-time restore ==="
     TEST_RUN="${RUN_ID}-pitr"
     ensure_running
-    ensure_probe_table
+    ensure_probe_db
 
     log "taking a base backup to restore from"
     "${SCRIPT_DIR}/walg-backup.sh" >/dev/null 2>&1 || die "base backup failed"
@@ -134,21 +160,23 @@ test_point_in_time() {
         die "the restore itself failed; full journal at ${journal}"
     fi
 
-    local container volume found
-    container="$(awk '/^  container /{print $2}' "$journal")"
-    volume="$(awk '/^  scratch volume /{print $3}' "$journal")"
-    [ -n "$container" ] || die "could not find the restored container in ${journal}"
+    # Recorded before querying so the EXIT trap owns them from here on.
+    SCRATCH_CONTAINER="$(awk '/^  container /{print $2}' "$journal")"
+    SCRATCH_VOLUME="$(awk '/^  scratch volume /{print $3}' "$journal")"
+    [ -n "$SCRATCH_CONTAINER" ] || die "could not find the restored container in ${journal}"
 
-    found="$(docker exec -u postgres "$container" psql -U postgres -tAc \
-        "SELECT string_agg(marker, ',' ORDER BY id)
-         FROM walg_verify_probe WHERE run = '${TEST_RUN}'" | tr -d '\r')"
-
-    docker rm -f "$container" >/dev/null 2>&1 || true
-    [ -n "$volume" ] && docker volume rm "$volume" >/dev/null 2>&1 || true
+    local found
+    found="$(markers_from docker exec -u postgres "$SCRATCH_CONTAINER" psql -U postgres)"
 
     # A alone. Both markers would mean the target was ignored; neither would
     # mean replay never reached the base backup's contents.
     [ "$found" = "A" ] || die "expected marker A only, got '${found:-<none>}'"
+
+    docker rm -f "$SCRATCH_CONTAINER" >/dev/null 2>&1 || true
+    docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1 || true
+    SCRATCH_CONTAINER=""
+    SCRATCH_VOLUME=""
+
     pass "restored to ${target}: marker A present, marker B correctly absent"
 }
 
@@ -159,7 +187,7 @@ test_bare_disk() {
     log "this deletes the local Postgres volume and rebuilds it from the archive"
     TEST_RUN="${RUN_ID}-baredisk"
     ensure_running
-    ensure_probe_table
+    ensure_probe_db
 
     write_marker A
     log "taking a base backup"
@@ -187,18 +215,52 @@ test_bare_disk() {
         && die "${volume} still exists; the test would have read local data"
     log "volume is gone — anything restored now came from the archive"
 
-    local takeover_journal="/tmp/cara-verify-${RUN_ID}-baredisk.log"
-    if ! RESTORE_JOURNAL="$takeover_journal" "${SCRIPT_DIR}/walg-restore.sh" takeover --confirm-destroy >/dev/null 2>&1; then
-        tail -5 "$takeover_journal" 2>/dev/null
-        die "the restore itself failed; full journal at ${takeover_journal}"
+    local journal="/tmp/cara-verify-${RUN_ID}-baredisk.log"
+    if ! RESTORE_JOURNAL="$journal" \
+        "${SCRIPT_DIR}/walg-restore.sh" takeover --confirm-destroy >/dev/null 2>&1; then
+        tail -5 "$journal" 2>/dev/null
+        die "the restore itself failed; full journal at ${journal}"
     fi
 
     local found lsn
-    found="$(markers)"
+    found="$(markers_from docker compose exec -T -u postgres "$COMPOSE_SERVICE" psql -U postgres)"
     lsn="$(pg -tAc "SELECT pg_current_wal_lsn()" | tr -d '\r')"
-
     [ "$found" = "A,B" ] || die "expected markers A,B, got '${found:-<none>}'"
     pass "restored from an empty volume: both markers present, LSN ${lsn}"
+
+    assert_post_restore_backup "$journal"
+}
+
+# --- the re-baseline -------------------------------------------------------
+#
+# Restoring proves the data comes back. It does not prove the system returns to
+# a protected state: without a fresh base backup on the new timeline, the next
+# restore has to replay across a branch point. That backup runs in the
+# background precisely so it does not delay service, which also means nothing
+# would notice if it failed.
+
+assert_post_restore_backup() {
+    local journal="$1" backup_log name deadline
+    backup_log="${journal}.backup"
+    log "=== post-restore base backup ==="
+
+    deadline=$(( $(date +%s) + 120 ))
+    while :; do
+        name="$(awk '/done: backup=/{sub(/^.*done: backup=/, ""); print $1}' "$backup_log" 2>/dev/null | tail -1)"
+        [ -n "$name" ] && break
+        [ "$(date +%s)" -ge "$deadline" ] && {
+            tail -5 "$backup_log" 2>/dev/null
+            die "the post-restore backup did not finish within 120s; log at ${backup_log}"
+        }
+        sleep 2
+    done
+
+    pg -tAc "SELECT 1" >/dev/null 2>&1 || die "the database is not answering after the restore"
+    docker compose exec -T -u postgres "$COMPOSE_SERVICE" wal-g backup-list </dev/null 2>/dev/null \
+        | grep -q "$name" \
+        || die "the post-restore backup ${name} is not in backup-list"
+
+    pass "re-baselined on the new timeline: ${name} is in the archive"
 }
 
 # --- run -------------------------------------------------------------------

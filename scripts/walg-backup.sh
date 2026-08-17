@@ -12,7 +12,8 @@
 #   COMPOSE_SERVICE     compose service running Postgres     (default: postgres)
 #   PGDATA              data directory inside the container  (default: /var/lib/postgresql/data)
 #   WALG_RETAIN_FULL    how many full backups to keep        (default: 7)
-#   LOCK_FILE           overlap guard                        (default: /tmp/cara-control-plane-backup.lock)
+#   LOCK_FILE           maintenance lock, shared with the restore script
+#                       (default: /tmp/cara-control-plane-maintenance.lock)
 
 set -euo pipefail
 
@@ -25,7 +26,7 @@ cd "$REPO_ROOT"
 COMPOSE_SERVICE="${COMPOSE_SERVICE:-postgres}"
 PGDATA="${PGDATA:-/var/lib/postgresql/data}"
 WALG_RETAIN_FULL="${WALG_RETAIN_FULL:-7}"
-LOCK_FILE="${LOCK_FILE:-/tmp/cara-control-plane-backup.lock}"
+LOCK_FILE="${LOCK_FILE:-/tmp/cara-control-plane-maintenance.lock}"
 
 log() { printf '%s  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
@@ -50,9 +51,9 @@ case "$WALG_RETAIN_FULL" in
     ''|*[!0-9]*|0) die "WALG_RETAIN_FULL must be a positive integer, got '${WALG_RETAIN_FULL}'" ;;
 esac
 
-# Held for the whole run, retention included. A slow backup that overruns its
-# schedule would otherwise have cron start a second one on top of it, doubling
-# the load on a database that is already struggling to finish the first.
+# One maintenance lock for the whole family of scripts, held for the entire run
+# including retention. It stops cron starting a second backup on top of a slow
+# one, and it stops a restore clearing PGDATA while this is still reading it.
 exec 9>"$LOCK_FILE"
 flock -n 9 || die "another run holds ${LOCK_FILE}; a backup is already in progress"
 
@@ -138,7 +139,9 @@ if [ -n "$detail" ]; then
     compressed="$(printf '%s' "$detail"   | sed -n 's/.*"compressed_size":\([0-9]*\).*/\1/p')"
     uncompressed="$(printf '%s' "$detail" | sed -n 's/.*"uncompressed_size":\([0-9]*\).*/\1/p')"
 else
-    log "detail: (unavailable)"
+    # Not fatal — the backup itself succeeded — but the sizes are one of this
+    # ticket's deliverables, so losing them silently is not acceptable either.
+    log "WARNING: could not read the backup's detail record; sizes not captured"
     compressed=""
     uncompressed=""
 fi
