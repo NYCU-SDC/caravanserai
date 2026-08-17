@@ -293,10 +293,16 @@ record "restore_command" "wal-g wal-fetch"
 
 if [ "$MODE" = "takeover" ]; then
     log "starting ${COMPOSE_SERVICE}"
+    # takeover restarts the existing container, so its log still holds
+    # everything from before the restore. Anchoring to this moment keeps the
+    # journal to lines that describe this recovery — during an incident that
+    # record is the only account of what happened, and stale checkpoint lines
+    # from days earlier read as if they were part of it.
+    START_MARK="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     docker compose start "$COMPOSE_SERVICE" >/dev/null \
         || die "could not start ${COMPOSE_SERVICE}"
     target_psql() { docker compose exec -T -u postgres "$COMPOSE_SERVICE" psql -U postgres "$@" </dev/null; }
-    target_logs() { docker compose logs --no-log-prefix "$COMPOSE_SERVICE"; }
+    target_logs() { docker compose logs --no-log-prefix --since "$START_MARK" "$COMPOSE_SERVICE"; }
     target_alive() { docker compose ps --status running --services 2>/dev/null | grep -qx "$COMPOSE_SERVICE"; }
 else
     # A scratch instance must not archive. It promotes onto a new timeline when
