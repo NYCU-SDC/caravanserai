@@ -47,6 +47,19 @@ usage() {
 # Everything the run learns goes to both the terminal and the journal. During a
 # real recovery the journal is the only record of what was chosen and what was
 # given up, so it is written as the run goes rather than assembled at the end.
+# Scratch resources are removed on any exit path that leaves them behind, not
+# only on success. A failed inspect used to leave a stopped container and a
+# volume for someone to find later, and the next run would refuse to reuse the
+# volume — so the debris also blocked the retry.
+CLEANUP_SCRATCH="no"
+cleanup() {
+    [ "$CLEANUP_SCRATCH" = "yes" ] || return 0
+    [ -n "${RESTORE_CONTAINER:-}" ] && docker rm -f "$RESTORE_CONTAINER" >/dev/null 2>&1
+    [ -n "${SCRATCH_VOLUME:-}" ] && docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1
+    return 0
+}
+trap cleanup EXIT
+
 log() {
     local line
     line="$(printf '%s  %s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*")"
@@ -85,7 +98,10 @@ if [ "$MODE" = "verify" ] && [ -n "$TARGET_TIME" ]; then
 fi
 
 if [ -n "$TARGET_TIME" ]; then
-    TARGET_EPOCH="$(date -d "$TARGET_TIME" +%s 2>/dev/null)" \
+    # Millisecond resolution on both sides. WAL-G records finish_time with
+    # fractional seconds, and truncating to whole seconds can rank a backup that
+    # finished just after the target as if it finished just before it.
+    TARGET_EPOCH="$(date -d "$TARGET_TIME" +%s%3N 2>/dev/null)" \
         || die "could not parse --at '${TARGET_TIME}'"
 fi
 
@@ -142,6 +158,7 @@ if [ "$MODE" = "takeover" ]; then
 else
     docker volume create "$SCRATCH_VOLUME" >/dev/null \
         || die "could not create scratch volume ${SCRATCH_VOLUME}"
+    CLEANUP_SCRATCH="yes"
     log "created scratch volume ${SCRATCH_VOLUME}"
 
     # A freshly created volume's mount point belongs to root, and everything
@@ -164,6 +181,48 @@ if ! archive_err="$(restore_exec wal-g backup-list 2>&1 >/dev/null)"; then
         *[Nn]o\ backups\ found*) die "the archive holds no backups; there is nothing to restore" ;;
         *) die "cannot read the archive: ${archive_err}" ;;
     esac
+fi
+
+# --- resolve the backup ----------------------------------------------------
+
+# Resolved before anything is destroyed. Reachability alone is not enough: a
+# point-in-time target may have no backup old enough to serve it, and finding
+# that out after clearing the data directory would leave nothing on either
+# side. Know what is going in before removing what is there.
+#
+# Never hand LATEST to backup-fetch either. It is a moving reference, and the
+# whole point of recording a name is to know which object this run used.
+backups="$(restore_exec wal-g backup-list --detail --json 2>/dev/null | tr '{' '\n' | grep '"backup_name"')"
+[ -n "$backups" ] || die "backup-list returned no usable records"
+
+RESOLVED=""
+RESOLVED_TIME=""
+while IFS= read -r rec; do
+    name="$(printf '%s' "$rec" | sed -n 's/.*"backup_name":"\([^"]*\)".*/\1/p')"
+    finish="$(printf '%s' "$rec" | sed -n 's/.*"finish_time":"\([^"]*\)".*/\1/p')"
+    [ -n "$name" ] && [ -n "$finish" ] || continue
+
+    if [ -n "$TARGET_TIME" ]; then
+        # A backup is only usable as a starting point if it finished before the
+        # target; WAL replay covers the rest of the way.
+        finish_epoch="$(date -d "$finish" +%s%3N 2>/dev/null)" || continue
+        [ "$finish_epoch" -le "$TARGET_EPOCH" ] || continue
+    fi
+
+    # backup-list is ordered oldest first, so the last one that passes is the
+    # newest one that qualifies.
+    RESOLVED="$name"
+    RESOLVED_TIME="$finish"
+done <<<"$backups"
+
+if [ -z "$RESOLVED" ]; then
+    die "no backup finished before ${TARGET_TIME}; the oldest available one starts later than the requested point"
+fi
+
+record "resolved backup" "$RESOLVED"
+record "backup finished" "$RESOLVED_TIME"
+if [ -n "$TARGET_TIME" ]; then
+    record "chosen because" "newest backup finishing at or before ${TARGET_TIME}"
 fi
 
 # The check is against the target data directory, not "is any Postgres
@@ -206,43 +265,6 @@ case "$target_state" in
         die "could not determine the state of ${TARGET_PGDATA}"
         ;;
 esac
-
-# --- resolve the backup ----------------------------------------------------
-
-# Never hand LATEST to backup-fetch. It is a moving reference, and the whole
-# point of recording a name is to know which object this run actually used.
-backups="$(restore_exec wal-g backup-list --detail --json 2>/dev/null | tr '{' '\n' | grep '"backup_name"')"
-[ -n "$backups" ] || die "backup-list returned no usable records"
-
-RESOLVED=""
-RESOLVED_TIME=""
-while IFS= read -r rec; do
-    name="$(printf '%s' "$rec" | sed -n 's/.*"backup_name":"\([^"]*\)".*/\1/p')"
-    finish="$(printf '%s' "$rec" | sed -n 's/.*"finish_time":"\([^"]*\)".*/\1/p')"
-    [ -n "$name" ] && [ -n "$finish" ] || continue
-
-    if [ -n "$TARGET_TIME" ]; then
-        # A backup is only usable as a starting point if it finished before the
-        # target; WAL replay covers the rest of the way.
-        finish_epoch="$(date -d "$finish" +%s 2>/dev/null)" || continue
-        [ "$finish_epoch" -le "$TARGET_EPOCH" ] || continue
-    fi
-
-    # backup-list is ordered oldest first, so the last one that passes is the
-    # newest one that qualifies.
-    RESOLVED="$name"
-    RESOLVED_TIME="$finish"
-done <<<"$backups"
-
-if [ -z "$RESOLVED" ]; then
-    die "no backup finished before ${TARGET_TIME}; the oldest available one starts later than the requested point"
-fi
-
-record "resolved backup" "$RESOLVED"
-record "backup finished" "$RESOLVED_TIME"
-if [ -n "$TARGET_TIME" ]; then
-    record "chosen because" "newest backup finishing at or before ${TARGET_TIME}"
-fi
 
 # --- fetch -----------------------------------------------------------------
 
@@ -412,9 +434,12 @@ case "$MODE" in
         log "cleaning up"
         docker rm -f "$RESTORE_CONTAINER" >/dev/null 2>&1 || true
         docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1 || true
+        CLEANUP_SCRATCH="no"
         log "verify passed"
         ;;
     inspect)
+        # The whole point of inspect is to leave something to query.
+        CLEANUP_SCRATCH="no"
         record "connect with" "psql -h localhost -p ${RESTORE_PORT} -U postgres"
         log "the instance is left running so you can query it"
         log "when finished: docker rm -f ${RESTORE_CONTAINER} && docker volume rm ${SCRATCH_VOLUME}"
