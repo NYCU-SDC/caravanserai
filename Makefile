@@ -46,7 +46,16 @@ schemas:
 		&& echo -e "==> $(BLUE)Schemas generated successfully$(NC)" \
 		|| (echo -e "==> $(RED)Schema generation failed$(NC)" && exit 1)
 
-dev-up:
+# The dev stack reads MinIO's credentials from .env, which is gitignored so the
+# compose file carries no credentials at all. Making it a file target means make
+# creates it on first use and never mentions it again — the alternative is every
+# clone failing on a password that is not a secret, which teaches people that
+# credential handling is noise.
+.env:
+	@cp .env.example .env
+	@echo -e "  -> $(BLUE)created .env from .env.example$(NC)"
+
+dev-up: .env
 	@echo -e ":: $(GREEN)Starting development services (PostgreSQL + Headscale)...$(NC)"
 	@docker compose up -d --wait \
 		&& echo -e "==> $(BLUE)Development services are ready$(NC)" \
@@ -57,7 +66,7 @@ dev-down:
 	@docker compose down \
 		&& echo -e "==> $(BLUE)Services stopped$(NC)"
 
-dev-reset:
+dev-reset: .env
 	@echo -e ":: $(GREEN)Resetting development environment (wiping data)...$(NC)"
 	@docker compose down -v \
 		&& docker compose up -d --wait \

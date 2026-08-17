@@ -31,8 +31,11 @@ services:
       # baked into the image; production supplies the same variables from its
       # own secret store (CARA-77).
       WALG_S3_PREFIX: s3://cara-backups/cara/v1/control-plane/walg
-      AWS_ACCESS_KEY_ID: caraadmin
-      AWS_SECRET_ACCESS_KEY: caraadmin123
+      # Sourced from .env, which is gitignored. The ':?' form makes compose refuse
+      # to start with a named variable rather than substituting an empty string
+      # and leaving archive_command to fail against a bucket it cannot open.
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?missing; copy .env.example to .env}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?missing; copy .env.example to .env}
       AWS_ENDPOINT: http://minio:9000
       AWS_REGION: us-east-1
       # Self-hosted S3 implementations generally lack the DNS wildcard that
@@ -78,8 +81,8 @@ services:
     image: minio/minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: caraadmin
-      MINIO_ROOT_PASSWORD: caraadmin123
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?missing; copy .env.example to .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?missing; copy .env.example to .env}
     ports:
       - "${MINIO_BIND:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
       - "${MINIO_BIND:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
@@ -103,7 +106,7 @@ services:
       - sh
       - -c
       - |
-        mc alias set local http://minio:9000 caraadmin caraadmin123 &&
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
         mc mb --ignore-existing local/cara-backups
 
   headscale:
