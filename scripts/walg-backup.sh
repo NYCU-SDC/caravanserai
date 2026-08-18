@@ -54,8 +54,17 @@ esac
 # One maintenance lock for the whole family of scripts, held for the entire run
 # including retention. It stops cron starting a second backup on top of a slow
 # one, and it stops a restore clearing PGDATA while this is still reading it.
-exec 9>"$LOCK_FILE"
-flock -n 9 || die "another run holds ${LOCK_FILE}; a backup is already in progress"
+# A caller that already holds the lock says so through the environment, and this
+# skips taking it. flock is per open file description, so opening the same file
+# here would create a second one that this script's own flock then refuses —
+# verified: under walg-verify.sh the child is refused and the run dies, rather
+# than sharing the lock it was meant to cooperate with.
+if [ "${CARA_MAINTENANCE_LOCK_HELD:-0}" = "1" ]; then
+    log "maintenance lock already held by the caller"
+else
+    exec 9>"$LOCK_FILE"
+    flock -n 9 || die "another run holds ${LOCK_FILE}; a backup is already in progress"
+fi
 
 docker compose ps --status running --services 2>/dev/null | grep -qx "$COMPOSE_SERVICE" \
     || die "service '$COMPOSE_SERVICE' is not running; a base backup needs a live cluster"

@@ -213,8 +213,17 @@ _run_in_container() {
 # and refill one PGDATA at the same time, and a backup reading PGDATA while a
 # takeover deletes it wastes an upload at best. Scratch modes take it too: they
 # read the same archive and would otherwise race retention.
-exec 9>"$LOCK_FILE"
-flock -n 9 || die "another backup or restore holds ${LOCK_FILE}; wait for it to finish"
+# A caller that already holds the lock says so through the environment, and this
+# skips taking it. flock is per open file description, so opening the same file
+# here would create a second one that this script's own flock then refuses —
+# verified: under walg-verify.sh the child is refused and the run dies, rather
+# than sharing the lock it was meant to cooperate with.
+if [ "${CARA_MAINTENANCE_LOCK_HELD:-0}" = "1" ]; then
+    log "maintenance lock already held by the caller"
+else
+    exec 9>"$LOCK_FILE"
+    flock -n 9 || die "another backup or restore holds ${LOCK_FILE}; wait for it to finish"
+fi
 
 if [ "$MODE" = "takeover" ]; then
     # A running postmaster owns the production volume; compose run would mount
@@ -509,7 +518,12 @@ while :; do
         # transaction later than the target — it cannot claim to have reached a
         # point it never observed. The usual cause is a target after the last
         # write that was archived, not a damaged backup.
-        if target_logs 2>&1 | grep -q "recovery ended before configured recovery target"; then
+        # 'grep -F ... >/dev/null' rather than 'grep -q': -q exits at the first
+        # match, the producer ahead of it takes SIGPIPE, and pipefail turns that
+        # into 141 — which here would silently discard the specific diagnosis
+        # below. Container logs are unbounded, so the producer really can outrun
+        # the pipe buffer.
+        if target_logs 2>&1 | grep -F "recovery ended before configured recovery target" >/dev/null; then
             die "no transaction after ${TARGET_TIME} has been archived, so that point cannot be reached. Pick an earlier target, or restore to latest."
         fi
         die "Postgres exited during recovery; see the log above"
@@ -568,7 +582,10 @@ case "$MODE" in
         # Release the maintenance lock first. The backup script takes the same
         # one, and with flock -n it would fail immediately rather than wait —
         # silently, in the background, where nobody would see it.
-        exec 9>&-
+        # Only if this run is the one holding it. Under a caller that holds the
+        # lock, fd 9 was never opened here and the background backup inherits the
+        # same opt-out, so the caller's lock keeps covering both.
+        [ "${CARA_MAINTENANCE_LOCK_HELD:-0}" = "1" ] || exec 9>&-
         log "triggering a background base backup (does not gate service restoration)"
         nohup "${SCRIPT_DIR}/walg-backup.sh" >>"${RESTORE_JOURNAL}.backup" 2>&1 &
         record "post-restore backup" "pid $!, log ${RESTORE_JOURNAL}.backup"
