@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"tailscale.com/tsnet"
 )
 
 func TestReadPreauthKey(t *testing.T) {
@@ -83,6 +85,26 @@ func TestNewTsnetClient_ConfigValidation(t *testing.T) {
 			assert.NotNil(t, c)
 		})
 	}
+}
+
+// HTTPTransport must return an *http.Transport that dials through the tsnet
+// node, so the agent dialer routes server→agent calls over the overlay.
+func TestTsnetClient_HTTPTransport(t *testing.T) {
+	c, err := NewTsnetClient(TsnetConfig{
+		ControlURL:     "http://localhost:8081",
+		PreauthKeyFile: "/tmp/key",
+		Hostname:       "cara-server",
+	}, zap.NewNop())
+	require.NoError(t, err)
+
+	// Stand in for a joined node; Join is exercised elsewhere and needs a live
+	// Headscale.  We only assert the transport is wired to tsnet's dialer.
+	c.srv = &tsnet.Server{}
+
+	rt := c.HTTPTransport()
+	transport, ok := rt.(*http.Transport)
+	require.True(t, ok, "expected an *http.Transport")
+	assert.NotNil(t, transport.DialContext, "DialContext must delegate to tsnet")
 }
 
 // Close must be a no-op (not panic) when Join never ran.

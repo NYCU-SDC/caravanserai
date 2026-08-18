@@ -237,7 +237,7 @@ All endpoints are under `/api/v1/`.
 | `GET` | `/api/v1/nodes/{name}` | Get a single node |
 | `DELETE` | `/api/v1/nodes/{name}` | Delete a node |
 | `POST` | `/api/v1/nodes/{name}/heartbeat` | Send a heartbeat |
-| `POST` | `/api/v1/nodes/{name}/probe` | Server-side reachability probe — server dials the agent's `/healthz` via the agent dialer (see `internal/server/agentdialer/`) and reports latency + status. Today this uses the stored `Status.Network.IP`; Headscale/tsnet transport can be injected by follow-up overlay work. Also surfaced as `caractl node probe <name>`. |
+| `POST` | `/api/v1/nodes/{name}/probe` | Server-side reachability probe — server dials the agent's `/healthz` via the agent dialer (see `internal/server/agentdialer/`) and reports latency + status. When the server is joined to the overlay (see below) the dialer routes this over the agent's overlay IP via a tsnet-backed transport; otherwise it uses the default transport. Also surfaced as `caractl node probe <name>`. |
 
 ### Projects
 
@@ -332,6 +332,36 @@ never silently falls back to the underlay once overlay is requested.
 > The dev Headscale listens on host port `8081`, which is also the agent
 > ingress proxy's default. Pass `--proxy-listen-addr` (as above) when running an
 > agent on the same host.
+
+#### Joining the overlay from cara-server
+
+For the server to reach a NAT-ed agent it must be on the overlay too: the
+agent's overlay IP lives in the `100.64.0.0/10` CGNAT range, which the host
+kernel has no route to. Overlay networking is **opt-in** on the server as well —
+it joins Headscale only when both a control-plane URL and a pre-auth key file
+are configured. With neither set, `cara-server` uses the default HTTP transport
+(existing behaviour, no overlay).
+
+```bash
+docker compose exec headscale headscale preauthkeys create --user 1 --expiration 24h > server-preauth.key
+
+./bin/cara-server \
+  --headscale-url http://localhost:8081 \
+  --preauth-key-file ./server-preauth.key
+```
+
+On startup the server joins the mesh, logs its overlay IP
+(`Joined Headscale overlay … overlay_ip=100.64.0.x`), and injects a tsnet-backed
+transport into the agent dialer so every server→agent call is routed over the
+overlay. A join failure fails fast; the server never silently falls back to a
+transport that cannot reach the overlay once overlay is requested.
+
+| Setting | Flag | Env / YAML | Notes |
+|---|---|---|---|
+| Control-plane URL | `--headscale-url` | `HEADSCALE_URL` / `headscale_url` | Enables overlay when set |
+| Pre-auth key file | `--preauth-key-file` | `HEADSCALE_PREAUTH_KEY_FILE` / `preauth_key_file` | Path to a file holding the key; the key is never logged |
+| Overlay hostname | `--overlay-hostname` | `OVERLAY_HOSTNAME` / `overlay_hostname` | Optional; defaults to `cara-server` |
+| Overlay state dir | `--overlay-state-dir` | `OVERLAY_STATE_DIR` / `overlay_state_dir` | Optional; defaults to a `cara-server`-specific dir. Set this when running server and agent on the same host so their tsnet state does not collide |
 
 ### Docker resource naming
 

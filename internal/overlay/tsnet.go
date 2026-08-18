@@ -3,6 +3,7 @@ package overlay
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,6 +104,16 @@ func (c *TsnetClient) Join(ctx context.Context) (JoinResult, error) {
 // OverlayIP returns the overlay IP from the last successful Join.
 func (c *TsnetClient) OverlayIP() string {
 	return c.overlayIP
+}
+
+// HTTPTransport returns an http.RoundTripper whose connections are dialed
+// through the embedded tsnet node instead of the host network stack.  This is
+// what lets cara-server reach agents on their Headscale overlay IPs (the
+// 100.64.0.0/10 CGNAT range), which the host kernel has no route to.  It must
+// be called after a successful Join; before then c.srv is nil and the returned
+// transport would panic on first use.
+func (c *TsnetClient) HTTPTransport() http.RoundTripper {
+	return &http.Transport{DialContext: c.srv.Dial}
 }
 
 // Close leaves the overlay network.  It is safe to call when Join never ran.
