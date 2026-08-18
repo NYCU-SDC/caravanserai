@@ -4,15 +4,28 @@
 #
 #   walg-verify.sh [--confirm-destroy]
 #
-# Two tests, because they exercise different code paths:
+# Four tests, because they exercise different code paths:
 #
 #   point-in-time   restores to a recorded instant beside the live database.
 #                   Uses restore_command, recovery_target_time and
-#                   recovery_target_action. Non-destructive, always runs.
+#                   recovery_target_action.
+#
+#   upload resumed  archiving is broken, writes continue, archiving comes back.
+#                   The restore must reach the latest archived WAL.
+#
+#   upload lost     archiving is broken and never recovers before the node dies.
+#                   The restore must reach the last successfully archived WAL,
+#                   and the writes after that point must be asserted ABSENT
+#                   rather than treated as a failure. This is the case that says
+#                   what the archive actually guarantees.
 #
 #   bare disk       deletes the pgdata volume and restores onto nothing.
 #                   Uses only restore_command. Requires --confirm-destroy
 #                   because it destroys the local database to do its job.
+#
+# The first three are non-destructive to the database and always run; two of
+# them do interrupt the object store and one briefly stops Postgres, so none of
+# them belongs anywhere near a live service.
 #
 # The bare-disk test is the one that matters most and the one easiest to fake.
 # docker-compose.yaml keeps Postgres data in a named volume, so removing the
@@ -25,14 +38,16 @@
 # be mistaken for real state. The cluster-wide backup covers it either way,
 # which is exactly what the round trip needs.
 #
-# Each run pushes two base backups into whatever archive the stack is pointed
-# at, and each of those triggers retention. With WALG_RETAIN_FULL at its default
-# of 7, four verification runs are enough to evict every real daily backup and,
-# with them, the WAL those backups depended on. That is harmless against a dev
+# Each run pushes one base backup per test into whatever archive the stack is
+# pointed at, and each of those triggers retention. With WALG_RETAIN_FULL at its
+# default of 7, two verification runs are enough to evict every real daily
+# backup and, with them, the WAL those backups depended on. That is harmless against a dev
 # archive and destructive against a real one, so the run refuses to start unless
 # the object store is a local one — see assert_development_stack below.
 #
 #   COMPOSE_SERVICE   compose service running Postgres   (default: postgres)
+#   OBJECT_STORE_SERVICE
+#                     compose service backing the archive  (default: minio)
 #   LOCK_FILE         maintenance lock, shared with the backup and restore
 #                     scripts (default: /tmp/cara-control-plane-maintenance.lock)
 #   WALG_VERIFY_ALLOW_NON_DEV_ARCHIVE=yes
@@ -47,6 +62,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 COMPOSE_SERVICE="${COMPOSE_SERVICE:-postgres}"
+OBJECT_STORE_SERVICE="${OBJECT_STORE_SERVICE:-minio}"
 LOCK_FILE="${LOCK_FILE:-/tmp/cara-control-plane-maintenance.lock}"
 PROD_PGDATA="/var/lib/postgresql/data"
 PROBE_DB="walg_verify"
@@ -71,17 +87,29 @@ die()  { printf '\n  FAIL  %s\n\n' "$*" >&2; exit 1; }
 # ownership of the inspect instance it deliberately asked to be left running.
 SCRATCH_CONTAINER=""
 SCRATCH_VOLUME=""
+# test_upload_lost stops Postgres deliberately. If an assertion after that point
+# fails, the trap has to put it back: leaving a developer's stack down as a side
+# effect of a failed test is its own small outage, and it also stops the probe
+# database from being cleaned up below.
+RESTART_STACK_ON_EXIT="no"
 cleanup() {
     # -v so the scratch instance's anonymous volume goes with it; see the same
     # note in walg-restore.sh. Named volumes are untouched by -v.
     [ -n "$SCRATCH_CONTAINER" ] && docker rm -f -v "$SCRATCH_CONTAINER" >/dev/null 2>&1
     [ -n "$SCRATCH_VOLUME" ] && docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1
+    # Before drop_probe_db, which needs a running server to do anything.
+    [ "$RESTART_STACK_ON_EXIT" = "yes" ] && docker compose up -d --wait >/dev/null 2>&1
     drop_probe_db
     return 0
 }
 trap cleanup EXIT
 
-pg()    { docker compose exec -T -u postgres "$COMPOSE_SERVICE" psql -U postgres "$@" </dev/null; }
+# client_min_messages=warning because CREATE TABLE IF NOT EXISTS and friends
+# emit a NOTICE on the second run, and a test harness that prints "relation
+# already exists" twice per run trains the reader to skim past its own output.
+# Warnings and errors still come through.
+pg()    { docker compose exec -T -u postgres -e PGOPTIONS='-c client_min_messages=warning' \
+              "$COMPOSE_SERVICE" psql -U postgres "$@" </dev/null; }
 probe() { pg -d "$PROBE_DB" "$@"; }
 
 # The point-in-time test restores in inspect mode, which publishes a port so the
@@ -190,25 +218,163 @@ markers_from() {
         "SELECT string_agg(marker, ',' ORDER BY id) FROM probe WHERE run = '${TEST_RUN}'" | tr -d '\r'
 }
 
-# Force the segment holding the most recent writes out, then wait for the
-# archiver to confirm it. A fixed sleep races the upload, and a test that fails
-# intermittently gets skipped rather than fixed.
-seal_and_wait_for_archive() {
-    local segment deadline archived
+# Seal the segment holding the most recent writes and return its name, without
+# waiting for it to reach the archive. The tests that break archiving on purpose
+# need the name of the segment they just stranded.
+seal_segment() {
+    local segment
     segment="$(pg -tAc "SELECT pg_walfile_name(pg_current_wal_lsn())" | tr -d '\r')"
     pg -qc "SELECT pg_switch_wal()" >/dev/null
+    printf '%s' "$segment"
+}
+
+# Wait for the archiver to confirm a segment. A fixed sleep races the upload, and
+# a test that fails intermittently gets skipped rather than fixed.
+wait_for_segment_archived() {
+    local segment="$1" timeout="${2:-120}" deadline archived waited=0
     log "waiting for ${segment} to be archived"
 
-    deadline=$(( $(date +%s) + 120 ))
+    deadline=$(( $(date +%s) + timeout ))
     while :; do
         archived="$(pg -tAc "SELECT last_archived_wal FROM pg_stat_archiver" | tr -d '\r')"
         # Segment names are zero-padded hex on a fixed-width format, so a string
         # comparison orders them correctly within a timeline.
-        [ -n "$archived" ] && [ ! "$archived" \< "$segment" ] && break
+        [ -n "$archived" ] && [ ! "$archived" \< "$segment" ] && {
+            [ "$waited" -gt 0 ] && log "  archived after ~${waited}s"
+            return 0
+        }
         [ "$(date +%s)" -ge "$deadline" ] \
-            && die "segment ${segment} was not archived within 120s (last archived: ${archived:-none})"
+            && die "segment ${segment} was not archived within ${timeout}s (last archived: ${archived:-none})"
+        sleep 2
+        waited=$(( waited + 2 ))
+        # A drain that follows an outage waits on wal-g's own retry backoff, so
+        # it can take far longer than the healthy path. Say so rather than look
+        # hung for minutes.
+        [ $(( waited % 30 )) -eq 0 ] && log "  still waiting (${waited}s, last archived: ${archived:-none})"
+    done
+}
+
+seal_and_wait_for_archive() { wait_for_segment_archived "$(seal_segment)"; }
+
+
+# --- object store control --------------------------------------------------
+#
+# The interrupted-upload tests need archiving to actually fail, and the only
+# honest way to arrange that is to take the object store away. Stopping the
+# service is preferred over firewall or credential tricks: it fails the same way
+# a real outage does, at the same layer, with the same WAL-G error.
+
+object_store_cid() { docker compose ps -q "$OBJECT_STORE_SERVICE" 2>/dev/null; }
+
+stop_object_store() {
+    log "stopping ${OBJECT_STORE_SERVICE} — archiving will start failing"
+    docker compose stop "$OBJECT_STORE_SERVICE" >/dev/null 2>&1 \
+        || die "could not stop ${OBJECT_STORE_SERVICE}"
+}
+
+start_object_store() {
+    local deadline cid
+    log "starting ${OBJECT_STORE_SERVICE}"
+    docker compose start "$OBJECT_STORE_SERVICE" >/dev/null 2>&1 \
+        || die "could not start ${OBJECT_STORE_SERVICE}"
+
+    # Health, not "started". WAL-G against a MinIO that is up but not yet
+    # serving fails exactly like one that is down, and the difference would show
+    # up as an unexplained flake rather than as this wait timing out.
+    deadline=$(( $(date +%s) + 120 ))
+    while :; do
+        cid="$(object_store_cid)"
+        [ -n "$cid" ] \
+            && [ "$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null)" = "healthy" ] \
+            && return 0
+        [ "$(date +%s)" -ge "$deadline" ] \
+            && die "${OBJECT_STORE_SERVICE} did not become healthy within 120s"
         sleep 2
     done
+}
+
+# Prove the outage is real before asserting anything about its consequences. A
+# test that assumed archiving had stopped while it quietly kept working would
+# pass for entirely the wrong reason — and that is the failure mode this whole
+# pair of tests exists to rule out.
+#
+# Not via pg_stat_archiver.failed_count. That counter only moves when
+# archive_command RETURNS non-zero, and archive_command here is 'wal-g wal-push',
+# which retries an unreachable endpoint with backoff before giving up. Against a
+# stopped container the connection times out rather than being refused, so the
+# command stays running: archiving is completely stalled while failed_count
+# reads zero. Measured — this is what the first version of this test hit.
+#
+# The queue is what is true immediately. Postgres writes <segment>.ready the
+# moment a segment is sealed and renames it to .done only once archive_command
+# has succeeded, so a .ready that persists IS the outage, observed directly
+# rather than inferred from a counter.
+archive_status_of() {
+    local segment="$1"
+    docker compose exec -T -u postgres "$COMPOSE_SERVICE" sh -c "
+        d='${PROD_PGDATA}/pg_wal/archive_status'
+        if   [ -e \"\$d/${segment}.done\"  ]; then echo done
+        elif [ -e \"\$d/${segment}.ready\" ]; then echo ready
+        else echo absent; fi" </dev/null | tr -d '\r'
+}
+
+assert_segment_stuck() {
+    local segment="$1" deadline status
+
+    # It has to reach the queue first; a segment that never sealed would make
+    # everything below vacuous.
+    deadline=$(( $(date +%s) + 60 ))
+    while :; do
+        status="$(archive_status_of "$segment")"
+        [ "$status" = "ready" ] && break
+        [ "$status" = "done" ] \
+            && die "segment ${segment} was archived even though the object store is down"
+        [ "$(date +%s)" -ge "$deadline" ] \
+            && die "segment ${segment} never entered the archive queue (status: ${status})"
+        sleep 2
+    done
+
+    # And it has to stay there. The healthy path drains in about a second, so
+    # fifteen is well past any ambiguity without padding the run.
+    log "segment ${segment} is queued; confirming it stays that way"
+    sleep 15
+    status="$(archive_status_of "$segment")"
+    [ "$status" = "ready" ] \
+        || die "segment ${segment} left the queue while the object store was down (status: ${status})"
+    log "archiving is stalled as intended (${segment} still .ready)"
+}
+
+# --- restoring for inspection ----------------------------------------------
+#
+# Three tests restore beside the live database and then query the result, so the
+# bookkeeping lives here once. The container and volume are captured before any
+# assertion runs: from that moment the EXIT trap owns them, and an assertion
+# that dies cannot leave them behind.
+
+restore_for_inspection() {
+    local journal="$1"; shift
+    local port
+    port="$(free_port)"
+    log "restoring on port ${port}"
+    if ! RESTORE_JOURNAL="$journal" RESTORE_PORT="$port" \
+        "${SCRIPT_DIR}/walg-restore.sh" inspect "$@" >/dev/null 2>&1; then
+        tail -5 "$journal" 2>/dev/null
+        die "the restore itself failed; full journal at ${journal}"
+    fi
+    SCRATCH_CONTAINER="$(awk '/^  container /{print $2}' "$journal")"
+    SCRATCH_VOLUME="$(awk '/^  scratch volume /{print $3}' "$journal")"
+    [ -n "$SCRATCH_CONTAINER" ] || die "could not find the restored container in ${journal}"
+}
+
+restored_markers() {
+    markers_from docker exec -u postgres "$SCRATCH_CONTAINER" psql -U postgres
+}
+
+release_inspection() {
+    docker rm -f -v "$SCRATCH_CONTAINER" >/dev/null 2>&1 || true
+    docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1 || true
+    SCRATCH_CONTAINER=""
+    SCRATCH_VOLUME=""
 }
 
 # --- point-in-time ---------------------------------------------------------
@@ -234,23 +400,11 @@ test_point_in_time() {
     write_marker B
     seal_and_wait_for_archive
 
-    local port journal
-    port="$(free_port)"
-    log "restoring to ${target} on port ${port}"
-    journal="/tmp/cara-verify-${RUN_ID}-pitr.log"
-    if ! RESTORE_JOURNAL="$journal" RESTORE_PORT="$port" \
-        "${SCRIPT_DIR}/walg-restore.sh" inspect --at "$target" >/dev/null 2>&1; then
-        tail -5 "$journal" 2>/dev/null
-        die "the restore itself failed; full journal at ${journal}"
-    fi
-
-    # Recorded before querying so the EXIT trap owns them from here on.
-    SCRATCH_CONTAINER="$(awk '/^  container /{print $2}' "$journal")"
-    SCRATCH_VOLUME="$(awk '/^  scratch volume /{print $3}' "$journal")"
-    [ -n "$SCRATCH_CONTAINER" ] || die "could not find the restored container in ${journal}"
+    log "restoring to ${target}"
+    restore_for_inspection "/tmp/cara-verify-${RUN_ID}-pitr.log" --at "$target"
 
     local found
-    found="$(markers_from docker exec -u postgres "$SCRATCH_CONTAINER" psql -U postgres)"
+    found="$(restored_markers)"
 
     # A alone. Both markers would mean the target was ignored; neither would
     # mean replay never reached the base backup's contents.
@@ -266,12 +420,121 @@ test_point_in_time() {
         | grep -F "recovery stopping before commit of transaction" >/dev/null \
         || die "the recovery log does not show a stop at the target; the point in time may not have been applied"
 
-    docker rm -f -v "$SCRATCH_CONTAINER" >/dev/null 2>&1 || true
-    docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1 || true
-    SCRATCH_CONTAINER=""
-    SCRATCH_VOLUME=""
-
+    release_inspection
     pass "restored to ${target}: marker A present, marker B correctly absent"
+}
+
+# --- interrupted uploads ---------------------------------------------------
+#
+# Two cases, asserted separately because they answer different questions. The
+# first asks whether a transient outage costs anything permanently; the second
+# asks what the archive is actually worth when the outage is still in progress
+# at the moment the node dies. Collapsing them into one test would let the
+# second answer hide behind the first.
+#
+# Both leave the database intact. Neither may run anywhere near a live service:
+# the object store goes away for the duration, and the second stops Postgres.
+
+# Case 1: upload fails, then recovers.
+#
+# Nothing is permanently lost — Postgres never discards an unarchived segment,
+# so once the archive is reachable again the backlog drains and the restore
+# reaches everything. What this proves is that the retry actually happens, and
+# that a restore taken afterwards is complete rather than truncated at the point
+# of the outage.
+test_upload_resumed() {
+    log "=== interrupted upload, then recovered ==="
+    TEST_RUN="${RUN_ID}-resumed"
+    ensure_running
+    ensure_probe_db
+
+    log "taking a base backup to restore from"
+    "${SCRIPT_DIR}/walg-backup.sh" >/dev/null 2>&1 || die "base backup failed"
+
+    write_marker A
+    seal_and_wait_for_archive
+
+    stop_object_store
+
+    write_marker B
+    # Seal the segment holding B so the archiver has something to stall on. The
+    # switch itself succeeds; it is the upload behind it that cannot.
+    local segment_b
+    segment_b="$(seal_segment)"
+    assert_segment_stuck "$segment_b"
+
+    start_object_store
+    # Generous, because the drain waits on wal-g's retry backoff rather than on
+    # the upload itself — the whole point of case 1 is that it does eventually
+    # get there.
+    wait_for_segment_archived "$segment_b" 300
+
+    restore_for_inspection "/tmp/cara-verify-${RUN_ID}-resumed.log"
+
+    local found
+    found="$(restored_markers)"
+    # Both. Only A would mean the backlog never drained; neither would mean the
+    # base backup itself did not come back.
+    [ "$found" = "A,B" ] || die "expected markers A,B after the archive recovered, got '${found:-<none>}'"
+
+    release_inspection
+    pass "archiving recovered and the restore reached both markers"
+}
+
+# Case 2: upload never succeeds.
+#
+# The node dies with the outage still in progress. Postgres is stopped before
+# the object store returns, so the pending segment is never uploaded and the
+# writes it holds exist only on a disk that, in the scenario being modelled, is
+# gone. Marker B being absent is the CORRECT outcome, and asserting it is the
+# point: this is the measured difference between "what was written" and "what
+# was recoverable", which is the thing archive_timeout actually bounds.
+test_upload_lost() {
+    log "=== interrupted upload, never recovered ==="
+    TEST_RUN="${RUN_ID}-lost"
+    ensure_running
+    ensure_probe_db
+
+    log "taking a base backup to restore from"
+    "${SCRIPT_DIR}/walg-backup.sh" >/dev/null 2>&1 || die "base backup failed"
+
+    write_marker A
+    seal_and_wait_for_archive
+    log "marker A is in the archive; everything after this point is at risk"
+
+    stop_object_store
+
+    write_marker B
+    local segment_b
+    segment_b="$(seal_segment)"
+    assert_segment_stuck "$segment_b"
+
+    # The node dies here. Stopping Postgres before the object store comes back
+    # is what makes the loss permanent: a running server would drain the backlog
+    # the moment it could, and the test would silently become case 1.
+    log "stopping ${COMPOSE_SERVICE} while the archive is still unreachable"
+    RESTART_STACK_ON_EXIT="yes"
+    docker compose stop "$COMPOSE_SERVICE" >/dev/null 2>&1 \
+        || die "could not stop ${COMPOSE_SERVICE}"
+    start_object_store
+
+    restore_for_inspection "/tmp/cara-verify-${RUN_ID}-lost.log"
+
+    local found
+    found="$(restored_markers)"
+    # A alone. A,B would mean the segment reached the archive after all and the
+    # test proved nothing; neither would mean replay never got as far as A.
+    [ "$found" = "A" ] \
+        || die "expected marker A only — B was written after archiving broke and must not be recoverable — got '${found:-<none>}'"
+
+    release_inspection
+
+    # Bring the stack back before returning. Postgres will drain the backlog on
+    # startup, which is correct and happens after every assertion above.
+    log "restarting ${COMPOSE_SERVICE}; the pending segment will drain now"
+    ensure_running
+    RESTART_STACK_ON_EXIT="no"
+    pass "restore reached the last archived WAL; the unarchived write is correctly absent"
 }
 
 # --- bare disk -------------------------------------------------------------
@@ -379,6 +642,8 @@ assert_development_stack
 ensure_running
 
 test_point_in_time
+test_upload_resumed
+test_upload_lost
 
 if [ "$CONFIRM_DESTROY" = "yes" ]; then
     test_bare_disk
