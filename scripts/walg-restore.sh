@@ -31,6 +31,10 @@ cd "$REPO_ROOT"
 
 COMPOSE_SERVICE="${COMPOSE_SERVICE:-postgres}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+# Started here rather than after argument parsing, so the total duration covers
+# the whole run. Anything declared below this line is unavailable to the
+# argument checks, which call die() before the first log line is written.
+RUN_STARTED="$(date +%s%3N)"
 RESTORE_JOURNAL="${RESTORE_JOURNAL:-/tmp/cara-restore-${RUN_ID}.log}"
 RESTORE_PORT="${RESTORE_PORT:-5433}"
 RECOVERY_TIMEOUT="${RECOVERY_TIMEOUT:-600}"
@@ -43,7 +47,9 @@ PROD_PGDATA="/var/lib/postgresql/data"
 SCRATCH_PGDATA="/restore"
 
 usage() {
-    sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # Everything between the shebang and the first blank comment-free line, so
+    # editing the header cannot silently truncate the help text.
+    sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,\} \{0,1\}//;s/^#$//'
     exit "${1:-1}"
 }
 
@@ -54,10 +60,15 @@ usage() {
 # only on success. A failed inspect used to leave a stopped container and a
 # volume for someone to find later, and the next run would refuse to reuse the
 # volume — so the debris also blocked the retry.
+#
+# 'rm -f -v', not 'rm -f'. The scratch instance is started without --rm, and it
+# carries an anonymous volume over the production data directory; plain 'docker
+# rm' leaves that behind, one orphan per run. -v only removes anonymous volumes,
+# so the named scratch volume and the production one are never at risk.
 CLEANUP_SCRATCH="no"
 cleanup() {
     [ "$CLEANUP_SCRATCH" = "yes" ] || return 0
-    [ -n "${RESTORE_CONTAINER:-}" ] && docker rm -f "$RESTORE_CONTAINER" >/dev/null 2>&1
+    [ -n "${RESTORE_CONTAINER:-}" ] && docker rm -f -v "$RESTORE_CONTAINER" >/dev/null 2>&1
     [ -n "${SCRATCH_VOLUME:-}" ] && docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1
     return 0
 }
@@ -89,6 +100,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --at) [ $# -ge 2 ] || die "--at needs a timestamp"; TARGET_TIME="$2"; shift 2 ;;
         --confirm-destroy) CONFIRM_DESTROY="yes"; shift ;;
+        --) shift; break ;;
         -h|--help) usage 0 ;;
         *) echo "unknown option '$1'" >&2; usage 1 ;;
     esac
@@ -100,7 +112,31 @@ if [ "$MODE" = "verify" ] && [ -n "$TARGET_TIME" ]; then
     die "verify restores the latest backup; use inspect for a point in time"
 fi
 
+# Accepting it silently would suggest these modes can destroy something.
+if [ "$MODE" != "takeover" ] && [ "$CONFIRM_DESTROY" = "yes" ]; then
+    die "--confirm-destroy only applies to takeover; ${MODE} never touches production"
+fi
+
 if [ -n "$TARGET_TIME" ]; then
+    # An offset is required. This string is parsed twice — here by the host's
+    # date, and later by Postgres inside the container reading
+    # recovery_target_time — and those two do not share a timezone. Without an
+    # offset the backup chosen here and the point recovery actually stops at can
+    # differ by hours, silently.
+    #
+    # The offset has to follow a time of day. Looking only for a trailing offset
+    # accepts a bare date: '2026-08-18' ends in '-18', which is indistinguishable
+    # from an offset by shape alone — and that is exactly the input this check
+    # exists to reject.
+    case "$TARGET_TIME" in
+        *[0-9]:[0-9][0-9]*[+-][0-9][0-9] \
+      | *[0-9]:[0-9][0-9]*[+-][0-9][0-9][0-9][0-9] \
+      | *[0-9]:[0-9][0-9]*[+-][0-9][0-9]:[0-9][0-9] \
+      | *[0-9]:[0-9][0-9]*Z \
+      | *[0-9]:[0-9][0-9]*UTC) : ;;
+        *) die "--at needs a time of day and an explicit timezone, e.g. '2026-08-18 12:00:00+08'" ;;
+    esac
+
     # Millisecond resolution on both sides. WAL-G records finish_time with
     # fractional seconds, and truncating to whole seconds can rank a backup that
     # finished just after the target as if it finished just before it.
@@ -134,20 +170,41 @@ record "recovery target" "${TARGET_TIME:-latest}"
 
 # All work happens in a one-off container rather than in the running service.
 # For takeover the service must be stopped, so exec is not available anyway;
-# for scratch modes a separate container is what keeps the scratch volume from
-# ever being mounted next to production data.
+# for scratch modes a separate container is what keeps production's data
+# directory out of reach — see the mount handling below.
 #
 # --no-deps keeps this from starting the compose dependencies; the archive
 # reachability check below is what reports an object store that is not up.
 restore_exec() { _restore_exec postgres "$@"; }
 restore_exec_root() { _restore_exec root "$@"; }
 
-_restore_exec() {
-    local as_user="$1" entrypoint="$2"; shift 2
+_restore_exec() { _run_in_container /dev/null "$@"; }
+
+# Same thing but with stdin attached, for content that must not be threaded
+# through a shell command string. Quoting inside sh -c "... \"$var\" ..." is
+# resolved by the inner shell, which strips the quotes the content itself needs
+# — restore_command lost the quotes around %f and %p that way, silently.
+restore_exec_stdin() { _run_in_container - postgres "$@"; }
+
+_run_in_container() {
+    local stdin_src="$1" as_user="$2" entrypoint="$3"; shift 3
     local -a mount=()
-    [ -n "$SCRATCH_VOLUME" ] && mount=(--volume "${SCRATCH_VOLUME}:${SCRATCH_PGDATA}")
-    docker compose run --rm --no-deps -u "$as_user" \
-        "${mount[@]}" --entrypoint "$entrypoint" "$COMPOSE_SERVICE" "$@" </dev/null
+    # compose run keeps every volume the service declares, so without the second
+    # mount the production data directory would be visible — and writable — from
+    # a scratch container that outlives the restore. An anonymous volume over
+    # that path hides it; isolation then comes from the mount table rather than
+    # from PGDATA happening to point elsewhere.
+    [ -n "$SCRATCH_VOLUME" ] && mount=(
+        --volume "${SCRATCH_VOLUME}:${SCRATCH_PGDATA}"
+        --volume "${PROD_PGDATA}"
+    )
+    if [ "$stdin_src" = "-" ]; then
+        docker compose run --rm --no-deps -T -u "$as_user" \
+            "${mount[@]}" --entrypoint "$entrypoint" "$COMPOSE_SERVICE" "$@"
+    else
+        docker compose run --rm --no-deps -u "$as_user" \
+            "${mount[@]}" --entrypoint "$entrypoint" "$COMPOSE_SERVICE" "$@" <"$stdin_src"
+    fi
 }
 
 # --- preflight -------------------------------------------------------------
@@ -216,12 +273,17 @@ backups="$(restore_exec wal-g backup-list --detail --json 2>/dev/null | tr '{' '
 
 RESOLVED=""
 RESOLVED_TIME=""
+PARSED=0
 while IFS= read -r rec; do
     name="$(printf '%s' "$rec" | sed -n 's/.*"backup_name":"\([^"]*\)".*/\1/p')"
     finish="$(printf '%s' "$rec" | sed -n 's/.*"finish_time":"\([^"]*\)".*/\1/p')"
-    [ -n "$name" ] && [ -n "$finish" ] || continue
+    [ -n "$name" ] || continue
+    PARSED=$(( PARSED + 1 ))
 
     if [ -n "$TARGET_TIME" ]; then
+        # Only needed to compare against a target; a restore-to-latest does not
+        # care when the backup finished.
+        [ -n "$finish" ] || continue
         # A backup is only usable as a starting point if it finished before the
         # target; WAL replay covers the rest of the way.
         finish_epoch="$(date -d "$finish" +%s%3N 2>/dev/null)" || continue
@@ -234,8 +296,15 @@ while IFS= read -r rec; do
     RESOLVED_TIME="$finish"
 done <<<"$backups"
 
+if [ "$PARSED" -eq 0 ]; then
+    # Distinct from "no backup is old enough". The field names come from WAL-G
+    # v3.0.8; if that moved, this is where it shows up, and reporting it as a
+    # missing backup would send the search in the wrong direction entirely.
+    die "backup-list returned records but none could be parsed; check whether WAL-G's output format changed"
+fi
+
 if [ -z "$RESOLVED" ]; then
-    die "no backup finished before ${TARGET_TIME}; the oldest available one starts later than the requested point"
+    die "no backup finished at or before ${TARGET_TIME}; the oldest available one is newer than the requested point"
 fi
 
 record "resolved backup" "$RESOLVED"
@@ -273,8 +342,15 @@ case "$target_state" in
             || log "WARNING: pg_controldata produced nothing; the directory may not be a cluster"
 
         log "clearing ${TARGET_PGDATA}"
-        restore_exec sh -c "rm -rf '${TARGET_PGDATA}'/* '${TARGET_PGDATA}'/.[!.]* 2>/dev/null; true" \
-            || die "could not clear ${TARGET_PGDATA}"
+        # The trailing 'true' is needed — an already-empty directory leaves the
+        # globs unexpanded and rm exits non-zero — but it also makes the exit
+        # status meaningless, so emptiness is checked rather than assumed. A
+        # half-cleared directory would have backup-fetch layer a restore on top
+        # of leftovers and produce a cluster mixing two generations.
+        restore_exec sh -c "rm -rf '${TARGET_PGDATA}'/* '${TARGET_PGDATA}'/.[!.]* 2>/dev/null; true"
+        remaining="$(restore_exec sh -c "ls -A '${TARGET_PGDATA}' 2>/dev/null | wc -l" | tr -d '\r')"
+        [ "${remaining:-1}" = "0" ] \
+            || die "could not clear ${TARGET_PGDATA}; ${remaining} entries remain"
         record "destroyed" "yes"
         ;;
     empty)
@@ -323,16 +399,24 @@ recovery_target_time = '${TARGET_TIME}'
 recovery_target_action = 'promote'"
 fi
 
-restore_exec sh -c "touch '${TARGET_PGDATA}/recovery.signal' && printf '%s\n' \"${settings}\" >> '${conf}'" \
+printf '%s\n' "$settings" \
+    | restore_exec_stdin sh -c "touch '${TARGET_PGDATA}/recovery.signal' && cat >> '${conf}'" \
     || die "could not write recovery settings to ${conf}"
 
+written="$(restore_exec sh -c "grep '^restore_command' '${conf}' | tail -1" | tr -d '\r')"
+[ -n "$written" ] || die "restore_command did not reach ${conf}"
+
 log "recovery configured"
-record "restore_command" "wal-g wal-fetch"
+# The line as it actually landed, not as it was intended. Quoting around %f and
+# %p has been lost here before, by a shell in the middle rewriting the string —
+# and with paths that contain no spaces the loss is invisible until it is not.
+record "restore_command" "$written"
 [ -n "$TARGET_TIME" ] && record "recovery_target_action" "promote"
 
 # --- start -----------------------------------------------------------------
 
 if [ "$MODE" = "takeover" ]; then
+    startup_started="$(date +%s%3N)"
     log "starting ${COMPOSE_SERVICE}"
     # takeover restarts the existing container, so its log still holds
     # everything from before the restore. Anchoring to this moment keeps the
@@ -358,6 +442,7 @@ else
     # recovery ends, and with archiving on it would publish that timeline into
     # the production archive — two throwaway instances would then collide on
     # identically named segments holding different data.
+    startup_started="$(date +%s%3N)"
     if [ "$MODE" = "inspect" ]; then
         log "starting scratch instance on port ${RESTORE_PORT}"
     else
@@ -381,10 +466,17 @@ else
     # '|| true' is load-bearing under 'set -e': a failing command substitution
     # in an assignment aborts the script at that line, which is how the real
     # Docker message ended up being discarded rather than reported.
+    # This one does not go through _run_in_container, so it needs the same
+    # anonymous volume over the production data directory — and needs it more
+    # than the short-lived helpers do. An inspect instance is left running on
+    # purpose, so it is the only container here that outlives the restore with a
+    # live postmaster in it, and without this it would have production's PGDATA
+    # mounted and writable the whole time.
     RESTORE_CONTAINER="$(docker compose run -d \
         "${publish[@]}" \
         --env PGDATA="$SCRATCH_PGDATA" \
         --volume "${SCRATCH_VOLUME}:${SCRATCH_PGDATA}" \
+        --volume "${PROD_PGDATA}" \
         "$COMPOSE_SERVICE" postgres -c archive_mode=off 2>"$start_err" | tr -d '\r')" || true
     if [ -z "$RESTORE_CONTAINER" ]; then
         log "$(cat "$start_err")"
@@ -436,6 +528,7 @@ done
 
 replay_ms=$(( $(date +%s%3N) - replay_started ))
 record "recovery duration" "${replay_ms}ms"
+record "startup duration" "$(( replay_started - startup_started ))ms"
 
 # The recovery lines are the evidence that the restore did what was asked: which
 # segments were fetched, where replay stopped, and on which timeline it came up.
@@ -455,13 +548,16 @@ record "finished" "timeline ${timeline:-?}, LSN ${lsn:-?}"
 # --- postflight ------------------------------------------------------------
 
 # recovery.signal clears itself — Postgres renames it to recovery.done — but the
-# settings do not. Left behind they mislead whoever reads the file next into
-# thinking this instance is still targeting a point in the past.
+# settings do not. restore_command is appended on every restore, so without this
+# postgresql.auto.conf grows a duplicate line each time; Postgres takes the last
+# one so behaviour is unaffected, but the file becomes misleading to read and
+# drifts from the "managed by ALTER SYSTEM" convention it claims in its header.
+target_psql -c 'ALTER SYSTEM RESET restore_command' >/dev/null 2>&1 || true
 if [ -n "$TARGET_TIME" ]; then
     target_psql -c 'ALTER SYSTEM RESET recovery_target_time' >/dev/null 2>&1 || true
     target_psql -c 'ALTER SYSTEM RESET recovery_target_action' >/dev/null 2>&1 || true
-    log "cleared the now-inert recovery_target settings"
 fi
+log "cleared the now-inert recovery settings"
 
 case "$MODE" in
     takeover)
@@ -485,7 +581,7 @@ case "$MODE" in
         [ -n "$dbs" ] || die "the restored instance did not answer a query"
         record "verified" "instance answers queries, ${dbs} databases"
         log "cleaning up"
-        docker rm -f "$RESTORE_CONTAINER" >/dev/null 2>&1 || true
+        docker rm -f -v "$RESTORE_CONTAINER" >/dev/null 2>&1 || true
         docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1 || true
         CLEANUP_SCRATCH="no"
         log "verify passed"
@@ -495,8 +591,9 @@ case "$MODE" in
         CLEANUP_SCRATCH="no"
         record "connect with" "psql -h localhost -p ${RESTORE_PORT} -U postgres"
         log "the instance is left running so you can query it"
-        log "when finished: docker rm -f ${RESTORE_CONTAINER} && docker volume rm ${SCRATCH_VOLUME}"
+        log "when finished: docker rm -f -v ${RESTORE_CONTAINER} && docker volume rm ${SCRATCH_VOLUME}"
         ;;
 esac
 
+record "total duration" "$(( $(date +%s%3N) - RUN_STARTED ))ms"
 log "journal: ${RESTORE_JOURNAL}"

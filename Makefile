@@ -88,7 +88,9 @@ walg-backup:
 
 walg-restore:
 	@echo -e ":: $(GREEN)Restoring the control-plane database...$(NC)"
-	@./scripts/walg-restore.sh $(if $(MODE),$(MODE),verify) $(ARGS)
+	@./scripts/walg-restore.sh $(if $(MODE),$(MODE),verify) $(ARGS) \
+		&& echo -e "==> $(BLUE)Restore complete$(NC)" \
+		|| (echo -e "==> $(RED)Restore failed$(NC)" && exit 1)
 
 walg-verify:
 	@echo -e ":: $(GREEN)Verifying the control-plane backups...$(NC)"
