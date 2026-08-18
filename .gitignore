@@ -122,3 +122,8 @@ fabric.properties
 # Generated documentation site output (CI artifact only)
 website/out/
 
+# Project documentation lives in the team's shared space, not here. Nothing
+# under docs/ is tracked; ignoring it keeps a stray 'git add -A' from changing
+# that by accident.
+/docs/
+/NOTION_OVERVIEW.md
