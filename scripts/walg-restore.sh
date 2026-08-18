@@ -271,6 +271,16 @@ fi
 restore_exec wal-g --version >/dev/null 2>&1 \
     || die "wal-g is not available in the ${COMPOSE_SERVICE} image"
 
+# jq reads the backup catalogue. Checked here, with the other preflight
+# requirements, so a machine without it fails before anything is touched rather
+# than part-way through a restore.
+#
+# A dependency is acceptable at this level; a compiled one would not be. Moving
+# this parsing into a Go helper would mean needing a working build to restore
+# the database you are in the middle of losing.
+command -v jq >/dev/null \
+    || die "jq is required to read the backup catalogue; install it (apt install jq)"
+
 # Reachability before anything expensive: an unreachable object store, wrong
 # credentials and a missing bucket otherwise all look like "no backups".
 if ! archive_err="$(restore_exec wal-g backup-list 2>&1 >/dev/null)"; then
@@ -289,17 +299,37 @@ fi
 #
 # Never hand LATEST to backup-fetch either. It is a moving reference, and the
 # whole point of recording a name is to know which object this run used.
-backups="$(restore_exec wal-g backup-list --detail --json 2>/dev/null | tr '{' '\n' | grep '"backup_name"')"
+# Read the catalogue and filter it as two steps, not one pipeline. Reading it
+# can fail for reasons that have nothing to do with what is in it, and folding
+# both into one substitution means a single '|| true' has to cover both — which
+# reports a WAL-G or Docker fault as though the archive were merely empty. The
+# reachability probe above catches the common causes first, so what lands here
+# is the narrow remainder: a transient failure since that probe, or '--detail
+# --json' itself behaving differently. That second one is exactly what the
+# PARSED check further down exists to name, and it can only name it if WAL-G's
+# own message survives to be quoted.
+list_err="$(mktemp)"
+if ! backup_json="$(restore_exec wal-g backup-list --detail --json 2>"$list_err")"; then
+    list_msg="$(cat "$list_err")"
+    rm -f "$list_err"
+    die "could not read the backup catalogue: ${list_msg}"
+fi
+rm -f "$list_err"
+
+# One field pair per line, tab separated. jq failing IS the "the format moved"
+# signal — it reports which key it could not find — so no separate counter is
+# needed to tell an unparseable catalogue from an empty one. stderr is folded in
+# so the message can be quoted.
+if ! backups="$(printf '%s' "$backup_json" \
+    | jq -r '.[] | [.backup_name, .finish_time] | @tsv' 2>&1)"; then
+    die "could not parse the backup catalogue (WAL-G's output format may have changed): ${backups}"
+fi
 [ -n "$backups" ] || die "backup-list returned no usable records"
 
 RESOLVED=""
 RESOLVED_TIME=""
-PARSED=0
-while IFS= read -r rec; do
-    name="$(printf '%s' "$rec" | sed -n 's/.*"backup_name":"\([^"]*\)".*/\1/p')"
-    finish="$(printf '%s' "$rec" | sed -n 's/.*"finish_time":"\([^"]*\)".*/\1/p')"
+while IFS="$(printf '\t')" read -r name finish; do
     [ -n "$name" ] || continue
-    PARSED=$(( PARSED + 1 ))
 
     if [ -n "$TARGET_TIME" ]; then
         # Only needed to compare against a target; a restore-to-latest does not
@@ -316,13 +346,6 @@ while IFS= read -r rec; do
     RESOLVED="$name"
     RESOLVED_TIME="$finish"
 done <<<"$backups"
-
-if [ "$PARSED" -eq 0 ]; then
-    # Distinct from "no backup is old enough". The field names come from WAL-G
-    # v3.0.8; if that moved, this is where it shows up, and reporting it as a
-    # missing backup would send the search in the wrong direction entirely.
-    die "backup-list returned records but none could be parsed; check whether WAL-G's output format changed"
-fi
 
 if [ -z "$RESOLVED" ]; then
     die "no backup finished at or before ${TARGET_TIME}; the oldest available one is newer than the requested point"

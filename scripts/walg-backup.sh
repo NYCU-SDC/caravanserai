@@ -72,6 +72,16 @@ docker compose ps --status running --services 2>/dev/null | grep -qx "$COMPOSE_S
 pg_exec wal-g --version >/dev/null 2>&1 \
     || die "wal-g is not available inside '$COMPOSE_SERVICE'"
 
+# jq reads the backup catalogue. Checked here, with the other preflight
+# requirements, so a machine without it fails before anything is touched rather
+# than part-way through.
+#
+# A dependency is acceptable at this level; a compiled one would not be. Moving
+# this parsing into a Go helper would mean needing a working build to restore
+# the database you are in the middle of losing.
+command -v jq >/dev/null \
+    || die "jq is required to read the backup catalogue; install it (apt install jq)"
+
 # Prove the archive is readable before doing anything expensive. Without this,
 # an unreachable object store, wrong credentials or a missing bucket all look
 # identical to "there are no backups yet" further down.
@@ -86,10 +96,15 @@ if ! archive_err="$(pg_exec wal-g backup-list 2>&1 >/dev/null)"; then
     esac
 fi
 
-# Reachability is established above, so a failure here is the empty-archive
-# case and the empty result it produces is correct.
+# Reads the JSON rather than the table: the table's first column is only the
+# name by convention, and nothing warns if that layout moves. Reachability is
+# established above, so an empty result here is the empty-archive case and is
+# correct; '|| true' is scoped to jq alone so a genuinely unreadable catalogue
+# still fails rather than being reported as "no new backup appeared".
 list_backup_names() {
-    pg_exec wal-g backup-list 2>/dev/null | awk 'NR > 1 { print $1 }' | sort || true
+    local catalogue
+    catalogue="$(pg_exec wal-g backup-list --detail --json 2>/dev/null)" || return 0
+    printf '%s' "$catalogue" | jq -r '.[].backup_name' 2>/dev/null | sort || true
 }
 
 # --- backup ----------------------------------------------------------------
@@ -134,19 +149,17 @@ log "created backup ${created}"
 # parsed sizes: the extra fields (LSNs, pg_version, system_identifier) cost
 # nothing to keep and are exactly what a later investigation wants.
 #
-# This is text munging, not JSON parsing, and it is pinned to the field names
-# WAL-G v3.0.8 emits — the version the image installs. If that version moves,
-# check this block. The array arrives on one line, so split on '{' to get one
-# record per line before selecting this run's.
+# Still pinned to the field names WAL-G v3.0.8 emits — the version the image
+# installs — but selecting on the name rather than matching text means a record
+# that does not exist reads as absent instead of as a near-miss on some other
+# backup's fields.
 detail="$(pg_exec wal-g backup-list --detail --json 2>/dev/null \
-    | tr '{' '\n' | grep -F "\"${created}\"" || true)"
+    | jq -c --arg n "$created" '.[] | select(.backup_name == $n)' 2>/dev/null || true)"
 
 if [ -n "$detail" ]; then
-    log "detail: {${detail}"
-    # The leading quote in the pattern is what keeps "compressed_size" from
-    # also matching inside "uncompressed_size".
-    compressed="$(printf '%s' "$detail"   | sed -n 's/.*"compressed_size":\([0-9]*\).*/\1/p')"
-    uncompressed="$(printf '%s' "$detail" | sed -n 's/.*"uncompressed_size":\([0-9]*\).*/\1/p')"
+    log "detail: ${detail}"
+    compressed="$(printf '%s' "$detail"   | jq -r '.compressed_size   // empty')"
+    uncompressed="$(printf '%s' "$detail" | jq -r '.uncompressed_size // empty')"
 else
     # Not fatal — the backup itself succeeded — but the sizes are one of this
     # ticket's deliverables, so losing them silently is not acceptable either.

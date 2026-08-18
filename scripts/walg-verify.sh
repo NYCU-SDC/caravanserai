@@ -169,11 +169,12 @@ resolve_archive_endpoint() {
             | tr -d '\r' || true
         return 0
     fi
-    # Only the first colon separates the key; the value has its own ('http://',
-    # ':9000'), so a field split on ':' would return 'http'.
-    docker compose config 2>/dev/null \
-        | awk '/^[[:space:]]*AWS_ENDPOINT:[[:space:]]/ {
-                   sub(/^[^:]*:[[:space:]]*/, ""); gsub(/^"|"$/, ""); print; exit }' || true
+    # Rendered as JSON and read with jq. Reading the YAML by hand needed a
+    # careful split, because the value carries its own colons ('http://',
+    # ':9000') and a naive field split returns 'http' — which it did, once.
+    docker compose config --format json 2>/dev/null \
+        | jq -r --arg svc "$COMPOSE_SERVICE" \
+            '.services[$svc].environment.AWS_ENDPOINT // empty' 2>/dev/null || true
 }
 
 assert_development_stack() {
@@ -268,6 +269,15 @@ object_store_cid() { docker compose ps -q "$OBJECT_STORE_SERVICE" 2>/dev/null; }
 
 stop_object_store() {
     log "stopping ${OBJECT_STORE_SERVICE} — archiving will start failing"
+    # Armed here rather than at the call sites, and before the stop rather than
+    # after it. Everything between this line and start_object_store can die —
+    # assert_segment_stuck most of all, since its whole job is to fail when the
+    # outage is not what was expected — and any of those paths would otherwise
+    # leave the object store down for good. 'docker compose stop' is itself one
+    # of them: it can be interrupted or partially succeed, so arming afterwards
+    # leaves the very window it was meant to close. Arming when nothing was
+    # actually stopped costs one no-op 'up -d --wait' in the trap.
+    RESTART_STACK_ON_EXIT="yes"
     docker compose stop "$OBJECT_STORE_SERVICE" >/dev/null 2>&1 \
         || die "could not stop ${OBJECT_STORE_SERVICE}"
 }
@@ -513,7 +523,6 @@ test_upload_lost() {
     # is what makes the loss permanent: a running server would drain the backlog
     # the moment it could, and the test would silently become case 1.
     log "stopping ${COMPOSE_SERVICE} while the archive is still unreachable"
-    RESTART_STACK_ON_EXIT="yes"
     docker compose stop "$COMPOSE_SERVICE" >/dev/null 2>&1 \
         || die "could not stop ${COMPOSE_SERVICE}"
     start_object_store
@@ -533,7 +542,6 @@ test_upload_lost() {
     # startup, which is correct and happens after every assertion above.
     log "restarting ${COMPOSE_SERVICE}; the pending segment will drain now"
     ensure_running
-    RESTART_STACK_ON_EXIT="no"
     pass "restore reached the last archived WAL; the unarchived write is correctly absent"
 }
 
@@ -564,6 +572,14 @@ test_bare_disk() {
     # volume that a container still references, even a stopped one. Never
     # 'compose down -v' — that takes the MinIO volume and the backups with it.
     log "stopping and removing the container, then deleting the volume"
+    # Before the first destructive command, not after. From here until the
+    # restore returns there is no Postgres and no data volume, and every exit
+    # path in between — a failed restore, a failed assertion, Ctrl-C — has to
+    # leave a working stack behind. What comes back is an empty cluster, which
+    # is the correct outcome: the volume this test deleted is gone either way,
+    # and a developer is better served by a stack that starts than by one that
+    # silently stays down.
+    RESTART_STACK_ON_EXIT="yes"
     docker compose stop "$COMPOSE_SERVICE" >/dev/null 2>&1 || true
     docker compose rm -f "$COMPOSE_SERVICE" >/dev/null 2>&1 || true
     docker volume rm "$volume" >/dev/null || die "could not delete ${volume}"
@@ -652,4 +668,6 @@ else
     log "without it the archive has not been proven to work on an empty disk"
 fi
 
+# Every test finished, so the stack is up and the trap has nothing to put back.
+RESTART_STACK_ON_EXIT="no"
 log "done"
