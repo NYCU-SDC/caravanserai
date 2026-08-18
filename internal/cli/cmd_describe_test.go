@@ -98,6 +98,7 @@ var describeNodeCoveredFields = newStringSet(
 	"Status.Info.AgentVersion",
 	// Status.Network
 	"Status.Network.OverlayIP",
+	"Status.Network.OverlayStatus",
 	"Status.Network.DNSName",
 	"Status.Network.Mode",
 	"Status.Network.AgentPort",

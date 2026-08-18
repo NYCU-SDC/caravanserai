@@ -21,6 +21,7 @@ import (
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/server/agentdialer"
+	"NYCU-SDC/caravanserai/internal/server/controller"
 	"NYCU-SDC/caravanserai/internal/store"
 
 	handlerutil "github.com/NYCU-SDC/summer/pkg/handler"
@@ -44,6 +45,37 @@ type Handler struct {
 
 type ProjectLister interface {
 	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*v1.Project, error)
+}
+
+// overlayOfflineThreshold is the heartbeat age beyond which a Node is reported
+// Offline. It reuses the same window the NodeHealthController uses to mark a
+// Node NotReady, so State and OverlayStatus never disagree.
+const overlayOfflineThreshold = controller.NodeHeartbeatTimeout
+
+// computeOverlayStatus derives a Node's overlay reachability from heartbeat
+// freshness. It is a pure function so the tri-state logic stays unit-testable:
+//   - no overlay IP or no heartbeat ever  -> Unknown
+//   - heartbeat older than threshold      -> Offline
+//   - otherwise                           -> Online
+//
+// A heartbeat exactly at the threshold counts as Online, matching the
+// NodeHealthController's age <= timeout Ready boundary.
+func computeOverlayStatus(overlayIP string, lastHeartbeat, now time.Time, threshold time.Duration) v1.OverlayStatus {
+	if overlayIP == "" || lastHeartbeat.IsZero() {
+		return v1.OverlayStatusUnknown
+	}
+	if now.Sub(lastHeartbeat) > threshold {
+		return v1.OverlayStatusOffline
+	}
+	return v1.OverlayStatusOnline
+}
+
+// setOverlayStatus fills the computed OverlayStatus on a Node before it is
+// returned to a client. This is the only place OverlayStatus is set; the
+// heartbeat path never writes it.
+func setOverlayStatus(node *v1.Node, now time.Time) {
+	node.Status.Network.OverlayStatus = computeOverlayStatus(
+		node.Status.Network.OverlayIP, node.Status.LastHeartbeat, now, overlayOfflineThreshold)
 }
 
 func NewHandler(logger *zap.Logger, s store.NodeStore, ps ProjectLister, dialer agentdialer.Dialer, pw *problem.HttpWriter) *Handler {
@@ -189,8 +221,10 @@ func (h *Handler) listNodes(w http.ResponseWriter, r *http.Request) {
 		TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "NodeList"},
 		Items:    make([]v1.Node, len(nodes)),
 	}
+	now := time.Now()
 	for i, n := range nodes {
 		list.Items[i] = *n
+		setOverlayStatus(&list.Items[i], now)
 	}
 	handlerutil.WriteJSONResponse(w, http.StatusOK, list)
 }
@@ -212,6 +246,7 @@ func (h *Handler) getNode(w http.ResponseWriter, r *http.Request) {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
+	setOverlayStatus(node, time.Now())
 	handlerutil.WriteJSONResponse(w, http.StatusOK, node)
 }
 

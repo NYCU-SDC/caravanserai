@@ -196,10 +196,10 @@ func latestConditionReason(conditions []v1.Condition) string {
 }
 
 // printNodeTable writes a human-readable table with columns:
-// NAME  STATE  OVERLAY IP  AGE
+// NAME  STATE  OVERLAY  OVERLAY IP  AGE
 func (p *Printer) printNodeTable(nodes []v1.Node) error {
 	w := tabwriter.NewWriter(p.Out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSTATE\tOVERLAY IP\tAGE")
+	fmt.Fprintln(w, "NAME\tSTATE\tOVERLAY\tOVERLAY IP\tAGE")
 
 	for _, n := range nodes {
 		name := n.Name
@@ -207,12 +207,16 @@ func (p *Printer) printNodeTable(nodes []v1.Node) error {
 		if state == "" {
 			state = "<unknown>"
 		}
+		overlay := string(n.Status.Network.OverlayStatus)
+		if overlay == "" {
+			overlay = string(v1.OverlayStatusUnknown)
+		}
 		ip := n.Status.Network.OverlayIP
 		if ip == "" {
 			ip = "<none>"
 		}
 		age := humanAge(n.CreatedAt)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", name, state, ip, age)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", name, state, overlay, ip, age)
 	}
 
 	return w.Flush()

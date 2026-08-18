@@ -103,6 +103,10 @@
           "type": "string",
           "description": "OverlayIP is the Headscale-assigned overlay IP (e.g. \"100.64.0.5\")."
         },
+        "overlayStatus": {
+          "$ref": "#/$defs/OverlayStatus",
+          "description": "OverlayStatus is Online/Offline/Unknown, computed by the server from\nheartbeat freshness at read time. It is not persisted or written by the\nAgent; the Agent-facing heartbeat path never sets it."
+        },
         "dnsName": {
           "type": "string",
           "description": "DNSName is the MagicDNS FQDN for service discovery."
@@ -249,6 +253,15 @@
         "name"
       ],
       "description": "ObjectMeta holds identity and classification metadata common to all resources."
+    },
+    "OverlayStatus": {
+      "type": "string",
+      "enum": [
+        "Online",
+        "Offline",
+        "Unknown"
+      ],
+      "description": "Overlay reachability of a Node, derived by the server from heartbeat freshness."
     },
     "ResourceList": {
       "additionalProperties": {
