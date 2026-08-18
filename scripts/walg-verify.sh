@@ -25,7 +25,16 @@
 # be mistaken for real state. The cluster-wide backup covers it either way,
 # which is exactly what the round trip needs.
 #
+# Each run pushes two base backups into whatever archive the stack is pointed
+# at, and each of those triggers retention. With WALG_RETAIN_FULL at its default
+# of 7, four verification runs are enough to evict every real daily backup and,
+# with them, the WAL those backups depended on. That is harmless against a dev
+# archive and destructive against a real one, so the run refuses to start unless
+# the object store is a local one — see assert_development_stack below.
+#
 #   COMPOSE_SERVICE   compose service running Postgres   (default: postgres)
+#   WALG_VERIFY_ALLOW_NON_DEV_ARCHIVE=yes
+#                     run anyway against a non-local object store
 
 set -euo pipefail
 
@@ -40,7 +49,13 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 CONFIRM_DESTROY="no"
 TEST_RUN=""
 
-[ "${1:-}" = "--confirm-destroy" ] && CONFIRM_DESTROY="yes"
+case "${1:-}" in
+    "")                 : ;;
+    --confirm-destroy)  CONFIRM_DESTROY="yes" ;;
+    # A typo would otherwise skip the destructive test and still report success,
+    # which is the one outcome this script must never produce.
+    *) printf 'unknown option %s\n\nusage: walg-verify.sh [--confirm-destroy]\n' "$1" >&2; exit 2 ;;
+esac
 
 log()  { printf '%s  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 pass() { printf '\n  PASS  %s\n\n' "$*"; }
@@ -52,7 +67,9 @@ die()  { printf '\n  FAIL  %s\n\n' "$*" >&2; exit 1; }
 SCRATCH_CONTAINER=""
 SCRATCH_VOLUME=""
 cleanup() {
-    [ -n "$SCRATCH_CONTAINER" ] && docker rm -f "$SCRATCH_CONTAINER" >/dev/null 2>&1
+    # -v so the scratch instance's anonymous volume goes with it; see the same
+    # note in walg-restore.sh. Named volumes are untouched by -v.
+    [ -n "$SCRATCH_CONTAINER" ] && docker rm -f -v "$SCRATCH_CONTAINER" >/dev/null 2>&1
     [ -n "$SCRATCH_VOLUME" ] && docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1
     drop_probe_db
     return 0
@@ -88,6 +105,47 @@ ensure_probe_db() {
                    run text not null,
                    marker text not null,
                    at timestamptz not null default now())" >/dev/null
+}
+
+# --confirm-destroy says "I understand this deletes something". It does not say
+# which machine's database, and a script that lives in the repo will eventually
+# be run by someone who has not read the header. This answers the other half of
+# the question by looking at where the archive actually is.
+#
+# It gates the whole run rather than only the destructive test: the
+# point-in-time half is non-destructive to the database but still pushes a base
+# backup and applies retention, which against a real archive is the slower way
+# to lose the same thing.
+#
+# The endpoint is the discriminator because it is the one setting that has to
+# differ between the dev stack and anything real. An unset value means plain AWS
+# S3, which is emphatically not a development stack, so the catch-all is correct
+# for it.
+assert_development_stack() {
+    local endpoint
+    endpoint="$(docker compose exec -T "$COMPOSE_SERVICE" printenv AWS_ENDPOINT </dev/null 2>/dev/null \
+        | tr -d '\r' || true)"
+
+    case "$endpoint" in
+        http://minio:9000|http://localhost:*|http://127.0.0.1:*)
+            log "object store is ${endpoint} — development stack"
+            return 0
+            ;;
+    esac
+
+    if [ "${WALG_VERIFY_ALLOW_NON_DEV_ARCHIVE:-no}" = "yes" ]; then
+        log "WARNING: object store is ${endpoint:-<unset>}, not a development stack"
+        log "WARNING: continuing because WALG_VERIFY_ALLOW_NON_DEV_ARCHIVE=yes"
+        log "WARNING: this run pushes base backups into that archive and applies retention"
+        [ "$CONFIRM_DESTROY" = "yes" ] \
+            && log "WARNING: and --confirm-destroy will delete this machine's database"
+        return 0
+    fi
+
+    log "ERROR: the object store is ${endpoint:-<unset>}, not the development MinIO."
+    log "       This run pushes base backups into it and applies retention;"
+    log "       with --confirm-destroy it also deletes this machine's database."
+    die "refusing to run against a non-development archive (override: WALG_VERIFY_ALLOW_NON_DEV_ARCHIVE=yes)"
 }
 
 drop_probe_db() {
@@ -172,7 +230,13 @@ test_point_in_time() {
     # mean replay never reached the base backup's contents.
     [ "$found" = "A" ] || die "expected marker A only, got '${found:-<none>}'"
 
-    docker rm -f "$SCRATCH_CONTAINER" >/dev/null 2>&1 || true
+    # Marker B being absent is the outcome; this line is the mechanism. Without
+    # it a restore that happened to stop in the right place for some other
+    # reason would look identical to one that honoured recovery_target_time.
+    docker logs "$SCRATCH_CONTAINER" 2>&1 | grep -q "recovery stopping before commit of transaction" \
+        || die "the recovery log does not show a stop at the target; the point in time may not have been applied"
+
+    docker rm -f -v "$SCRATCH_CONTAINER" >/dev/null 2>&1 || true
     docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1 || true
     SCRATCH_CONTAINER=""
     SCRATCH_VOLUME=""
@@ -266,6 +330,12 @@ assert_post_restore_backup() {
 # --- run -------------------------------------------------------------------
 
 log "verification run ${RUN_ID}"
+
+# Before either test, and before the probe database exists: the stack has to be
+# up to be asked where its archive is, and nothing should be created until the
+# answer is acceptable.
+ensure_running
+assert_development_stack
 
 test_point_in_time
 
