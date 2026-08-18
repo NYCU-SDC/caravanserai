@@ -33,8 +33,12 @@
 # the object store is a local one — see assert_development_stack below.
 #
 #   COMPOSE_SERVICE   compose service running Postgres   (default: postgres)
+#   LOCK_FILE         maintenance lock, shared with the backup and restore
+#                     scripts (default: /tmp/cara-control-plane-maintenance.lock)
 #   WALG_VERIFY_ALLOW_NON_DEV_ARCHIVE=yes
-#                     run anyway against a non-local object store
+#                     run anyway against a non-local object store. A break-glass
+#                     override for a person at a terminal — never for a
+#                     scheduled job.
 
 set -euo pipefail
 
@@ -43,6 +47,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 COMPOSE_SERVICE="${COMPOSE_SERVICE:-postgres}"
+LOCK_FILE="${LOCK_FILE:-/tmp/cara-control-plane-maintenance.lock}"
 PROD_PGDATA="/var/lib/postgresql/data"
 PROBE_DB="walg_verify"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -85,7 +90,7 @@ probe() { pg -d "$PROBE_DB" "$@"; }
 # nothing is listening on.
 free_port() {
     local port=5433
-    while ss -tln 2>/dev/null | grep -q ":${port} "; do
+    while ss -tln 2>/dev/null | grep -F ":${port} " >/dev/null; do
         port=$(( port + 1 ))
         [ "$port" -gt 5460 ] && die "no free port between 5433 and 5460"
     done
@@ -121,10 +126,31 @@ ensure_probe_db() {
 # differ between the dev stack and anything real. An unset value means plain AWS
 # S3, which is emphatically not a development stack, so the catch-all is correct
 # for it.
+#
+# Answered without requiring anything to be running. A stopped host has to be
+# able to reach the refusal without this script starting its Compose stack
+# first: bringing production Postgres up as a side effect of a check that is
+# about to say no is precisely the surprise the check exists to prevent.
+#
+# A running container wins when there is one — it is authoritative for the
+# environment actually in use, which a compose file edited since startup is not.
+resolve_archive_endpoint() {
+    if docker compose ps --status running --services 2>/dev/null \
+        | grep -Fx "$COMPOSE_SERVICE" >/dev/null; then
+        docker compose exec -T "$COMPOSE_SERVICE" printenv AWS_ENDPOINT </dev/null 2>/dev/null \
+            | tr -d '\r' || true
+        return 0
+    fi
+    # Only the first colon separates the key; the value has its own ('http://',
+    # ':9000'), so a field split on ':' would return 'http'.
+    docker compose config 2>/dev/null \
+        | awk '/^[[:space:]]*AWS_ENDPOINT:[[:space:]]/ {
+                   sub(/^[^:]*:[[:space:]]*/, ""); gsub(/^"|"$/, ""); print; exit }' || true
+}
+
 assert_development_stack() {
     local endpoint
-    endpoint="$(docker compose exec -T "$COMPOSE_SERVICE" printenv AWS_ENDPOINT </dev/null 2>/dev/null \
-        | tr -d '\r' || true)"
+    endpoint="$(resolve_archive_endpoint)"
 
     case "$endpoint" in
         http://minio:9000|http://localhost:*|http://127.0.0.1:*)
@@ -233,7 +259,11 @@ test_point_in_time() {
     # Marker B being absent is the outcome; this line is the mechanism. Without
     # it a restore that happened to stop in the right place for some other
     # reason would look identical to one that honoured recovery_target_time.
-    docker logs "$SCRATCH_CONTAINER" 2>&1 | grep -q "recovery stopping before commit of transaction" \
+    # See the note in walg-restore.sh: 'grep -q' against an unbounded producer
+    # can return 141 through pipefail, and here that would report a passing
+    # restore as a failed assertion.
+    docker logs "$SCRATCH_CONTAINER" 2>&1 \
+        | grep -F "recovery stopping before commit of transaction" >/dev/null \
         || die "the recovery log does not show a stop at the target; the point in time may not have been applied"
 
     docker rm -f -v "$SCRATCH_CONTAINER" >/dev/null 2>&1 || true
@@ -321,7 +351,7 @@ assert_post_restore_backup() {
 
     pg -tAc "SELECT 1" >/dev/null 2>&1 || die "the database is not answering after the restore"
     docker compose exec -T -u postgres "$COMPOSE_SERVICE" wal-g backup-list </dev/null 2>/dev/null \
-        | grep -q "$name" \
+        | grep -F "$name" >/dev/null \
         || die "the post-restore backup ${name} is not in backup-list"
 
     pass "re-baselined on the new timeline: ${name} is in the archive"
@@ -331,11 +361,22 @@ assert_post_restore_backup() {
 
 log "verification run ${RUN_ID}"
 
-# Before either test, and before the probe database exists: the stack has to be
-# up to be asked where its archive is, and nothing should be created until the
-# answer is acceptable.
-ensure_running
+# The whole run, not each child. walg-backup.sh and walg-restore.sh each take
+# this lock for their own duration, which leaves it free in the gaps between
+# them — and this script does its most dangerous work in exactly those gaps: it
+# writes markers, stops Postgres and deletes the pgdata volume between two
+# locked children. A cron backup landing in one of those windows gets killed
+# mid-upload and can leave an incomplete backup in the archive.
+#
+# Children are told to skip it rather than block on it; see the note beside the
+# same lock in walg-backup.sh for why sharing it any other way does not work.
+exec 9>"$LOCK_FILE"
+flock -n 9 || die "another backup or restore holds ${LOCK_FILE}; wait for it to finish"
+export CARA_MAINTENANCE_LOCK_HELD=1
+
+# Before the stack is started, not after: see resolve_archive_endpoint.
 assert_development_stack
+ensure_running
 
 test_point_in_time
 
