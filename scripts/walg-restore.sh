@@ -81,6 +81,18 @@ log() {
     printf '%s\n' "$line" >>"$RESTORE_JOURNAL"
 }
 record() { printf '  %-18s %s\n' "$1" "$2" | tee -a "$RESTORE_JOURNAL"; }
+
+# Phase boundaries, each measured from the previous one so the parts add up to
+# the total instead of being three overlapping numbers. The decomposition is the
+# deliverable: fetch and replay grow with the data, everything else is close to
+# flat, and only a split like this shows which one a slow restore actually hit.
+PHASE_MARK="$RUN_STARTED"
+phase() {
+    local now
+    now="$(date +%s%3N)"
+    record "$1" "$(( now - PHASE_MARK ))ms"
+    PHASE_MARK="$now"
+}
 die() { log "ERROR: $*" >&2; log "journal: ${RESTORE_JOURNAL}"; exit 1; }
 
 # --- arguments -------------------------------------------------------------
@@ -372,17 +384,19 @@ esac
 
 # --- fetch -----------------------------------------------------------------
 
+# Covers the lock, the service checks, the archive reachability probe, resolving
+# the backup, and clearing the target. All of it happens before a single byte is
+# downloaded, which is why it is one phase and not five.
+phase "preflight+resolve"
+
 log "fetching ${RESOLVED} into ${TARGET_PGDATA}"
-fetch_started="$(date +%s%3N)"
 
 if ! restore_exec wal-g backup-fetch "$TARGET_PGDATA" "$RESOLVED"; then
     [ -n "$SCRATCH_VOLUME" ] && log "remove the scratch volume with: docker volume rm ${SCRATCH_VOLUME}"
     die "backup-fetch failed; ${TARGET_PGDATA} now holds a partial restore and must be cleared before retrying"
 fi
 
-fetch_ms=$(( $(date +%s%3N) - fetch_started ))
-record "fetch duration" "${fetch_ms}ms"
-
+phase "fetch"
 log "fetch complete"
 
 # --- configure -------------------------------------------------------------
@@ -415,6 +429,7 @@ printf '%s\n' "$settings" \
 written="$(restore_exec sh -c "grep '^restore_command' '${conf}' | tail -1" | tr -d '\r')"
 [ -n "$written" ] || die "restore_command did not reach ${conf}"
 
+phase "configure"
 log "recovery configured"
 # The line as it actually landed, not as it was intended. Quoting around %f and
 # %p has been lost here before, by a shell in the middle rewriting the string —
@@ -425,7 +440,6 @@ record "restore_command" "$written"
 # --- start -----------------------------------------------------------------
 
 if [ "$MODE" = "takeover" ]; then
-    startup_started="$(date +%s%3N)"
     log "starting ${COMPOSE_SERVICE}"
     # takeover restarts the existing container, so its log still holds
     # everything from before the restore. Anchoring to this moment keeps the
@@ -451,7 +465,6 @@ else
     # recovery ends, and with archiving on it would publish that timeline into
     # the production archive — two throwaway instances would then collide on
     # identically named segments holding different data.
-    startup_started="$(date +%s%3N)"
     if [ "$MODE" = "inspect" ]; then
         log "starting scratch instance on port ${RESTORE_PORT}"
     else
@@ -503,8 +516,12 @@ fi
 # still replaying, and querying it then would report a database that is only
 # partly caught up.
 log "waiting for recovery to finish"
-replay_started="$(date +%s%3N)"
 deadline=$(( $(date +%s) + RECOVERY_TIMEOUT ))
+
+# 'start' ends when the server answers, not when the container is up. Container
+# creation was previously reported as the whole of startup while Postgres coming
+# up was billed to replay, which flattered one number and inflated the other.
+accepting="no"
 
 while :; do
     # Check liveness before the query. A startup failure kills Postgres within a
@@ -530,6 +547,15 @@ while :; do
     fi
 
     state="$(target_psql -tAc 'SELECT pg_is_in_recovery()' 2>/dev/null | tr -d '\r' || true)"
+
+    # Any answer means the server is accepting connections — 't' as much as 'f'.
+    # Postgres serves read-only queries throughout archive recovery, so this is
+    # the boundary between "starting up" and "replaying", not the end of either.
+    if [ -n "$state" ] && [ "$accepting" = "no" ]; then
+        phase "start"
+        accepting="yes"
+    fi
+
     [ "$state" = "f" ] && break
 
     if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -540,9 +566,10 @@ while :; do
     sleep 2
 done
 
-replay_ms=$(( $(date +%s%3N) - replay_started ))
-record "recovery duration" "${replay_ms}ms"
-record "startup duration" "$(( replay_started - startup_started ))ms"
+# The loop only breaks on a 'f' that has already been through the block above,
+# so 'start' is always recorded by now. On a restore with nothing left to replay
+# this phase is therefore near zero — which is the true answer, not a gap.
+phase "replay"
 
 # The recovery lines are the evidence that the restore did what was asked: which
 # segments were fetched, where replay stopped, and on which timeline it came up.
@@ -612,5 +639,6 @@ case "$MODE" in
         ;;
 esac
 
+phase "postflight"
 record "total duration" "$(( $(date +%s%3N) - RUN_STARTED ))ms"
 log "journal: ${RESTORE_JOURNAL}"
