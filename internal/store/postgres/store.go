@@ -34,11 +34,13 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -633,17 +635,25 @@ func (s *Store) UpdateProjectStatus(ctx context.Context, name string, status v1.
 		return fmt.Errorf("postgres: marshal project status: %w", err)
 	}
 
+	// 'IS DISTINCT FROM' makes a rewrite of identical status match no row, so
+	// the publish below is reached only when something actually changed. The
+	// agent re-reports the same status on every poll tick from every node;
+	// without this each one produced an event that told subscribers nothing.
+	//
+	// Guarding on status alone is sufficient because phase is derived from it —
+	// identical status JSON implies an identical phase column.
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE resources
 		SET phase = $1, status = $2, updated_at = $3, resource_version = resource_version + 1
-		WHERE kind = $4 AND namespace = $5 AND name = $6`,
+		WHERE kind = $4 AND namespace = $5 AND name = $6
+		  AND status IS DISTINCT FROM $2`,
 		string(status.Phase), raw, time.Now().UTC(), kindProject, defaultNamespace, name,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: update project status %q: %w", name, err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+		return s.classifyProjectNoOp(ctx, name)
 	}
 	s.publish(event.TopicProjectUpdated, name)
 	return nil
@@ -690,7 +700,7 @@ func (s *Store) PatchProjectCondition(ctx context.Context, name string, conditio
 		return fmt.Errorf("postgres: patch project condition %q: %w", name, err)
 	}
 	if tag.RowsAffected() == 0 {
-		return s.conditionPatchNoOp(ctx, name)
+		return s.classifyProjectNoOp(ctx, name)
 	}
 
 	s.publish(event.TopicProjectUpdated, name)
@@ -716,21 +726,212 @@ func (s *Store) ClearProjectCondition(ctx context.Context, name string, conditio
 		return fmt.Errorf("postgres: clear project condition %q: %w", name, err)
 	}
 	if tag.RowsAffected() == 0 {
-		return s.conditionPatchNoOp(ctx, name)
+		return s.classifyProjectNoOp(ctx, name)
 	}
 
 	s.publish(event.TopicProjectUpdated, name)
 	return nil
 }
 
-// conditionPatchNoOp resolves the two reasons a condition patch can affect no
-// rows: the Project does not exist, or the patch changed nothing. Only the
+// classifyProjectNoOp resolves the two reasons a guarded update can affect no
+// rows: the Project does not exist, or the write changed nothing. Only the
 // former is an error.
-func (s *Store) conditionPatchNoOp(ctx context.Context, name string) error {
-	if _, err := s.getProject(ctx, name); err != nil {
+//
+// Only ErrNotFound may be concluded from a failed lookup. A cancelled context,
+// a dropped connection or an unmarshal failure says nothing about whether the
+// row is there, and reporting one as "not found" turns a server fault into an
+// HTTP 404 claiming the resource is gone — which a controller may believe,
+// dropping the Project from its queue and never reconciling it again.
+func (s *Store) classifyProjectNoOp(ctx context.Context, name string) error {
+	_, err := s.getProject(ctx, name)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, store.ErrNotFound):
 		return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+	default:
+		return fmt.Errorf("postgres: classify project update %q: %w", name, err)
+	}
+}
+
+// maxStatusUpdateAttempts bounds UpdateProjectStatusWithRetry: the first
+// attempt plus at most two retries. The contended window is a single database
+// round trip, so a conflict surviving three reads is contention that the
+// caller's own rhythm — the next reconcile, poll or client retry — should
+// absorb, not something a tighter loop here would resolve.
+const maxStatusUpdateAttempts = 3
+
+// copyProjectStatus returns a status sharing nothing mutable with src.
+//
+// slices.Clone is enough only because every field of v1.Condition is a value
+// type. Should Condition gain a slice, map or pointer field, the copy stops
+// being independent: mutate would edit the original alongside the candidate,
+// statusEqual would report "unchanged" for every in-place edit, and every such
+// update would become a silent no-op that writes nothing and returns nil.
+func copyProjectStatus(src v1.ProjectStatus) v1.ProjectStatus {
+	dst := src
+	dst.Conditions = slices.Clone(src.Conditions)
+	return dst
+}
+
+// statusEqual reports whether two statuses would persist identically.
+//
+// The comparison is on the marshalled form on purpose: those are the exact
+// bytes the UPDATE would store, so "the database would not change" and "this is
+// a no-op" become the same question rather than two that can disagree.
+//
+// reflect.DeepEqual cannot be used here. Condition carries two time.Time
+// fields, and DeepEqual compares their internal representation rather than the
+// instant they denote — a value that round-tripped through JSON and one built
+// in-process can mean the same moment and still compare unequal, which would
+// switch the guard off precisely where it earns its keep.
+func statusEqual(a, b v1.ProjectStatus) (bool, error) {
+	rawA, err := json.Marshal(a)
+	if err != nil {
+		return false, fmt.Errorf("marshal current project status: %w", err)
+	}
+	rawB, err := json.Marshal(b)
+	if err != nil {
+		return false, fmt.Errorf("marshal next project status: %w", err)
+	}
+	return bytes.Equal(rawA, rawB), nil
+}
+
+// projectStatusCAS is the storage surface the retry loop needs, and nothing
+// more. It exists so the retry policy can be exercised against a fake with no
+// database behind it — a loop that can only be tested through Postgres tends to
+// be tested for the happy path and asserted-by-hope everywhere else.
+//
+// This is not a public abstraction: *Store is its only production implementer.
+type projectStatusCAS interface {
+	loadProjectStatus(ctx context.Context, name string) (v1.ProjectStatus, int64, error)
+	swapProjectStatus(ctx context.Context, name string, expectedVersion int64, next v1.ProjectStatus) error
+}
+
+// loadProjectStatus implements projectStatusCAS.
+func (s *Store) loadProjectStatus(ctx context.Context, name string) (v1.ProjectStatus, int64, error) {
+	project, err := s.getProject(ctx, name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return v1.ProjectStatus{}, 0, fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+		}
+		return v1.ProjectStatus{}, 0, err
+	}
+	return project.Status, project.ObjectMeta.ResourceVersion, nil
+}
+
+// swapProjectStatus implements projectStatusCAS: one compare-and-swap attempt.
+func (s *Store) swapProjectStatus(
+	ctx context.Context,
+	name string,
+	expectedVersion int64,
+	status v1.ProjectStatus,
+) error {
+	raw, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal project status: %w", err)
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE resources
+		SET phase = $1, status = $2, updated_at = $3, resource_version = resource_version + 1
+		WHERE kind = $4 AND namespace = $5 AND name = $6 AND resource_version = $7`,
+		string(status.Phase), raw, time.Now().UTC(),
+		kindProject, defaultNamespace, name, expectedVersion,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: update project status %q at version %d: %w", name, expectedVersion, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return s.classifyStatusUpdateMiss(ctx, name)
 	}
 	return nil
+}
+
+// classifyStatusUpdateMiss explains a compare-and-swap that matched no row.
+// The row still being there means the version moved under us; the row being
+// gone means it was deleted. Anything else is reported as itself — see
+// classifyProjectNoOp for why that distinction is not cosmetic.
+func (s *Store) classifyStatusUpdateMiss(ctx context.Context, name string) error {
+	_, err := s.getProject(ctx, name)
+	switch {
+	case err == nil:
+		return fmt.Errorf("%w: project %q", store.ErrVersionConflict, name)
+	case errors.Is(err, store.ErrNotFound):
+		return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+	default:
+		return fmt.Errorf("postgres: classify project status update %q: %w", name, err)
+	}
+}
+
+// UpdateProjectStatusWithRetry implements store.ProjectStore.
+//
+// The event is published here rather than inside the loop so the decision "did
+// anything actually change" is made in one place and can be asserted without a
+// bus: retryProjectStatusUpdate reports it, this method acts on it.
+func (s *Store) UpdateProjectStatusWithRetry(
+	ctx context.Context,
+	name string,
+	mutate func(*v1.ProjectStatus) error,
+) error {
+	committed, err := retryProjectStatusUpdate(ctx, s, name, mutate)
+	if err != nil {
+		return err
+	}
+	if committed {
+		s.publish(event.TopicProjectUpdated, name)
+	}
+	return nil
+}
+
+// retryProjectStatusUpdate is the retry policy. It reports whether a write was
+// committed, so a no-op is distinguishable from a change without inspecting the
+// database or the event bus.
+//
+// Only ErrVersionConflict is retried. Everything else — a missing row, a
+// cancelled context, a mutate that refused, a database fault — returns at once
+// with its cause intact, for whatever rhythm the caller already has to absorb.
+func retryProjectStatusUpdate(
+	ctx context.Context,
+	cas projectStatusCAS,
+	name string,
+	mutate func(*v1.ProjectStatus) error,
+) (bool, error) {
+	var lastConflict error
+
+	for attempt := 0; attempt < maxStatusUpdateAttempts; attempt++ {
+		current, version, err := cas.loadProjectStatus(ctx, name)
+		if err != nil {
+			return false, err
+		}
+
+		// current stays untouched as the "before" side of the comparison;
+		// mutate only ever sees the copy.
+		next := copyProjectStatus(current)
+		if err := mutate(&next); err != nil {
+			return false, err
+		}
+
+		unchanged, err := statusEqual(current, next)
+		if err != nil {
+			return false, fmt.Errorf("postgres: compare project status %q: %w", name, err)
+		}
+		if unchanged {
+			return false, nil
+		}
+
+		err = cas.swapProjectStatus(ctx, name, version, next)
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, store.ErrVersionConflict):
+			lastConflict = err
+		default:
+			return false, err
+		}
+	}
+
+	return false, lastConflict
 }
 
 // UpdateProjectSpec implements store.ProjectStore.

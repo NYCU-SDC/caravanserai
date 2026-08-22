@@ -23,6 +23,7 @@ var ErrServiceNotConfigured = errors.New("service not configured")
 //   - store.ErrNotFound          → 404 Not Found
 //   - store.ErrAlreadyExists     → 409 Conflict
 //   - store.ErrConflictState     → 409 Conflict
+//   - store.ErrVersionConflict   → 409 Conflict
 //   - ErrServiceNotConfigured    → 503 Service Unavailable
 //
 // Unrecognised errors return an empty Problem{}, which lets summer's built-in
@@ -50,6 +51,17 @@ func NewProblemMapping() func(error) problem.Problem {
 			}
 
 		case errors.Is(err, store.ErrConflictState):
+			return problem.Problem{
+				Title:  "Conflict",
+				Status: 409,
+				Type:   "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/409",
+				Detail: err.Error(),
+			}
+
+		// Same status as ErrConflictState but a different meaning: nothing is
+		// wrong with the request, the caller just lost a race and can repeat it
+		// from the current state.
+		case errors.Is(err, store.ErrVersionConflict):
 			return problem.Problem{
 				Title:  "Conflict",
 				Status: 409,

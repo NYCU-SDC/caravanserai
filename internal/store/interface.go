@@ -34,6 +34,15 @@ var ErrAlreadyExists = errors.New("resource already exists")
 // Project spec while it is Running).
 var ErrConflictState = errors.New("operation conflicts with current resource state")
 
+// ErrVersionConflict is returned when a compare-and-swap update finds that the
+// resource's version moved since the caller read it.  The resource still
+// exists and the request was not invalid — the caller simply lost a race.
+//
+// It is deliberately distinct from ErrConflictState: retry logic uses errors.Is
+// to separate "read again and retry" from "this operation is not allowed", and
+// folding them together would leave that decision with nothing to test.
+var ErrVersionConflict = errors.New("resource version conflict")
+
 // Store is the top-level persistence interface.  A single concrete type
 // (e.g. sqlite.Store) implements all methods; tests may implement a subset
 // via a narrow sub-interface or a hand-rolled stub.
@@ -174,7 +183,34 @@ type ProjectStore interface {
 	// UpdateProjectStatus writes only the status sub-object of the named
 	// Project.  Used by the Controller Manager to avoid overwriting Spec
 	// changes made concurrently by the API server.
+	//
+	// Deprecated: this replaces the whole status with no version check, so a
+	// caller that read the Project earlier will silently discard anything
+	// written in between.  Production read-modify-write paths must use
+	// UpdateProjectStatusWithRetry.  Kept for tests that establish fixture
+	// state, where no concurrent writer exists.
 	UpdateProjectStatus(ctx context.Context, name string, status v1.ProjectStatus) error
+
+	// UpdateProjectStatusWithRetry reads the named Project, applies mutate to a
+	// copy of its status, and writes the result back guarded by the version it
+	// read.  If another writer committed in between, it re-reads, re-applies
+	// mutate to the new state, and tries again.
+	//
+	// At most 3 attempts in total: the first plus at most 2 retries.  A
+	// conflict on the third returns ErrVersionConflict, leaving the caller's
+	// own outer rhythm — the next reconcile, poll, or client retry — to pick
+	// the work up again.  Only ErrVersionConflict is retried; everything else
+	// returns immediately with its cause intact.
+	//
+	// mutate must be pure with respect to anything outside the status it is
+	// handed.  It may be called more than once for a single logical update, so
+	// any side effect inside it happens more than once too.  Values that must
+	// stay fixed across attempts — timestamps above all — belong outside the
+	// closure, captured by it.
+	//
+	// A mutate that leaves the status unchanged writes nothing, advances no
+	// version, publishes no event, and returns nil.
+	UpdateProjectStatusWithRetry(ctx context.Context, name string, mutate func(*v1.ProjectStatus) error) error
 
 	// PatchProjectCondition replaces exactly one named condition inside a
 	// Project's status.conditions, leaving phase and every other status field
