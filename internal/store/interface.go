@@ -17,6 +17,7 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 )
@@ -40,6 +41,64 @@ type Store interface {
 	NodeStore
 	ProjectStore
 	SecretStore
+	PreAuthKeyStore
+}
+
+// ============================================================
+// PreAuthKey
+// ============================================================
+
+// PreAuthKey state values. A key is issued as active and moves to used on the
+// first successful heartbeat that consumes it. Expired/Revoked are reserved for
+// later lifecycle work (CARA-49 revoke, GC sweeps) and are not written here.
+const (
+	PreAuthKeyStateActive  = "active"
+	PreAuthKeyStateUsed    = "used"
+	PreAuthKeyStateExpired = "expired"
+	PreAuthKeyStateRevoked = "revoked"
+)
+
+// PreAuthKey is the server-side mapping between a Headscale pre-auth key and
+// the Cara Node it was issued for (design CARA-50 §3–§4). It never holds the
+// full pre-auth key: KeyHash is the hex SHA-256 of the key and KeyPrefix keeps
+// only the first few characters for operator-facing audit.
+type PreAuthKey struct {
+	// KeyHash is the hex SHA-256 of the full pre-auth key. It is the durable
+	// lookup key an agent's heartbeat references.
+	KeyHash string
+	// KeyPrefix is the first few characters of the raw key, retained only for
+	// audit/log correlation. It is not sufficient to reconstruct the key.
+	KeyPrefix string
+	// CaraNodeName is the Cara Node this key authorises to join the overlay.
+	CaraNodeName string
+	// Expiration is when the key stops being valid. Zero means no expiry.
+	Expiration time.Time
+	// State is one of the PreAuthKeyState* constants.
+	State string
+	// UsedByIP is the overlay IP that consumed the key, set when State is used.
+	UsedByIP string
+	// UsedAt is when the key was consumed, set when State is used.
+	UsedAt time.Time
+	// IssuedBy records who requested the key, when available.
+	IssuedBy string
+}
+
+// PreAuthKeyStore persists pre-auth key -> Cara Node mappings. The full
+// pre-auth key is secret material and is never passed to or stored by this
+// interface; callers hash it first.
+type PreAuthKeyStore interface {
+	// CreatePreAuthKey persists a new mapping. Returns ErrAlreadyExists if a
+	// row with the same KeyHash already exists.
+	CreatePreAuthKey(ctx context.Context, key *PreAuthKey) error
+
+	// GetPreAuthKeyByHash returns the mapping for the given key hash.
+	// Returns ErrNotFound if no such mapping exists.
+	GetPreAuthKeyByHash(ctx context.Context, keyHash string) (*PreAuthKey, error)
+
+	// MarkPreAuthKeyUsed transitions a key to the used state and records the
+	// overlay IP and timestamp that consumed it. Returns ErrNotFound if the
+	// key hash is unknown.
+	MarkPreAuthKeyUsed(ctx context.Context, keyHash, usedByIP string, usedAt time.Time) error
 }
 
 // ============================================================

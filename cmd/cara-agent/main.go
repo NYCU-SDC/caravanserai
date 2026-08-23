@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/appinit"
 	"NYCU-SDC/caravanserai/internal/config"
 	"NYCU-SDC/caravanserai/internal/overlay"
+	"NYCU-SDC/caravanserai/internal/overlay/keyref"
 	"NYCU-SDC/caravanserai/internal/trace"
 
 	"github.com/NYCU-SDC/summer/pkg/problem"
@@ -115,6 +117,18 @@ func main() {
 			logger.Fatal("Failed to join Headscale overlay", zap.Error(err))
 		}
 		agentClient.SetOverlayIP(result.OverlayIP)
+
+		// Derive the pre-auth key reference so heartbeats can be bound to the
+		// Cara Node this key was issued for (CARA-68). Only the hash is sent;
+		// the raw key never leaves this host beyond the overlay handshake.
+		if rawKey, keyErr := os.ReadFile(cfg.PreauthKeyFile); keyErr != nil {
+			logger.Warn("Could not read pre-auth key for identity binding; heartbeats will omit keyRef",
+				zap.Error(keyErr))
+		} else {
+			hash, _ := keyref.Hash(strings.TrimSpace(string(rawKey)))
+			agentClient.SetKeyRef(hash)
+		}
+
 		logger.Info("Joined Headscale overlay",
 			zap.String("overlay_ip", result.OverlayIP),
 			zap.String("dns_name", result.DNSName),

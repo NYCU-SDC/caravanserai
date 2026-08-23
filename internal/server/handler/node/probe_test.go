@@ -62,7 +62,7 @@ func (fakeProjectLister) ListProjectsByNodeRef(context.Context, string, []v1.Pro
 func newTestHandler(t *testing.T, dialer agentdialer.Dialer) http.Handler {
 	t.Helper()
 	pw := problem.NewWithMapping(serverhandler.NewProblemMapping())
-	h := NewHandler(zap.NewNop(), fakeNodeStore{}, fakeProjectLister{}, dialer, pw)
+	h := NewHandler(zap.NewNop(), fakeNodeStore{}, fakeProjectLister{}, nil, dialer, pw)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux, middleware.NewSet())
 	return mux
@@ -221,7 +221,7 @@ func TestProbe_NoDialer(t *testing.T) {
 	// A handler constructed without a dialer should return 500 rather than
 	// panic — safety net for tests that omit the dependency.
 	pw := problem.NewWithMapping(serverhandler.NewProblemMapping())
-	h := NewHandler(zap.NewNop(), fakeNodeStore{}, fakeProjectLister{}, nil, pw)
+	h := NewHandler(zap.NewNop(), fakeNodeStore{}, fakeProjectLister{}, nil, nil, pw)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux, middleware.NewSet())
 	srv := httptest.NewServer(mux)

@@ -1013,6 +1013,95 @@ func unmarshalFields(name string, rawSpec []byte, spec any, rawStatus []byte, st
 	return nil
 }
 
+// ============================================================
+// PreAuthKey (CARA-68)
+// ============================================================
+
+// CreatePreAuthKey persists a new pre-auth key -> Cara Node mapping.
+func (s *Store) CreatePreAuthKey(ctx context.Context, key *store.PreAuthKey) error {
+	now := time.Now().UTC()
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO preauth_keys
+			(key_hash, key_prefix, cara_node_name, expiration, state, issued_by, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
+		key.KeyHash, key.KeyPrefix, key.CaraNodeName,
+		nullableTime(key.Expiration), stateOrDefault(key.State), key.IssuedBy, now,
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return store.ErrAlreadyExists
+		}
+		return fmt.Errorf("postgres: create preauth key for node %q: %w", key.CaraNodeName, err)
+	}
+	return nil
+}
+
+// GetPreAuthKeyByHash returns the mapping for the given key hash.
+func (s *Store) GetPreAuthKeyByHash(ctx context.Context, keyHash string) (*store.PreAuthKey, error) {
+	var (
+		k          store.PreAuthKey
+		expiration *time.Time
+		usedByIP   *string
+		usedAt     *time.Time
+	)
+	err := s.pool.QueryRow(ctx, `
+		SELECT key_hash, key_prefix, cara_node_name, expiration, state, used_by_ip, used_at, issued_by
+		FROM preauth_keys
+		WHERE key_hash = $1`, keyHash,
+	).Scan(&k.KeyHash, &k.KeyPrefix, &k.CaraNodeName, &expiration, &k.State, &usedByIP, &usedAt, &k.IssuedBy)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%w: preauth key", store.ErrNotFound)
+		}
+		return nil, fmt.Errorf("postgres: get preauth key: %w", err)
+	}
+	if expiration != nil {
+		k.Expiration = *expiration
+	}
+	if usedByIP != nil {
+		k.UsedByIP = *usedByIP
+	}
+	if usedAt != nil {
+		k.UsedAt = *usedAt
+	}
+	return &k, nil
+}
+
+// MarkPreAuthKeyUsed transitions a key to the used state, recording the overlay
+// IP and timestamp that consumed it.
+func (s *Store) MarkPreAuthKeyUsed(ctx context.Context, keyHash, usedByIP string, usedAt time.Time) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE preauth_keys
+		SET state = $1, used_by_ip = $2, used_at = $3, updated_at = $4
+		WHERE key_hash = $5`,
+		store.PreAuthKeyStateUsed, usedByIP, usedAt.UTC(), time.Now().UTC(), keyHash,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: mark preauth key used: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: preauth key", store.ErrNotFound)
+	}
+	return nil
+}
+
+// nullableTime returns nil for a zero time so it is stored as SQL NULL.
+func nullableTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	u := t.UTC()
+	return &u
+}
+
+// stateOrDefault defaults an empty state to active.
+func stateOrDefault(state string) string {
+	if state == "" {
+		return store.PreAuthKeyStateActive
+	}
+	return state
+}
+
 // isUniqueViolation returns true for PostgreSQL error code 23505 (unique_violation).
 func isUniqueViolation(err error) bool {
 	if err == nil {
