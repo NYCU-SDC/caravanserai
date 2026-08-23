@@ -32,6 +32,17 @@ type Config struct {
 	// Defaults to a server-specific directory so it never collides with a
 	// co-located cara-agent's tsnet state.
 	OverlayStateDir string `yaml:"overlay_state_dir" envconfig:"OVERLAY_STATE_DIR"`
+
+	// Headscale management API access (CARA-49). When both HeadscaleAPIURL and
+	// HeadscaleAPIKey are set, cara-server exposes the /api/v1/overlay endpoints
+	// (issue pre-auth keys, list/revoke nodes). When unset those endpoints
+	// report that overlay administration is not configured. The API key is
+	// secret and is never logged.
+	HeadscaleAPIURL string `yaml:"headscale_api_url" envconfig:"HEADSCALE_API_URL"`
+	HeadscaleAPIKey string `yaml:"headscale_api_key" envconfig:"HEADSCALE_API_KEY"`
+	// HeadscaleUser is the Headscale user new pre-auth keys are created under.
+	// Defaults to "cara-node".
+	HeadscaleUser string `yaml:"headscale_user" envconfig:"HEADSCALE_USER"`
 }
 
 // Load reads cara-server config from file → env → flags (later sources win).
@@ -102,6 +113,9 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		PreauthKeyFile:   os.Getenv("HEADSCALE_PREAUTH_KEY_FILE"),
 		OverlayHostname:  os.Getenv("OVERLAY_HOSTNAME"),
 		OverlayStateDir:  os.Getenv("OVERLAY_STATE_DIR"),
+		HeadscaleAPIURL:  os.Getenv("HEADSCALE_API_URL"),
+		HeadscaleAPIKey:  os.Getenv("HEADSCALE_API_KEY"),
+		HeadscaleUser:    os.Getenv("HEADSCALE_USER"),
 	}
 
 	return configutil.Merge[Config](cfg, envConfig)
@@ -118,6 +132,9 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.StringVar(&flagConfig.PreauthKeyFile, "preauth-key-file", "", "path to a file containing the Headscale pre-auth key")
 	flag.StringVar(&flagConfig.OverlayHostname, "overlay-hostname", "", "hostname to register with Headscale (default: cara-server)")
 	flag.StringVar(&flagConfig.OverlayStateDir, "overlay-state-dir", "", "directory where tsnet persists overlay node keys (default: per-user cara-server dir)")
+	flag.StringVar(&flagConfig.HeadscaleAPIURL, "headscale-api-url", "", "Headscale management API URL (enables overlay admin endpoints)")
+	flag.StringVar(&flagConfig.HeadscaleAPIKey, "headscale-api-key", "", "Headscale management API key")
+	flag.StringVar(&flagConfig.HeadscaleUser, "headscale-user", "", "Headscale user new pre-auth keys are created under (default: cara-node)")
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)
 }

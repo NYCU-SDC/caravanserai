@@ -197,6 +197,9 @@ Configuration is read in order: `config.yaml` → `.env` → environment variabl
 | `port` | `PORT` | `8080` | Listen port |
 | `database_url` | `DATABASE_URL` | _(required)_ | PostgreSQL DSN |
 | `otel_collector_url` | `OTEL_COLLECTOR_URL` | _(optional)_ | OTLP gRPC endpoint |
+| `headscale_api_url` | `HEADSCALE_API_URL` | _(optional)_ | Headscale management API URL. Enables the `/api/v1/overlay` endpoints when set together with the API key |
+| `headscale_api_key` | `HEADSCALE_API_KEY` | _(optional)_ | Headscale management API key (secret, never logged) |
+| `headscale_user` | `HEADSCALE_USER` | `cara-node` | Headscale user new pre-auth keys are created under |
 
 ### cara-agent
 
@@ -248,6 +251,16 @@ All endpoints are under `/api/v1/`.
 | `GET` | `/api/v1/projects/{name}` | Get a single project |
 | `DELETE` | `/api/v1/projects/{name}` | Delete a project |
 | `PATCH` | `/api/v1/projects/{name}/status` | Update project status (agent only) |
+
+### Overlay
+
+Requires cara-server to be configured with Headscale API credentials; otherwise these return a "not configured" error. Surfaced as `caractl overlay …`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/overlay/preauth-keys` | Issue a Headscale pre-auth key (body: `{node, ttl}`) |
+| `GET` | `/api/v1/overlay/nodes` | List Headscale overlay nodes |
+| `DELETE` | `/api/v1/overlay/nodes/{name}` | Revoke a node from Headscale and the Cara node store |
 
 ---
 
@@ -321,6 +334,41 @@ On startup the agent blocks until Headscale assigns an overlay IP, logs it
 you can see with `docker compose exec headscale headscale nodes list`. A join
 failure caused by a bad/expired key fails fast with a readable error; the agent
 never silently falls back to the underlay once overlay is requested.
+
+#### Overlay administration from caractl
+
+Instead of shelling into the Headscale container, `caractl overlay` drives node
+lifecycle through cara-server, which calls the Headscale management API. Enable
+it by giving cara-server a Headscale API URL and key (the key is provisioned
+once):
+
+```bash
+# One-time: mint a Headscale admin API key.
+docker compose exec headscale headscale apikeys create --expiration 720h
+
+./bin/cara-server \
+  --headscale-api-url http://localhost:8081 \
+  --headscale-api-key <api-key>
+```
+
+Then:
+
+```bash
+# Issue a pre-auth key for a node to join (the key prints to stdout, once).
+./bin/caractl overlay create-preauth-key --node agent-a --ttl 24h
+
+# List overlay nodes Headscale knows about.
+./bin/caractl overlay nodes list
+
+# Revoke a node from both Headscale and the Cara node store.
+./bin/caractl overlay nodes revoke agent-a
+```
+
+Revoke removes the node from Headscale first, then from the Cara node store, so
+the two views do not drift. If the store deletion fails after Headscale removal,
+the command reports the drift and exits non-zero — re-running it is safe and
+retries the store cleanup. When cara-server has no Headscale API credentials the
+`overlay` endpoints report that overlay administration is not configured.
 
 | Setting | Flag | Env / YAML | Notes |
 |---|---|---|---|
