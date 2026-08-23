@@ -11,6 +11,7 @@ import (
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/event"
+	"NYCU-SDC/caravanserai/internal/server/adapter"
 	"NYCU-SDC/caravanserai/internal/store"
 	pgstore "NYCU-SDC/caravanserai/internal/store/postgres"
 
@@ -292,6 +293,91 @@ func TestOCCEventSemantics(t *testing.T) {
 		assert.Len(t, collectEvents(f.sub, 300*time.Millisecond), 2)
 		assert.Equal(t, before+2, f.version(t))
 	})
+}
+
+// The guard has to hold for the mutation production actually performs, not just
+// for one contrived to produce identical bytes. SetProjectPhase stamps a
+// Condition with a fresh timestamp every call; if that timestamp moved on an
+// unchanged re-assertion, every agent tick would be a write and an event and
+// this whole guard would be decorative. It did, once — this is why.
+func TestRepeatedIdenticalPhaseReportIsANoOp(t *testing.T) {
+	f := newOCCFixture(t, "occ-repeat-real-mutation")
+	ctx := context.Background()
+	projects := adapter.NewProjectStoreAdapter(f.store)
+
+	require.NoError(t, projects.SetProjectPhase(ctx, f.name,
+		v1.ProjectPhaseRunning, "ContainersRunning", "All containers running"))
+	assert.Len(t, collectEvents(f.sub, 200*time.Millisecond), 1, "the first report is a real change")
+	after := f.version(t)
+
+	// What the agent does on the next poll tick, and the one after that.
+	for i := 0; i < 3; i++ {
+		time.Sleep(2 * time.Millisecond)
+		require.NoError(t, projects.SetProjectPhase(ctx, f.name,
+			v1.ProjectPhaseRunning, "ContainersRunning", "All containers running"))
+	}
+
+	assert.Empty(t, collectEvents(f.sub, 300*time.Millisecond),
+		"repeated identical reports published events; the no-op guard is not reaching the real path")
+	assert.Equal(t, after, f.version(t),
+		"repeated identical reports advanced resource_version")
+
+	// A genuine change still gets through.
+	require.NoError(t, projects.SetProjectPhase(ctx, f.name,
+		v1.ProjectPhaseFailed, "ContainerExited", "exit 1"))
+	assert.Len(t, collectEvents(f.sub, 200*time.Millisecond), 1)
+	assert.Equal(t, after+1, f.version(t))
+}
+
+func (f *occFixture) phaseCondition(t *testing.T) v1.Condition {
+	t.Helper()
+	for _, c := range f.status(t).Conditions {
+		if c.Type == v1.ConditionTypePhase {
+			return c
+		}
+	}
+	t.Fatalf("no Phase condition on %s", f.name)
+	return v1.Condition{}
+}
+
+// The path that motivated the transitioned flag, exercised through the real
+// adapter and real SQL rather than the helper in isolation.
+//
+// SetProjectScheduled moves the phase without touching conditions, so a node
+// flapping during scheduling produces Scheduled -> Pending with the Phase
+// condition's Reason unchanged throughout — the reason is hardcoded to
+// "NodeNotReady". Comparing only the condition's own fields would keep the
+// timestamp from the previous visit to Pending and misreport when this one
+// began.
+func TestScheduledThenPendingRecordsANewTransition(t *testing.T) {
+	f := newOCCFixture(t, "occ-scheduled-then-pending")
+	ctx := context.Background()
+	projects := adapter.NewProjectStoreAdapter(f.store)
+
+	require.NoError(t, projects.SetProjectPending(ctx, f.name))
+	first := f.phaseCondition(t)
+	require.False(t, first.LastTransitionTime.IsZero(), "the first reschedule must stamp a time")
+
+	// The scheduler picks a node. Conditions are left alone — which contradicts
+	// the Phase condition's own specification ("updated on every lifecycle phase
+	// transition", api/v1/condition.go) and is the gap ADR-0016 tracks. This
+	// assertion pins today's behaviour so closing that gap has to come here and
+	// say so, rather than silently changing what the timestamps mean.
+	require.NoError(t, projects.SetProjectScheduled(ctx, f.name, "node-a"))
+	assert.Equal(t, first.LastTransitionTime, f.phaseCondition(t).LastTransitionTime,
+		"SetProjectScheduled does not currently touch the Phase condition")
+
+	time.Sleep(2 * time.Millisecond)
+
+	// The node flaps before the agent reports Running.
+	require.NoError(t, projects.SetProjectPending(ctx, f.name))
+	second := f.phaseCondition(t)
+
+	require.Equal(t, first.Reason, second.Reason,
+		"the scenario depends on the reason being identical; if this fails the test no longer covers it")
+	assert.True(t, second.LastTransitionTime.After(first.LastTransitionTime),
+		"Scheduled -> Pending is a real transition, so the condition must record when it happened "+
+			"even though its own fields did not change")
 }
 
 // Regression guard for the condition helpers. They already behave correctly;

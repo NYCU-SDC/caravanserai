@@ -569,25 +569,22 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 	// this attempt. Replacing the whole status here is what used to discard a
 	// controller's concurrent write.
 	err := h.store.UpdateProjectStatusWithRetry(traceCtx, name, func(status *v1.ProjectStatus) error {
+		transitioned := status.Phase != req.Phase
 		status.Phase = req.Phase
 
 		if req.Reason == "" && req.Message == "" {
 			return nil
 		}
-		cond := v1.Condition{
+		// UpsertCondition keeps the stored timestamp when this report says the
+		// same thing as the last one, which is what makes an unchanged tick a
+		// byte-level no-op the store can skip.
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypePhase,
 			Status:             v1.ConditionTrue,
 			Reason:             req.Reason,
 			Message:            req.Message,
 			LastTransitionTime: observedAt,
-		}
-		for i := range status.Conditions {
-			if status.Conditions[i].Type == v1.ConditionTypePhase {
-				status.Conditions[i] = cond
-				return nil
-			}
-		}
-		status.Conditions = append(status.Conditions, cond)
+		}, transitioned)
 		return nil
 	})
 	if err != nil {
@@ -664,6 +661,19 @@ func (h *Handler) patchCondition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Unlike patchStatus, this stamps a fresh timestamp on every call rather
+	// than going through v1.UpsertCondition, and that is deliberate for now.
+	// PatchProjectCondition merges in SQL without reading first, so preserving
+	// the stored timestamp would need either a read — losing the atomicity the
+	// merge exists for — or the comparison pushed into jsonb.
+	//
+	// It is affordable because of who calls it: the only producer is the agent's
+	// backup runner, once when a backup starts and once when it ends, so every
+	// call really is a transition. If a caller ever re-asserts the same
+	// condition on a schedule, that stops being true — each repeat becomes a
+	// write and a project.updated event carrying no news, which is exactly what
+	// the guard in patchStatus exists to prevent. Give this the same treatment
+	// then.
 	now := time.Now().UTC()
 	condition := v1.Condition{
 		Type:               condType,

@@ -191,6 +191,14 @@ type ProjectStore interface {
 	// state, where no concurrent writer exists.
 	UpdateProjectStatus(ctx context.Context, name string, status v1.ProjectStatus) error
 
+	// The Phase condition is specified in api/v1/condition.go as "updated on
+	// every lifecycle phase transition". SetProjectScheduled does not honour
+	// that — it moves Phase to Scheduled without touching conditions — so a
+	// Scheduled Project can still carry the Reason from its previous phase.
+	// That is a known gap in the implementation, not a second interpretation;
+	// see ADR-0016. Until it is closed, do not read the Phase condition as a
+	// description of the current phase.
+
 	// UpdateProjectStatusWithRetry reads the named Project, applies mutate to a
 	// copy of its status, and writes the result back guarded by the version it
 	// read.  If another writer committed in between, it re-reads, re-applies

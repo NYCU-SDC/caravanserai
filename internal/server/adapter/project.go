@@ -52,23 +52,6 @@ func (a *ProjectStoreAdapter) GetProjectPhase(ctx context.Context, name string) 
 	return project.Status.Phase, project.Status.NodeRef, nil
 }
 
-// upsertCondition replaces the condition carrying cond.Type, or appends it.
-//
-// Conditions are keyed by Type, so this merge is safe to re-run: applying it to
-// a status that already carries the condition produces the same result as
-// applying it to one that does not. That matters because every caller below
-// hands it to UpdateProjectStatusWithRetry, which may run the closure again
-// against freshly read state.
-func upsertCondition(status *v1.ProjectStatus, cond v1.Condition) {
-	for i := range status.Conditions {
-		if status.Conditions[i].Type == cond.Type {
-			status.Conditions[i] = cond
-			return
-		}
-	}
-	status.Conditions = append(status.Conditions, cond)
-}
-
 func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nodeRef string) error {
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
 		status.Phase = v1.ProjectPhaseScheduled
@@ -83,14 +66,15 @@ func (a *ProjectStoreAdapter) SetProjectPhase(ctx context.Context, name string, 
 	// a retry happened to land.
 	now := time.Now().UTC()
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		transitioned := status.Phase != phase
 		status.Phase = phase
-		upsertCondition(status, v1.Condition{
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypePhase,
 			Status:             v1.ConditionTrue,
 			Reason:             reason,
 			Message:            message,
 			LastTransitionTime: now,
-		})
+		}, transitioned)
 		return nil
 	})
 }
@@ -131,15 +115,16 @@ func (a *ProjectStoreAdapter) ListProjectsByNodeRef(ctx context.Context, nodeRef
 func (a *ProjectStoreAdapter) SetProjectPending(ctx context.Context, name string) error {
 	now := time.Now().UTC()
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		transitioned := status.Phase != v1.ProjectPhasePending
 		status.Phase = v1.ProjectPhasePending
 		status.NodeRef = ""
-		upsertCondition(status, v1.Condition{
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypePhase,
 			Status:             v1.ConditionTrue,
 			Reason:             "NodeNotReady",
 			Message:            "Node went NotReady; project reset to Pending for rescheduling",
 			LastTransitionTime: now,
-		})
+		}, transitioned)
 		return nil
 	})
 }
@@ -149,13 +134,13 @@ func (a *ProjectStoreAdapter) SetProjectPending(ctx context.Context, name string
 // the rescheduler first observed this project as stranded on a NotReady node.
 func (a *ProjectStoreAdapter) SetTerminatingAt(ctx context.Context, name string, at time.Time) error {
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
-		upsertCondition(status, v1.Condition{
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypeTerminatingAt,
 			Status:             v1.ConditionTrue,
 			Reason:             "NodeNotReady",
 			Message:            "Node went NotReady while project was Terminating; force-termination timeout clock started",
 			LastTransitionTime: at,
-		})
+		}, false)
 		return nil
 	})
 }
@@ -166,13 +151,13 @@ func (a *ProjectStoreAdapter) SetTerminatingAt(ctx context.Context, name string,
 // node.  The grace period clock starts from this timestamp.
 func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at time.Time) error {
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
-		upsertCondition(status, v1.Condition{
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypeNotReadyAt,
 			Status:             v1.ConditionTrue,
 			Reason:             "NodeNotReady",
 			Message:            "Node went NotReady while project was Running; running grace period clock started",
 			LastTransitionTime: at,
-		})
+		}, false)
 		return nil
 	})
 }
@@ -183,14 +168,15 @@ func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at
 func (a *ProjectStoreAdapter) ForceTerminated(ctx context.Context, name string) error {
 	now := time.Now().UTC()
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		transitioned := status.Phase != v1.ProjectPhaseTerminated
 		status.Phase = v1.ProjectPhaseTerminated
-		upsertCondition(status, v1.Condition{
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypePhase,
 			Status:             v1.ConditionTrue,
 			Reason:             "TerminationTimeout",
 			Message:            "Node was NotReady for too long; project force-terminated. Docker resources on the node may need manual cleanup.",
 			LastTransitionTime: now,
-		})
+		}, transitioned)
 		return nil
 	})
 }

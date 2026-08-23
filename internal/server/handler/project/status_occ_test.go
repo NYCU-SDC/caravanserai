@@ -2,17 +2,20 @@ package project
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/server/handler"
 	"NYCU-SDC/caravanserai/internal/store"
 
 	"github.com/NYCU-SDC/summer/pkg/problem"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -215,4 +218,27 @@ func TestDeleteProjectMarksTerminatingPreservingOtherFields(t *testing.T) {
 	if len(s.applied.Conditions) != 1 {
 		t.Errorf("conditions = %v, want them preserved untouched", s.applied.Conditions)
 	}
+}
+
+// The store's no-op guard compares the bytes it would persist. If an unchanged
+// re-report does not produce byte-identical status, the guard can never fire —
+// and the agent re-reports the same phase, reason and message on every poll
+// tick for every project on every node.
+func TestPatchStatusRepeatedIdenticalReportIsAByteLevelNoOp(t *testing.T) {
+	s := &fakeProjectStore{status: v1.ProjectStatus{Phase: v1.ProjectPhaseScheduled}}
+	h := newTestHandler(s)
+
+	const body = `{"phase":"Running","reason":"ContainersRunning","message":"All containers running"}`
+
+	require.Equal(t, http.StatusNoContent, patchStatusRequest(t, h, "demo", body).Code)
+	first, err := json.Marshal(s.applied)
+	require.NoError(t, err)
+
+	time.Sleep(2 * time.Millisecond) // guarantee a different wall clock reading
+	require.Equal(t, http.StatusNoContent, patchStatusRequest(t, h, "demo", body).Code)
+	second, err := json.Marshal(s.applied)
+	require.NoError(t, err)
+
+	require.Equal(t, string(first), string(second),
+		"an unchanged re-report changed the persisted bytes; the no-op guard cannot fire")
 }
