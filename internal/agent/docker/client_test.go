@@ -186,3 +186,55 @@ func TestEnsureManagedDir(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+func TestContainerOwnershipFiltersRequireCompleteIdentity(t *testing.T) {
+	project := ProjectIdentity{Namespace: "team-a", Name: "payments"}
+	labels := containerOwnershipFilters(project).Get("label")
+
+	assert.ElementsMatch(t, []string{
+		"cara.project=payments",
+		"cara.namespace=team-a",
+		"cara.service",
+	}, labels)
+}
+
+func TestResourceOwnershipFiltersRequireNamespaceAndProject(t *testing.T) {
+	project := ProjectIdentity{Namespace: "team-a", Name: "payments"}
+	labels := resourceOwnershipFilters(project).Get("label")
+
+	assert.ElementsMatch(t, []string{
+		"cara.project=payments",
+		"cara.namespace=team-a",
+	}, labels)
+}
+
+func TestValidateNetworkOwnership(t *testing.T) {
+	project := ProjectIdentity{Namespace: "team-a", Name: "payments"}
+
+	tests := []struct {
+		name    string
+		labels  map[string]string
+		wantErr bool
+	}{
+		{name: "complete Cara labels", labels: map[string]string{
+			labelProject: "payments", labelNamespace: "team-a",
+		}},
+		{name: "legacy Cara network without namespace", labels: map[string]string{
+			labelProject: "payments",
+		}},
+		{name: "foreign network with no labels", labels: nil, wantErr: true},
+		{name: "different project", labels: map[string]string{
+			labelProject: "inventory", labelNamespace: "team-a",
+		}, wantErr: true},
+		{name: "different namespace", labels: map[string]string{
+			labelProject: "payments", labelNamespace: "team-b",
+		}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateNetworkOwnership("cara-payments", tt.labels, project)
+			assert.Equal(t, tt.wantErr, err != nil)
+		})
+	}
+}

@@ -5,13 +5,15 @@ import (
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
 
 	"go.uber.org/zap"
 )
 
 // orphanGracePeriod is how long a project must stay absent from the server's
-// reconcile response before its local containers are removed.
+// complete ownership snapshot before its local resources are deleted. Its
+// containers are stopped immediately when ownership loss is first confirmed.
 //
 // It mirrors runningGracePeriod in internal/server/controller/project_rescheduler.go,
 // which gives a stranded Running project the same 3 minutes before acting. The
@@ -34,133 +36,244 @@ type realClock struct{}
 func (realClock) Now() time.Time                  { return time.Now() }
 func (realClock) Since(t time.Time) time.Duration { return time.Since(t) }
 
-// orphanTracker records when each project was first seen without a matching
-// entry in the server's reconcile response.
+type orphanState struct {
+	stopped   bool
+	lostSince time.Time
+}
+
+type orphanObservation struct {
+	toStop     []docker.ProjectIdentity
+	toRemove   []docker.ProjectIdentity
+	reappeared []docker.ProjectIdentity
+}
+
+// orphanTracker records projects whose ownership moved away from this node.
 //
 // State is in-process only. An agent restart forgets every candidate, which is
-// the conservative direction: a restarted agent re-observes the absence for a
-// full grace period before removing anything, matching how the agent rebuilds
-// all its other state from the server after a restart (bootstrapRunningProjects).
+// conservative for deletion: the restarted agent must observe ownership loss,
+// stop the containers, then confirm that loss for a fresh grace period.
 //
 // A tracker is not safe for concurrent use; it is owned by the single poll loop
 // goroutine.
 type orphanTracker struct {
-	clock clock
-	// firstSeen maps project name → the time it was first observed missing.
-	firstSeen map[string]time.Time
+	clock  clock
+	states map[docker.ProjectIdentity]orphanState
 }
 
 func newOrphanTracker(c clock) *orphanTracker {
 	if c == nil {
 		c = realClock{}
 	}
-	return &orphanTracker{clock: c, firstSeen: make(map[string]time.Time)}
+	return &orphanTracker{clock: c, states: make(map[docker.ProjectIdentity]orphanState)}
 }
 
-// observe folds one round of observations into the tracker and returns the
-// projects whose grace period has fully elapsed.
-//
-// localNames is every project with containers on this host; assigned is the set
-// of project names the server still assigns here. A project that reappears in
-// assigned has its clock discarded, so an intermittent absence never
-// accumulates toward removal across separate episodes.
-func (t *orphanTracker) observe(localNames []string, assigned map[string]struct{}) []string {
+// observe folds one successful Docker snapshot and one successful server
+// ownership snapshot into the two-stage state machine.
+func (t *orphanTracker) observe(
+	local []docker.ProjectIdentity,
+	assigned map[docker.ProjectIdentity]*v1.Project,
+) orphanObservation {
 	now := t.clock.Now()
+	localSet := make(map[docker.ProjectIdentity]struct{}, len(local))
+	for _, project := range local {
+		localSet[project] = struct{}{}
+	}
 
-	missing := make(map[string]struct{}, len(localNames))
-	var expired []string
-
-	for _, name := range localNames {
-		if _, stillOurs := assigned[name]; stillOurs {
+	var observation orphanObservation
+	for project := range localSet {
+		if _, stillOurs := assigned[project]; stillOurs {
+			if state, tracked := t.states[project]; tracked && state.stopped {
+				observation.reappeared = append(observation.reappeared, project)
+			} else {
+				delete(t.states, project)
+			}
 			continue
 		}
-		missing[name] = struct{}{}
 
-		first, tracked := t.firstSeen[name]
+		state, tracked := t.states[project]
 		if !tracked {
-			// First observation only starts the clock; removal needs a later
-			// round to confirm the absence persisted.
-			t.firstSeen[name] = now
+			t.states[project] = orphanState{}
+			observation.toStop = append(observation.toStop, project)
 			continue
 		}
-		if t.clock.Since(first) >= orphanGracePeriod {
-			expired = append(expired, name)
+		if !state.stopped {
+			observation.toStop = append(observation.toStop, project)
+			continue
+		}
+		if state.lostSince.IsZero() {
+			state.lostSince = now
+			t.states[project] = state
+			continue
+		}
+		if t.clock.Since(state.lostSince) >= orphanGracePeriod {
+			observation.toRemove = append(observation.toRemove, project)
 		}
 	}
 
-	// Drop candidates that are no longer missing: either the server assigns
-	// them here again, or their containers are gone. Both mean the recorded
-	// timestamp describes a situation that no longer exists.
-	for name := range t.firstSeen {
-		if _, still := missing[name]; !still {
-			delete(t.firstSeen, name)
+	for project, state := range t.states {
+		if _, localExists := localSet[project]; localExists {
+			continue
+		}
+		if _, stillOurs := assigned[project]; stillOurs {
+			if state.stopped {
+				observation.reappeared = append(observation.reappeared, project)
+			} else {
+				delete(t.states, project)
+			}
+			continue
+		}
+		// Keep stopped projects until every labelled resource is removed. This
+		// lets a later tick retry a network or volume failure even after all
+		// containers were removed successfully.
+		if !state.stopped {
+			delete(t.states, project)
+			continue
+		}
+		if state.lostSince.IsZero() {
+			state.lostSince = now
+			t.states[project] = state
+			continue
+		}
+		if t.clock.Since(state.lostSince) >= orphanGracePeriod {
+			observation.toRemove = append(observation.toRemove, project)
 		}
 	}
 
-	return expired
+	return observation
 }
 
-// forget clears a project's candidacy, used once it has been removed so a
-// future project of the same name starts its own clock.
-func (t *orphanTracker) forget(name string) {
-	delete(t.firstSeen, name)
+func (t *orphanTracker) markStopped(project docker.ProjectIdentity) {
+	t.states[project] = orphanState{stopped: true, lostSince: t.clock.Now()}
 }
 
-// pending reports how many projects are currently counting toward removal.
-// Exposed for tests and diagnostics.
-func (t *orphanTracker) pending() int { return len(t.firstSeen) }
+func (t *orphanTracker) resetGrace() {
+	for project, state := range t.states {
+		state.lostSince = time.Time{}
+		t.states[project] = state
+	}
+}
 
-// sweepOrphans removes containers belonging to projects the server no longer
-// assigns to this node.
+func (t *orphanTracker) forget(project docker.ProjectIdentity) { delete(t.states, project) }
+
+func (t *orphanTracker) pending() int { return len(t.states) }
+
+// sweepOrphans stops and eventually removes resources belonging to projects
+// the server no longer assigns to this node.
 //
-// It must only be called with a projects slice that came from a *successful*
-// ListProjectsForReconcile. An error from that call means the agent does not
-// know what it owns, and an unknown assignment must never be read as "every
-// local project is an orphan" — hence the caller returns early rather than
-// passing an empty slice here.
-//
-// projects is the same slice that drives reconciliation, not a second query:
-// re-querying would open a window in which the project could be reassigned
-// between the two reads, making the sweep act on a view the reconcile never saw.
+// projects must come from one successful ListProjectsAssignedToNode call and
+// must not be phase-filtered. Unknown ownership never reaches this function;
+// the caller resets deletion grace instead. Reusing the same snapshot for the
+// whole tick avoids acting on two inconsistent views of assignment.
 func sweepOrphans(
 	ctx context.Context,
 	runtime docker.Runtime,
 	routes RouteUpdater,
 	tracker *orphanTracker,
+	busy busyChecker,
 	projects []*v1.Project,
 	logger *zap.Logger,
 ) {
-	localNames, err := runtime.ListLocalProjects(ctx)
+	localProjects, err := runtime.ListLocalProjects(ctx)
 	if err != nil {
+		tracker.resetGrace()
 		logger.Warn("Orphan sweep: failed to list local projects", zap.Error(err))
 		return
 	}
-	if len(localNames) == 0 {
-		return
-	}
 
-	assigned := make(map[string]struct{}, len(projects))
+	assigned := make(map[docker.ProjectIdentity]*v1.Project, len(projects))
 	for _, p := range projects {
-		assigned[p.Name] = struct{}{}
+		assigned[projectIdentity(p)] = p
 	}
 
-	for _, name := range tracker.observe(localNames, assigned) {
-		log := logger.With(zap.String("project", name))
-		log.Info("Removing orphaned project: absent from server assignment beyond grace period",
-			zap.Duration("gracePeriod", orphanGracePeriod))
+	observation := tracker.observe(localProjects, assigned)
 
-		if err := runtime.RemoveOrphanProject(ctx, name); err != nil {
-			// Keep the candidate so the next tick retries; the grace period has
-			// already elapsed, so the retry acts immediately.
+	for _, project := range observation.reappeared {
+		serverProject := assigned[project]
+		log := orphanLogger(logger, project)
+		if serverProject == nil {
+			continue
+		}
+		switch serverProject.Status.Phase {
+		case v1.ProjectPhaseScheduled, v1.ProjectPhaseRunning:
+			release, ok := claimOrphanCleanup(busy, project)
+			if !ok {
+				continue
+			}
+			if err := runtime.ReconcileProject(ctx, serverProject); err != nil {
+				release()
+				log.Error("Failed to recover project whose ownership returned", zap.Error(err))
+				continue
+			}
+			updateProxyRoutes(ctx, runtime, routes, serverProject, log)
+			release()
+			log.Info("Recovered project after ownership returned to this node")
+		default:
+			// Failed, Pending, Terminating, and Terminated projects must not be
+			// started implicitly. Their ownership is still known, so cancel only
+			// the orphan cleanup state and let normal phase handling decide.
+			log.Info("Cancelled orphan cleanup after ownership returned",
+				zap.String("phase", string(serverProject.Status.Phase)))
+		}
+		tracker.forget(project)
+	}
+
+	for _, project := range observation.toStop {
+		log := orphanLogger(logger, project)
+		release, ok := claimOrphanCleanup(busy, project)
+		if !ok {
+			continue
+		}
+		if err := runtime.StopOrphanProject(ctx, project); err != nil {
+			release()
+			log.Error("Failed to stop project after ownership moved away", zap.Error(err))
+			continue
+		}
+		if routes != nil {
+			routes.Remove(project.Name)
+		}
+		tracker.markStopped(project)
+		release()
+		log.Info("Stopped project after ownership moved away; deletion grace period started",
+			zap.Duration("gracePeriod", orphanGracePeriod))
+	}
+
+	for _, project := range observation.toRemove {
+		log := orphanLogger(logger, project)
+		release, ok := claimOrphanCleanup(busy, project)
+		if !ok {
+			continue
+		}
+		if err := runtime.RemoveOrphanProject(ctx, project); err != nil {
+			release()
 			log.Error("Failed to remove orphaned project", zap.Error(err))
 			continue
 		}
-
-		if routes != nil {
-			routes.Remove(name)
-			log.Info("Removed proxy routes for orphaned project")
-		}
-
-		tracker.forget(name)
+		release()
+		tracker.forget(project)
+		log.Info("Removed orphaned project after continuously confirmed ownership loss",
+			zap.Duration("gracePeriod", orphanGracePeriod))
 	}
+}
+
+func projectIdentity(project *v1.Project) docker.ProjectIdentity {
+	namespace := project.Namespace
+	if namespace == "" {
+		namespace = v1.DefaultNamespace
+	}
+	return docker.ProjectIdentity{Namespace: namespace, Name: project.Name}
+}
+
+func claimOrphanCleanup(busy busyChecker, project docker.ProjectIdentity) (func(), bool) {
+	if busy == nil {
+		return func() {}, true
+	}
+	key := backup.ResourceKey{Namespace: project.Namespace, Name: project.Name}
+	return busy.TryClaim(key, backup.OpOrphanCleanup)
+}
+
+func orphanLogger(logger *zap.Logger, project docker.ProjectIdentity) *zap.Logger {
+	return logger.With(
+		zap.String("namespace", project.Namespace),
+		zap.String("project", project.Name),
+	)
 }

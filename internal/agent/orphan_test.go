@@ -10,14 +10,14 @@ import (
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/agent/backup"
+	"NYCU-SDC/caravanserai/internal/agent/docker"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
-// fakeClock is a manually advanced clock, mirroring the server controllers'
-// test clock so grace periods can be crossed without sleeping.
 type fakeClock struct {
 	now time.Time
 }
@@ -26,13 +26,17 @@ func (fc *fakeClock) Now() time.Time                  { return fc.now }
 func (fc *fakeClock) Since(t time.Time) time.Duration { return fc.now.Sub(t) }
 func (fc *fakeClock) advance(d time.Duration)         { fc.now = fc.now.Add(d) }
 
-// recordingRoutes records Remove calls so route cleanup can be asserted.
 type recordingRoutes struct {
 	mu      sync.Mutex
 	removed []string
+	updated []string
 }
 
-func (r *recordingRoutes) Update(*v1.Project, map[string]string) {}
+func (r *recordingRoutes) Update(project *v1.Project, _ map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.updated = append(r.updated, project.Name)
+}
 
 func (r *recordingRoutes) Remove(projectName string) {
 	r.mu.Lock()
@@ -46,176 +50,264 @@ func (r *recordingRoutes) removedNames() []string {
 	return append([]string(nil), r.removed...)
 }
 
-func projectsNamed(names ...string) []*v1.Project {
-	out := make([]*v1.Project, 0, len(names))
-	for _, n := range names {
-		out = append(out, &v1.Project{
-			ObjectMeta: v1.ObjectMeta{Name: n, Namespace: "default"},
-		})
-	}
-	return out
+func (r *recordingRoutes) updatedNames() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.updated...)
 }
 
-// newFailingListServer serves a 500 for the reconcile listing, standing in for
-// an unreachable or erroring control plane.
-func newFailingListServer(t *testing.T) (*httptest.Server, *Client) {
-	t.Helper()
+type sweepRecord struct {
+	local      []docker.ProjectIdentity
+	listErr    error
+	stopErr    error
+	removeErr  error
+	stopped    []docker.ProjectIdentity
+	removed    []docker.ProjectIdentity
+	reconciled []docker.ProjectIdentity
+}
 
+func newSweepFixture(local ...docker.ProjectIdentity) (*mockRuntime, *sweepRecord) {
+	record := &sweepRecord{local: append([]docker.ProjectIdentity(nil), local...)}
+	runtime := &mockRuntime{
+		listLocalFn: func(context.Context) ([]docker.ProjectIdentity, error) {
+			return append([]docker.ProjectIdentity(nil), record.local...), record.listErr
+		},
+		stopOrphanFn: func(_ context.Context, project docker.ProjectIdentity) error {
+			record.stopped = append(record.stopped, project)
+			return record.stopErr
+		},
+		removeOrphanFn: func(_ context.Context, project docker.ProjectIdentity) error {
+			record.removed = append(record.removed, project)
+			return record.removeErr
+		},
+		reconcileFn: func(_ context.Context, project *v1.Project) error {
+			record.reconciled = append(record.reconciled, projectIdentity(project))
+			return nil
+		},
+		getContainerIPs: func(context.Context, *v1.Project) (map[string]string, error) {
+			return map[string]string{"web": "172.18.0.2"}, nil
+		},
+	}
+	return runtime, record
+}
+
+func identity(namespace, name string) docker.ProjectIdentity {
+	return docker.ProjectIdentity{Namespace: namespace, Name: name}
+}
+
+func assignedProject(namespace, name string, phase v1.ProjectPhase) *v1.Project {
+	return &v1.Project{
+		ObjectMeta: v1.ObjectMeta{Namespace: namespace, Name: name},
+		Status:     v1.ProjectStatus{Phase: phase},
+		Spec: v1.ProjectSpec{
+			Services: []v1.ServiceDef{{Name: "web", Image: "nginx"}},
+			Ingress: []v1.IngressDef{{
+				Name:   "web",
+				Target: v1.IngressTarget{Service: "web", Port: 80},
+			}},
+		},
+	}
+}
+
+func sweep(
+	runtime docker.Runtime,
+	routes RouteUpdater,
+	tracker *orphanTracker,
+	busy busyChecker,
+	projects ...*v1.Project,
+) {
+	sweepOrphans(context.Background(), runtime, routes, tracker, busy, projects, zap.NewNop())
+}
+
+func TestSweepOrphans_StopsImmediatelyThenRemovesAfterGrace(t *testing.T) {
+	gone := identity("default", "gone")
+	kept := identity("default", "kept")
+	runtime, record := newSweepFixture(gone, kept)
+	routes := &recordingRoutes{}
+	clock := &fakeClock{now: time.Now()}
+	tracker := newOrphanTracker(clock)
+
+	sweep(runtime, routes, tracker, nil, assignedProject("default", "kept", v1.ProjectPhaseRunning))
+	require.Equal(t, []docker.ProjectIdentity{gone}, record.stopped)
+	assert.Empty(t, record.removed)
+	assert.Equal(t, []string{"gone"}, routes.removedNames())
+
+	clock.advance(orphanGracePeriod - time.Second)
+	sweep(runtime, routes, tracker, nil, assignedProject("default", "kept", v1.ProjectPhaseRunning))
+	assert.Empty(t, record.removed, "resources must survive until the full grace period")
+
+	clock.advance(time.Second)
+	sweep(runtime, routes, tracker, nil, assignedProject("default", "kept", v1.ProjectPhaseRunning))
+	assert.Equal(t, []docker.ProjectIdentity{gone}, record.removed)
+	assert.Equal(t, 0, tracker.pending())
+}
+
+func TestSweepOrphans_FailedProjectStillAssignedIsUntouched(t *testing.T) {
+	failed := identity("default", "failed")
+	runtime, record := newSweepFixture(failed)
+	clock := &fakeClock{now: time.Now()}
+	tracker := newOrphanTracker(clock)
+	assigned := assignedProject("default", "failed", v1.ProjectPhaseFailed)
+
+	sweep(runtime, nil, tracker, nil, assigned)
+	clock.advance(2 * orphanGracePeriod)
+	sweep(runtime, nil, tracker, nil, assigned)
+
+	assert.Empty(t, record.stopped)
+	assert.Empty(t, record.removed)
+	assert.Equal(t, 0, tracker.pending())
+}
+
+func TestSweepOrphans_NamespaceIsPartOfOwnership(t *testing.T) {
+	local := identity("team-a", "same-name")
+	runtime, record := newSweepFixture(local)
+	tracker := newOrphanTracker(&fakeClock{now: time.Now()})
+
+	sweep(runtime, nil, tracker, nil,
+		assignedProject("team-b", "same-name", v1.ProjectPhaseRunning))
+
+	assert.Equal(t, []docker.ProjectIdentity{local}, record.stopped)
+}
+
+func TestSweepOrphans_RunningOwnershipReturnRecoversWorkloadAndRoutes(t *testing.T) {
+	project := identity("default", "returning")
+	runtime, record := newSweepFixture(project)
+	routes := &recordingRoutes{}
+	clock := &fakeClock{now: time.Now()}
+	tracker := newOrphanTracker(clock)
+
+	sweep(runtime, routes, tracker, nil)
+	require.Equal(t, []docker.ProjectIdentity{project}, record.stopped)
+
+	clock.advance(time.Minute)
+	sweep(runtime, routes, tracker, nil,
+		assignedProject("default", "returning", v1.ProjectPhaseRunning))
+
+	assert.Equal(t, []docker.ProjectIdentity{project}, record.reconciled)
+	assert.Equal(t, []string{"returning"}, routes.updatedNames())
+	assert.Empty(t, record.removed)
+	assert.Equal(t, 0, tracker.pending())
+}
+
+func TestSweepOrphans_FailedOwnershipReturnDoesNotStartWorkload(t *testing.T) {
+	project := identity("default", "failed-return")
+	runtime, record := newSweepFixture(project)
+	tracker := newOrphanTracker(&fakeClock{now: time.Now()})
+
+	sweep(runtime, nil, tracker, nil)
+	sweep(runtime, nil, tracker, nil,
+		assignedProject("default", "failed-return", v1.ProjectPhaseFailed))
+
+	assert.Empty(t, record.reconciled)
+	assert.Empty(t, record.removed)
+	assert.Equal(t, 0, tracker.pending())
+}
+
+func TestSweepOrphans_DockerListErrorResetsDeletionGrace(t *testing.T) {
+	project := identity("default", "docker-blip")
+	runtime, record := newSweepFixture(project)
+	clock := &fakeClock{now: time.Now()}
+	tracker := newOrphanTracker(clock)
+
+	sweep(runtime, nil, tracker, nil)
+	clock.advance(2 * time.Minute)
+	record.listErr = errors.New("docker unavailable")
+	sweep(runtime, nil, tracker, nil)
+	record.listErr = nil
+
+	// The first known-absent observation after an error starts a fresh clock.
+	sweep(runtime, nil, tracker, nil)
+	clock.advance(orphanGracePeriod - time.Second)
+	sweep(runtime, nil, tracker, nil)
+	assert.Empty(t, record.removed)
+
+	clock.advance(time.Second)
+	sweep(runtime, nil, tracker, nil)
+	assert.Equal(t, []docker.ProjectIdentity{project}, record.removed)
+}
+
+func TestSweepOrphans_StopFailureRetriesWithoutRemovingRoute(t *testing.T) {
+	project := identity("default", "stop-fails")
+	runtime, record := newSweepFixture(project)
+	record.stopErr = errors.New("docker refused")
+	routes := &recordingRoutes{}
+	clock := &fakeClock{now: time.Now()}
+	tracker := newOrphanTracker(clock)
+
+	sweep(runtime, routes, tracker, nil)
+	clock.advance(2 * orphanGracePeriod)
+	sweep(runtime, routes, tracker, nil)
+
+	assert.Len(t, record.stopped, 2)
+	assert.Empty(t, record.removed)
+	assert.Empty(t, routes.removedNames())
+	assert.Equal(t, 1, tracker.pending())
+}
+
+func TestSweepOrphans_RemoveFailureRetriesAfterContainersDisappear(t *testing.T) {
+	project := identity("default", "remove-fails")
+	runtime, record := newSweepFixture(project)
+	clock := &fakeClock{now: time.Now()}
+	tracker := newOrphanTracker(clock)
+
+	sweep(runtime, nil, tracker, nil)
+	clock.advance(orphanGracePeriod)
+	record.removeErr = errors.New("network busy")
+	sweep(runtime, nil, tracker, nil)
+	require.Len(t, record.removed, 1)
+
+	// Container deletion may have succeeded before network deletion failed.
+	// The tracker must retain the identity and retry the remaining resources.
+	record.local = nil
+	record.removeErr = nil
+	sweep(runtime, nil, tracker, nil)
+	assert.Len(t, record.removed, 2)
+	assert.Equal(t, 0, tracker.pending())
+}
+
+func TestSweepOrphans_BusyProjectIsNotStopped(t *testing.T) {
+	project := identity("default", "backing-up")
+	runtime, record := newSweepFixture(project)
+	tracker := newOrphanTracker(&fakeClock{now: time.Now()})
+	coordinator := backup.NewCoordinator()
+	release, ok := coordinator.TryClaim(
+		backup.ResourceKey{Namespace: project.Namespace, Name: project.Name},
+		backup.OpBackup,
+	)
+	require.True(t, ok)
+
+	sweep(runtime, nil, tracker, coordinator)
+	assert.Empty(t, record.stopped)
+	release()
+
+	sweep(runtime, nil, tracker, coordinator)
+	assert.Equal(t, []docker.ProjectIdentity{project}, record.stopped)
+}
+
+func TestReconcileProjects_ServerErrorResetsDeletionGrace(t *testing.T) {
+	project := identity("default", "server-blip")
+	runtime, record := newSweepFixture(project)
+	clock := &fakeClock{now: time.Now()}
+	tracker := newOrphanTracker(clock)
+	sweep(runtime, nil, tracker, nil)
+
+	clock.advance(2 * time.Minute)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/projects", func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	})
-
 	server := httptest.NewServer(mux)
-	return server, NewClient(zap.NewNop(), server.URL, "test-node")
-}
+	defer server.Close()
+	client := NewClient(zap.NewNop(), server.URL, "test-node")
+	reconcileProjects(context.Background(), client, runtime, nil, nil, tracker, zap.NewNop())
 
-// newSweepFixture wires a mockRuntime whose local containers are localNames and
-// records which projects the sweep removed.
-func newSweepFixture(localNames []string) (*mockRuntime, *[]string) {
-	var removed []string
-	rt := &mockRuntime{
-		listLocalFn: func(context.Context) ([]string, error) {
-			return append([]string(nil), localNames...), nil
-		},
-		removeOrphanFn: func(_ context.Context, name string) error {
-			removed = append(removed, name)
-			return nil
-		},
-	}
-	return rt, &removed
-}
+	// A fresh successful snapshot starts a new full grace period.
+	sweep(runtime, nil, tracker, nil)
+	clock.advance(orphanGracePeriod - time.Second)
+	sweep(runtime, nil, tracker, nil)
+	assert.Empty(t, record.removed)
 
-func TestSweepOrphans_RemovesAfterGracePeriod(t *testing.T) {
-	rt, removed := newSweepFixture([]string{"gone", "kept"})
-	routes := &recordingRoutes{}
-	fc := &fakeClock{now: time.Now()}
-	tracker := newOrphanTracker(fc)
-
-	assigned := projectsNamed("kept")
-
-	// First observation starts the clock but must not remove anything.
-	sweepOrphans(context.Background(), rt, routes, tracker, assigned, zap.NewNop())
-	assert.Empty(t, *removed, "first observation must not remove")
-	assert.Equal(t, 1, tracker.pending())
-
-	// Still inside the grace period.
-	fc.advance(orphanGracePeriod - time.Second)
-	sweepOrphans(context.Background(), rt, routes, tracker, assigned, zap.NewNop())
-	assert.Empty(t, *removed, "must not remove before the grace period elapses")
-
-	// Grace period reached.
-	fc.advance(2 * time.Second)
-	sweepOrphans(context.Background(), rt, routes, tracker, assigned, zap.NewNop())
-
-	require.Equal(t, []string{"gone"}, *removed)
-	assert.Equal(t, []string{"gone"}, routes.removedNames())
-	assert.Equal(t, 0, tracker.pending(), "removed project must stop being tracked")
-}
-
-func TestSweepOrphans_ReappearedProjectIsSpared(t *testing.T) {
-	rt, removed := newSweepFixture([]string{"flapping"})
-	routes := &recordingRoutes{}
-	fc := &fakeClock{now: time.Now()}
-	tracker := newOrphanTracker(fc)
-
-	// Absent: starts the clock.
-	sweepOrphans(context.Background(), rt, routes, tracker, nil, zap.NewNop())
-	require.Equal(t, 1, tracker.pending())
-
-	// Reappears before the grace period elapses — the candidacy is dropped.
-	fc.advance(orphanGracePeriod - time.Second)
-	sweepOrphans(context.Background(), rt, routes, tracker, projectsNamed("flapping"), zap.NewNop())
-	assert.Equal(t, 0, tracker.pending(), "reappearing project must clear its clock")
-
-	// Absent again, past what would have been the original deadline. Because
-	// the clock restarted, this must still not remove.
-	fc.advance(2 * time.Second)
-	sweepOrphans(context.Background(), rt, routes, tracker, nil, zap.NewNop())
-	assert.Empty(t, *removed, "an intermittent absence must not accumulate toward removal")
-	assert.Equal(t, 1, tracker.pending())
-}
-
-func TestSweepOrphans_NoOrphansIsNoOp(t *testing.T) {
-	rt, removed := newSweepFixture([]string{"a", "b"})
-	routes := &recordingRoutes{}
-	fc := &fakeClock{now: time.Now()}
-	tracker := newOrphanTracker(fc)
-
-	assigned := projectsNamed("a", "b")
-
-	sweepOrphans(context.Background(), rt, routes, tracker, assigned, zap.NewNop())
-	fc.advance(2 * orphanGracePeriod)
-	sweepOrphans(context.Background(), rt, routes, tracker, assigned, zap.NewNop())
-
-	assert.Empty(t, *removed)
-	assert.Empty(t, routes.removedNames())
-	assert.Equal(t, 0, tracker.pending())
-}
-
-func TestSweepOrphans_ListErrorIsNoOp(t *testing.T) {
-	var removed []string
-	rt := &mockRuntime{
-		listLocalFn: func(context.Context) ([]string, error) {
-			return nil, errors.New("docker unavailable")
-		},
-		removeOrphanFn: func(_ context.Context, name string) error {
-			removed = append(removed, name)
-			return nil
-		},
-	}
-	routes := &recordingRoutes{}
-	fc := &fakeClock{now: time.Now()}
-	tracker := newOrphanTracker(fc)
-
-	sweepOrphans(context.Background(), rt, routes, tracker, nil, zap.NewNop())
-	fc.advance(2 * orphanGracePeriod)
-	sweepOrphans(context.Background(), rt, routes, tracker, nil, zap.NewNop())
-
-	assert.Empty(t, removed, "a failed local listing must never remove anything")
-	assert.Equal(t, 0, tracker.pending(), "a failed listing must not start any clock")
-}
-
-// A failed ListProjectsForReconcile must leave the sweep untouched: no removal,
-// and no clock advanced. This exercises the reconcileProjects error path rather
-// than sweepOrphans directly.
-func TestReconcileProjects_ListErrorSkipsSweep(t *testing.T) {
-	srv, client := newFailingListServer(t)
-	defer srv.Close()
-
-	rt, removed := newSweepFixture([]string{"orphan"})
-	fc := &fakeClock{now: time.Now()}
-	tracker := newOrphanTracker(fc)
-
-	reconcileProjects(context.Background(), client, rt, nil, nil, tracker, zap.NewNop())
-	fc.advance(2 * orphanGracePeriod)
-	reconcileProjects(context.Background(), client, rt, nil, nil, tracker, zap.NewNop())
-
-	assert.Empty(t, *removed, "an unreachable server must not be read as everything being orphaned")
-	assert.Equal(t, 0, tracker.pending())
-}
-
-func TestSweepOrphans_RemoveFailureKeepsCandidate(t *testing.T) {
-	var attempts int
-	rt := &mockRuntime{
-		listLocalFn: func(context.Context) ([]string, error) {
-			return []string{"stubborn"}, nil
-		},
-		removeOrphanFn: func(context.Context, string) error {
-			attempts++
-			return errors.New("docker refused")
-		},
-	}
-	routes := &recordingRoutes{}
-	fc := &fakeClock{now: time.Now()}
-	tracker := newOrphanTracker(fc)
-
-	sweepOrphans(context.Background(), rt, routes, tracker, nil, zap.NewNop())
-	fc.advance(orphanGracePeriod)
-	sweepOrphans(context.Background(), rt, routes, tracker, nil, zap.NewNop())
-	sweepOrphans(context.Background(), rt, routes, tracker, nil, zap.NewNop())
-
-	assert.Equal(t, 2, attempts, "a failed removal must be retried on the next tick")
-	assert.Empty(t, routes.removedNames(), "routes must survive a failed container removal")
-	assert.Equal(t, 1, tracker.pending())
+	clock.advance(time.Second)
+	sweep(runtime, nil, tracker, nil)
+	assert.Equal(t, []docker.ProjectIdentity{project}, record.removed)
 }

@@ -227,7 +227,7 @@ func reRegister(ctx context.Context, client *Client, spec v1.NodeSpec, logger *z
 // awareness after a restart.  For healthy Running projects with ingress rules,
 // proxy routes are re-established.
 func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, logger *zap.Logger) {
-	projects, err := client.ListProjectsForReconcile(ctx)
+	projects, err := client.ListProjectsAssignedToNode(ctx)
 	if err != nil {
 		logger.Warn("Bootstrap: failed to list projects", zap.Error(err))
 		return
@@ -259,25 +259,31 @@ func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docke
 // orphans carries the sweep's cross-tick state. It may be nil, which disables
 // the sweep.
 func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, orphans *orphanTracker, logger *zap.Logger) {
-	projects, err := client.ListProjectsForReconcile(ctx)
+	assignedProjects, err := client.ListProjectsAssignedToNode(ctx)
 	if err != nil {
-		// No sweep this tick, and no clock advanced: the agent cannot tell an
-		// unreachable server from a project that genuinely moved away.
+		// Unknown ownership never counts toward destructive cleanup. Preserve
+		// already-stopped state, but require a fresh full grace period after the
+		// server becomes reachable again.
+		if orphans != nil {
+			orphans.resetGrace()
+		}
 		logger.Warn("Failed to list projects for reconcile", zap.Error(err))
 		return
-	}
-
-	// Sweep before the early return below: a node that lost every project still
-	// has orphans to clean up, and that is exactly the case an empty list
-	// describes.
-	if orphans != nil {
-		sweepOrphans(ctx, runtime, routes, orphans, projects, logger)
 	}
 
 	var busy busyChecker
 	if backups != nil && backups.Coordinator != nil {
 		busy = backups.Coordinator
 	}
+
+	// The orphan sweep must see the complete node ownership snapshot, including
+	// Failed projects. Filtering phases before this point would misclassify a
+	// Failed-but-still-owned project as an orphan.
+	if orphans != nil {
+		sweepOrphans(ctx, runtime, routes, orphans, busy, assignedProjects, logger)
+	}
+
+	projects := projectsForReconcile(assignedProjects)
 
 	// Sync before the early return: an empty list means every Project left
 	// this node, and their backup goroutines must be cancelled.
@@ -316,6 +322,17 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 			reconcileOne(ctx, client, runtime, routes, backups, p, logger)
 		}
 	}
+}
+
+func projectsForReconcile(projects []*v1.Project) []*v1.Project {
+	filtered := make([]*v1.Project, 0, len(projects))
+	for _, project := range projects {
+		switch project.Status.Phase {
+		case v1.ProjectPhaseScheduled, v1.ProjectPhaseRunning, v1.ProjectPhaseTerminating:
+			filtered = append(filtered, project)
+		}
+	}
+	return filtered
 }
 
 // reconcileOne reconciles a single project:

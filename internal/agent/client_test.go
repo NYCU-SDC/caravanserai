@@ -155,3 +155,30 @@ func TestHeartbeatNetworkStatus(t *testing.T) {
 	assert.Equal(t, "100.64.0.8", status.OverlayIP)
 	assert.Equal(t, 9091, status.AgentPort)
 }
+
+func TestListProjectsAssignedToNodeRequestsCompleteOwnershipSnapshot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, "/api/v1/projects", r.URL.Path)
+		assert.Equal(t, "node-a", r.URL.Query().Get("nodeRef"))
+		assert.False(t, r.URL.Query().Has("phase"), "ownership snapshots must include Failed projects")
+
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(v1.ProjectList{Items: []v1.Project{
+			{
+				ObjectMeta: v1.ObjectMeta{Name: "failed-but-owned", Namespace: "default"},
+				Status: v1.ProjectStatus{
+					Phase:   v1.ProjectPhaseFailed,
+					NodeRef: "node-a",
+				},
+			},
+		}}))
+	}))
+	defer server.Close()
+
+	client := NewClient(zap.NewNop(), server.URL, "node-a")
+	projects, err := client.ListProjectsAssignedToNode(context.Background())
+	require.NoError(t, err)
+	require.Len(t, projects, 1)
+	assert.Equal(t, v1.ProjectPhaseFailed, projects[0].Status.Phase)
+}

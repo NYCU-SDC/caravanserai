@@ -22,11 +22,12 @@ func (k ResourceKey) String() string {
 type Operation string
 
 const (
-	OpBackup      Operation = "Backup"
-	OpRestore     Operation = "Restore"
-	OpTerminate   Operation = "Terminate"
-	OpFinalBackup Operation = "FinalBackup"
-	OpGC          Operation = "GC"
+	OpBackup        Operation = "Backup"
+	OpRestore       Operation = "Restore"
+	OpTerminate     Operation = "Terminate"
+	OpFinalBackup   Operation = "FinalBackup"
+	OpGC            Operation = "GC"
+	OpOrphanCleanup Operation = "OrphanCleanup"
 )
 
 // Coordinator serialises operations per Project and lets unrelated parts of
@@ -158,10 +159,10 @@ const (
 //
 //   - Restarting is correct in the common case (a brief blip during which
 //     nothing was reassigned). If the Project really did move, the containers
-//     started here are orphans — but the agent's orphan sweep now removes them
-//     once the Project has been absent from ListProjectsForReconcile for the
-//     grace period (see internal/agent/orphan.go), so the mistake is temporary
-//     rather than permanent.
+//     started here are orphans — but a complete assignment snapshot lets the
+//     orphan sweep stop them, then remove them after the grace period (see
+//     internal/agent/orphan.go), so the mistake is temporary rather than
+//     permanent.
 //   - Refusing to restart is wrong in the common case: it turns a transient
 //     control-plane blip into a stopped service that nothing brings back,
 //     because a Failed Project is not currently auto-recovered. Fixing that

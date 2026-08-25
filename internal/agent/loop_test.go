@@ -26,8 +26,9 @@ type mockRuntime struct {
 	getContainerIPs func(ctx context.Context, project *v1.Project) (map[string]string, error)
 	stopFn          func(ctx context.Context, project *v1.Project) error
 	startFn         func(ctx context.Context, project *v1.Project) error
-	listLocalFn     func(ctx context.Context) ([]string, error)
-	removeOrphanFn  func(ctx context.Context, projectName string) error
+	listLocalFn     func(ctx context.Context) ([]docker.ProjectIdentity, error)
+	stopOrphanFn    func(ctx context.Context, project docker.ProjectIdentity) error
+	removeOrphanFn  func(ctx context.Context, project docker.ProjectIdentity) error
 }
 
 func (m *mockRuntime) InspectProject(ctx context.Context, project *v1.Project) ([]docker.ContainerState, error) {
@@ -72,16 +73,23 @@ func (m *mockRuntime) StartProject(ctx context.Context, project *v1.Project) err
 	return nil
 }
 
-func (m *mockRuntime) ListLocalProjects(ctx context.Context) ([]string, error) {
+func (m *mockRuntime) ListLocalProjects(ctx context.Context) ([]docker.ProjectIdentity, error) {
 	if m.listLocalFn != nil {
 		return m.listLocalFn(ctx)
 	}
 	return nil, nil
 }
 
-func (m *mockRuntime) RemoveOrphanProject(ctx context.Context, projectName string) error {
+func (m *mockRuntime) StopOrphanProject(ctx context.Context, project docker.ProjectIdentity) error {
+	if m.stopOrphanFn != nil {
+		return m.stopOrphanFn(ctx, project)
+	}
+	return nil
+}
+
+func (m *mockRuntime) RemoveOrphanProject(ctx context.Context, project docker.ProjectIdentity) error {
 	if m.removeOrphanFn != nil {
-		return m.removeOrphanFn(ctx, projectName)
+		return m.removeOrphanFn(ctx, project)
 	}
 	return nil
 }
@@ -283,7 +291,7 @@ func TestHealthCheckOne_CrashedBeforeMissing(t *testing.T) {
 // ── bootstrapRunningProjects test ────────────────────────────────────────────
 
 func TestBootstrapRunningProjects(t *testing.T) {
-	// Set up a test server that serves both ListProjectsForReconcile and
+	// Set up a test server that serves both ListProjectsAssignedToNode and
 	// status update endpoints.
 	var (
 		mu      sync.Mutex

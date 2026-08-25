@@ -17,6 +17,16 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 )
 
+// ProjectIdentity identifies one Project's Docker resources. Namespace is
+// included even while the API still treats names as globally unique so a
+// destructive runtime operation never broadens to another namespace.
+type ProjectIdentity struct {
+	Namespace string
+	Name      string
+}
+
+func (p ProjectIdentity) String() string { return p.Namespace + "/" + p.Name }
+
 // ContainerState holds the observed state of a single service container.
 type ContainerState struct {
 	// ServiceName is the name of the ServiceDef this container belongs to.
@@ -77,16 +87,21 @@ type Runtime interface {
 	// Services whose containers do not exist or have no IP are omitted.
 	GetContainerIPs(ctx context.Context, project *v1.Project) (map[string]string, error)
 
-	// ListLocalProjects returns the name of every project that has containers
-	// on this host, discovered from the cara.project label rather than from any
-	// server response. Names are unique and include projects whose containers
-	// are stopped, so a project the control plane no longer assigns here is
-	// still visible to the caller.
+	// ListLocalProjects returns the identity of every project that has
+	// containers on this host, discovered from the complete Cara ownership
+	// labels rather than from any server response. Identities are unique and
+	// include projects whose containers are stopped, so a project the control
+	// plane no longer assigns here is still visible to the caller.
 	//
 	// This is what makes orphan detection possible: the reconcile list only
 	// contains projects the server still assigns to this node, so a project
 	// that moved away can only be found by asking Docker directly.
-	ListLocalProjects(ctx context.Context) ([]string, error)
+	ListLocalProjects(ctx context.Context) ([]ProjectIdentity, error)
+
+	// StopOrphanProject stops, but does not remove, every Cara-owned container
+	// for project. It is the reversible first stage after the control plane
+	// confirms that this node no longer owns the Project.
+	StopOrphanProject(ctx context.Context, project ProjectIdentity) error
 
 	// RemoveOrphanProject tears down every Docker resource labelled for the
 	// project — containers, the bridge network, and named volumes — without
@@ -98,5 +113,5 @@ type Runtime interface {
 	// keeps Managed volume data safe by construction, because Managed volumes
 	// are host bind directories rather than Docker volumes and so are not
 	// reachable through a label filter at all.
-	RemoveOrphanProject(ctx context.Context, projectName string) error
+	RemoveOrphanProject(ctx context.Context, project ProjectIdentity) error
 }

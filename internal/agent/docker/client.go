@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -79,7 +80,7 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 	log := r.logger.With(zap.String("project", project.Name))
 
 	// 1. Ensure the bridge network exists.
-	if err := r.ensureNetwork(ctx, project.Name); err != nil {
+	if err := r.ensureNetwork(ctx, project.Namespace, project.Name); err != nil {
 		return fmt.Errorf("ensure network: %w", err)
 	}
 
@@ -159,9 +160,11 @@ func planVolumeRemoval(dataRoot, namespace, projectName string, vols []v1.Volume
 // RemoveProject implements Runtime.
 func (r *DockerRuntime) RemoveProject(ctx context.Context, namespace, projectName string, spec v1.ProjectSpec) error {
 	log := r.logger.With(zap.String("project", projectName))
+	var errs []error
 
 	// Stop and remove containers tagged with this project.
-	f := filters.NewArgs(filters.Arg("label", labelProject+"="+projectName))
+	identity := ProjectIdentity{Namespace: namespace, Name: projectName}
+	f := containerOwnershipFilters(identity)
 	containers, err := r.client.ContainerList(ctx, container.ListOptions{
 		All:     true,
 		Filters: f,
@@ -170,22 +173,23 @@ func (r *DockerRuntime) RemoveProject(ctx context.Context, namespace, projectNam
 		return fmt.Errorf("list containers: %w", err)
 	}
 	for _, c := range containers {
-		log.Info("Stopping container", zap.String("id", c.ID[:12]))
+		log.Info("Stopping container", zap.String("id", shortID(c.ID)))
 		timeout := stopTimeoutSeconds
 		if err := r.client.ContainerStop(ctx, c.ID, container.StopOptions{Timeout: &timeout}); err != nil {
-			log.Warn("Failed to stop container", zap.String("id", c.ID[:12]), zap.Error(err))
+			if !isNotFound(err) {
+				errs = append(errs, fmt.Errorf("stop container %s: %w", shortID(c.ID), err))
+			}
 		}
 		if err := r.client.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true}); err != nil {
-			log.Warn("Failed to remove container", zap.String("id", c.ID[:12]), zap.Error(err))
+			if !isNotFound(err) {
+				errs = append(errs, fmt.Errorf("remove container %s: %w", shortID(c.ID), err))
+			}
 		}
 	}
 
 	// Remove the bridge network.
-	netName := NetworkName(projectName)
-	if err := r.client.NetworkRemove(ctx, netName); err != nil {
-		if !isNotFound(err) {
-			log.Warn("Failed to remove network", zap.String("network", netName), zap.Error(err))
-		}
+	if err := r.removeOwnedNetwork(ctx, identity); err != nil {
+		errs = append(errs, err)
 	}
 
 	plan := planVolumeRemoval(r.dataRoot, namespace, projectName, spec.Volumes)
@@ -200,94 +204,177 @@ func (r *DockerRuntime) RemoveProject(ctx context.Context, namespace, projectNam
 	for _, vName := range plan.removeNamedVolumes {
 		if err := r.client.VolumeRemove(ctx, vName, false); err != nil {
 			if !isNotFound(err) {
-				log.Warn("Failed to remove named volume", zap.String("volume", vName), zap.Error(err))
+				errs = append(errs, fmt.Errorf("remove named volume %s: %w", vName, err))
 			}
 		}
 	}
 
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("remove project %s: %w", identity, err)
+	}
 	log.Info("Project resources removed")
 	return nil
 }
 
-// ListLocalProjects implements Runtime.
-func (r *DockerRuntime) ListLocalProjects(ctx context.Context) ([]string, error) {
-	// Filtering on the bare label key (no "=value") matches every container the
-	// agent created, whatever project it belongs to.
-	f := filters.NewArgs(filters.Arg("label", labelProject))
-	containers, err := r.client.ContainerList(ctx, container.ListOptions{
-		// All includes stopped containers. An orphan whose process died is
-		// still an orphan: its network and volumes remain, and it restarts on
-		// the next daemon start unless it is removed.
-		All:     true,
-		Filters: f,
-	})
+func containerOwnershipFilters(project ProjectIdentity) filters.Args {
+	return filters.NewArgs(
+		filters.Arg("label", labelProject+"="+project.Name),
+		filters.Arg("label", labelNamespace+"="+project.Namespace),
+		filters.Arg("label", labelService),
+	)
+}
+
+func resourceOwnershipFilters(project ProjectIdentity) filters.Args {
+	return filters.NewArgs(
+		filters.Arg("label", labelProject+"="+project.Name),
+		filters.Arg("label", labelNamespace+"="+project.Namespace),
+	)
+}
+
+// ListLocalProjects implements Runtime. A container is Cara-owned only when
+// all three ownership labels are present. Partial labels are intentionally
+// ignored so a foreign container cannot be swept accidentally.
+func (r *DockerRuntime) ListLocalProjects(ctx context.Context) ([]ProjectIdentity, error) {
+	f := filters.NewArgs(
+		filters.Arg("label", labelProject),
+		filters.Arg("label", labelNamespace),
+		filters.Arg("label", labelService),
+	)
+	containers, err := r.client.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
 	if err != nil {
 		return nil, fmt.Errorf("list containers: %w", err)
 	}
 
-	seen := make(map[string]struct{}, len(containers))
-	names := make([]string, 0, len(containers))
+	seen := make(map[ProjectIdentity]struct{}, len(containers))
+	projects := make([]ProjectIdentity, 0, len(containers))
 	for _, c := range containers {
-		name := c.Labels[labelProject]
-		if name == "" {
+		project := ProjectIdentity{
+			Namespace: c.Labels[labelNamespace],
+			Name:      c.Labels[labelProject],
+		}
+		if project.Namespace == "" || project.Name == "" || c.Labels[labelService] == "" {
+			r.logger.Warn("Ignoring container with incomplete Cara ownership labels",
+				zap.String("container", shortID(c.ID)))
 			continue
 		}
-		if _, dup := seen[name]; dup {
+		if _, duplicate := seen[project]; duplicate {
 			continue
 		}
-		seen[name] = struct{}{}
-		names = append(names, name)
+		seen[project] = struct{}{}
+		projects = append(projects, project)
 	}
-	return names, nil
+	return projects, nil
 }
 
-// RemoveOrphanProject implements Runtime.
-func (r *DockerRuntime) RemoveOrphanProject(ctx context.Context, projectName string) error {
-	log := r.logger.With(zap.String("project", projectName))
-	f := filters.NewArgs(filters.Arg("label", labelProject+"="+projectName))
-
+// StopOrphanProject stops only containers with the complete Cara ownership
+// label set. It does not remove any Docker resource.
+func (r *DockerRuntime) StopOrphanProject(ctx context.Context, project ProjectIdentity) error {
 	containers, err := r.client.ContainerList(ctx, container.ListOptions{
 		All:     true,
-		Filters: f,
+		Filters: containerOwnershipFilters(project),
 	})
 	if err != nil {
-		return fmt.Errorf("list containers: %w", err)
+		return fmt.Errorf("list orphan containers: %w", err)
 	}
+
+	var errs []error
 	for _, c := range containers {
-		log.Info("Stopping orphaned container", zap.String("id", c.ID[:12]))
+		if c.State != "running" && c.State != "restarting" {
+			continue
+		}
 		timeout := stopTimeoutSeconds
-		if err := r.client.ContainerStop(ctx, c.ID, container.StopOptions{Timeout: &timeout}); err != nil {
-			log.Warn("Failed to stop orphaned container", zap.String("id", c.ID[:12]), zap.Error(err))
-		}
-		if err := r.client.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true}); err != nil {
-			log.Warn("Failed to remove orphaned container", zap.String("id", c.ID[:12]), zap.Error(err))
+		if err := r.client.ContainerStop(ctx, c.ID, container.StopOptions{Timeout: &timeout}); err != nil && !isNotFound(err) {
+			errs = append(errs, fmt.Errorf("stop container %s: %w", shortID(c.ID), err))
 		}
 	}
-
-	netName := NetworkName(projectName)
-	if err := r.client.NetworkRemove(ctx, netName); err != nil {
-		if !isNotFound(err) {
-			log.Warn("Failed to remove orphaned network", zap.String("network", netName), zap.Error(err))
-		}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("stop orphan project %s: %w", project, err)
 	}
+	return nil
+}
 
-	// Only Ephemeral volumes (and legacy pre-CARA-66 named volumes) carry this
-	// label. Managed volume data lives in a host directory that no Docker
-	// volume filter can reach, so it survives this sweep by construction.
-	vols, err := r.client.VolumeList(ctx, volume.ListOptions{Filters: f})
+// RemoveOrphanProject permanently removes Cara-owned Docker resources after
+// ownership loss has remained confirmed for the full grace period.
+func (r *DockerRuntime) RemoveOrphanProject(ctx context.Context, project ProjectIdentity) error {
+	log := r.logger.With(
+		zap.String("namespace", project.Namespace),
+		zap.String("project", project.Name),
+	)
+	containers, err := r.client.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: containerOwnershipFilters(project),
+	})
 	if err != nil {
-		return fmt.Errorf("list volumes: %w", err)
+		return fmt.Errorf("list orphan containers: %w", err)
 	}
-	for _, v := range vols.Volumes {
-		if err := r.client.VolumeRemove(ctx, v.Name, false); err != nil {
-			if !isNotFound(err) {
-				log.Warn("Failed to remove orphaned volume", zap.String("volume", v.Name), zap.Error(err))
+
+	var errs []error
+	for _, c := range containers {
+		if err := r.client.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true}); err != nil && !isNotFound(err) {
+			errs = append(errs, fmt.Errorf("remove container %s: %w", shortID(c.ID), err))
+		}
+	}
+	if err := r.removeOwnedNetwork(ctx, project); err != nil {
+		errs = append(errs, err)
+	}
+
+	volumes, err := r.client.VolumeList(ctx, volume.ListOptions{
+		Filters: resourceOwnershipFilters(project),
+	})
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list orphan volumes: %w", err))
+	} else {
+		for _, v := range volumes.Volumes {
+			if err := r.client.VolumeRemove(ctx, v.Name, false); err != nil && !isNotFound(err) {
+				errs = append(errs, fmt.Errorf("remove volume %s: %w", v.Name, err))
 			}
 		}
 	}
 
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("remove orphan project %s: %w", project, err)
+	}
 	log.Info("Orphaned project resources removed")
 	return nil
+}
+
+// removeOwnedNetwork inspects the deterministic network name before removal.
+// A same-named foreign network is never removed.
+func (r *DockerRuntime) removeOwnedNetwork(ctx context.Context, project ProjectIdentity) error {
+	netName := NetworkName(project.Name)
+	owned, err := r.client.NetworkInspect(ctx, netName, network.InspectOptions{})
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect network %q: %w", netName, err)
+	}
+	if err := validateNetworkOwnership(netName, owned.Labels, project); err != nil {
+		return fmt.Errorf("refuse to remove network: %w", err)
+	}
+	if err := r.client.NetworkRemove(ctx, owned.ID); err != nil && !isNotFound(err) {
+		return fmt.Errorf("remove network %q: %w", netName, err)
+	}
+	return nil
+}
+
+func validateNetworkOwnership(netName string, labels map[string]string, project ProjectIdentity) error {
+	if labels[labelProject] != project.Name {
+		return fmt.Errorf("network %q: Cara project ownership label does not match", netName)
+	}
+	// Legacy Cara networks predate the namespace label. Accept an absent
+	// namespace, but reject a conflicting one.
+	if namespace := labels[labelNamespace]; namespace != "" && namespace != project.Namespace {
+		return fmt.Errorf("network %q: namespace ownership label does not match", netName)
+	}
+	return nil
+}
+
+func shortID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
 }
 
 // StopProject implements Runtime.
@@ -386,11 +473,15 @@ func (r *DockerRuntime) GetContainerIPs(ctx context.Context, project *v1.Project
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
 // ensureNetwork creates the project's bridge network if it does not yet exist.
-func (r *DockerRuntime) ensureNetwork(ctx context.Context, projectName string) error {
+func (r *DockerRuntime) ensureNetwork(ctx context.Context, namespace, projectName string) error {
 	netName := NetworkName(projectName)
+	identity := ProjectIdentity{Namespace: namespace, Name: projectName}
 
-	_, err := r.client.NetworkInspect(ctx, netName, network.InspectOptions{})
+	existing, err := r.client.NetworkInspect(ctx, netName, network.InspectOptions{})
 	if err == nil {
+		if err := validateNetworkOwnership(netName, existing.Labels, identity); err != nil {
+			return fmt.Errorf("existing network ownership: %w", err)
+		}
 		r.logger.Debug("Network already exists", zap.String("network", netName))
 		return nil
 	}
@@ -400,7 +491,10 @@ func (r *DockerRuntime) ensureNetwork(ctx context.Context, projectName string) e
 
 	_, err = r.client.NetworkCreate(ctx, netName, network.CreateOptions{
 		Driver: "bridge",
-		Labels: map[string]string{labelProject: projectName},
+		Labels: map[string]string{
+			labelProject:   identity.Name,
+			labelNamespace: identity.Namespace,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("create network: %w", err)
