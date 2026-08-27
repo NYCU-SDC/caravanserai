@@ -24,10 +24,42 @@ func (NetworkMode) JSONSchema() *jsonschema.Schema {
 	}
 }
 
+// OverlayStatus is the overlay reachability of a Node, derived by the server
+// from heartbeat freshness. It is distinct from NodeState: State is the
+// high-level scheduling health, while OverlayStatus answers "can the server
+// currently reach this agent over the overlay".
+type OverlayStatus string
+
+const (
+	// OverlayStatusOnline means a fresh heartbeat was received within the
+	// timeout window and the Node has an overlay IP.
+	OverlayStatusOnline OverlayStatus = "Online"
+	// OverlayStatusOffline means the most recent heartbeat is older than the
+	// timeout window.
+	OverlayStatusOffline OverlayStatus = "Offline"
+	// OverlayStatusUnknown means the Node has never sent a heartbeat, or has no
+	// overlay IP (it is not participating in the overlay).
+	OverlayStatusUnknown OverlayStatus = "Unknown"
+)
+
+// JSONSchema returns a JSON Schema with the allowed OverlayStatus values.
+func (OverlayStatus) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Enum:        []any{string(OverlayStatusOnline), string(OverlayStatusOffline), string(OverlayStatusUnknown)},
+		Description: "Overlay reachability of a Node, derived by the server from heartbeat freshness.",
+	}
+}
+
 // NodeNetworkStatus reports the overlay-network state of a Node.
 type NodeNetworkStatus struct {
 	// OverlayIP is the Headscale-assigned overlay IP (e.g. "100.64.0.5").
 	OverlayIP string `json:"overlayIP,omitempty" yaml:"overlayIP,omitempty"`
+
+	// OverlayStatus is Online/Offline/Unknown, computed by the server from
+	// heartbeat freshness at read time. It is not persisted or written by the
+	// Agent; the Agent-facing heartbeat path never sets it.
+	OverlayStatus OverlayStatus `json:"overlayStatus,omitempty" yaml:"overlayStatus,omitempty"`
 
 	// DNSName is the MagicDNS FQDN for service discovery.
 	DNSName string `json:"dnsName,omitempty" yaml:"dnsName,omitempty"`
