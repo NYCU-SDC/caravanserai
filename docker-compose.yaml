@@ -28,7 +28,7 @@ services:
     image: headscale/headscale:v0.29.2
     command: serve
     ports:
-      - "8081:8080"
+      - "8082:8080"
     volumes:
       - ./deploy/dev/headscale/config.yaml:/etc/headscale/config.yaml:ro
       - headscale-data:/var/lib/headscale

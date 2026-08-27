@@ -53,7 +53,7 @@ The agent logs `Failed to load agent config from file: open config.yaml: no such
 
 ## Local Headscale
 
-The development compose stack exposes Headscale at `http://localhost:8081` and
+The development compose stack exposes Headscale at `http://localhost:8082` and
 stores its state in the `headscale-data` Docker volume. `make dev-down`
 preserves that state; `make dev-reset` removes it.
 
@@ -103,7 +103,7 @@ tail -30 /tmp/cara-agent.log
 
 - Docker daemon running (`docker ps` must succeed)
 - Go 1.22+
-- Ports 5432, 8080, 8081, and 9090 free
+- Ports 5432, 8080, 8081, 8082, and 9090 free (8082 = dev Headscale, 8081 = agent ingress proxy)
 - `.env` at project root contains:
   ```
   DEBUG=true
@@ -113,7 +113,8 @@ tail -30 /tmp/cara-agent.log
 ## Troubleshooting
 
 - Port 5432 occupied → `docker compose down` then retry `make dev-up`
-- Port 8081 occupied → stop the process using it, then retry `make dev-up`
+- Port 8082 occupied → stop the process using it, then retry `make dev-up` (dev Headscale)
+- Port 8081 occupied → stop the process using it before starting a local `cara-agent` (agent ingress proxy default)
 - Port 8080 occupied → `kill $(lsof -ti :8080)` then restart cara-server
 - Port 9090 occupied → `kill $(lsof -ti :9090)` then restart cara-agent
 - Agent cannot reach Docker → verify `docker ps` succeeds; if non-default socket, set `DOCKER_HOST`

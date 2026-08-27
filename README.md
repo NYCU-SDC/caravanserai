@@ -281,7 +281,7 @@ The pre-commit hook automatically regenerates `schemas/` when `api/v1/` or
 ### Local Headscale
 
 `make dev-up` starts a development Headscale control plane at
-`http://localhost:8081` using the pinned `headscale/headscale:v0.29.2` image.
+`http://localhost:8082` using the pinned `headscale/headscale:v0.29.2` image.
 Its config lives in `deploy/dev/headscale/config.yaml`, and its state is stored
 in the `headscale-data` Docker volume. Use `make dev-reset` to wipe that state.
 
@@ -312,9 +312,8 @@ pointing at the dev Headscale:
 docker compose exec headscale headscale preauthkeys create --user 1 --expiration 24h > preauth.key
 
 ./bin/cara-agent \
-  --headscale-url http://localhost:8081 \
-  --preauth-key-file ./preauth.key \
-  --proxy-listen-addr 127.0.0.1:8199   # avoid clashing with Headscale on :8081
+  --headscale-url http://localhost:8082 \
+  --preauth-key-file ./preauth.key
 ```
 
 On startup the agent blocks until Headscale assigns an overlay IP, logs it
@@ -329,9 +328,9 @@ never silently falls back to the underlay once overlay is requested.
 | Pre-auth key file | `--preauth-key-file` | `HEADSCALE_PREAUTH_KEY_FILE` / `preauth_key_file` | Path to a file holding the key; the key is never logged |
 | Overlay hostname | `--overlay-hostname` | `OVERLAY_HOSTNAME` / `overlay_hostname` | Optional; defaults to the node name |
 
-> The dev Headscale listens on host port `8081`, which is also the agent
-> ingress proxy's default. Pass `--proxy-listen-addr` (as above) when running an
-> agent on the same host.
+> The dev Headscale listens on host port `8082`; the agent ingress proxy
+> defaults to `:8081`. The two no longer clash, so no `--proxy-listen-addr`
+> override is needed when running an agent on the same host.
 
 ### Docker resource naming
 
