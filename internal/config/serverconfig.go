@@ -16,6 +16,22 @@ type Config struct {
 	Port             string `yaml:"port"               envconfig:"PORT"`
 	OtelCollectorUrl string `yaml:"otel_collector_url" envconfig:"OTEL_COLLECTOR_URL"`
 	DatabaseURL      string `yaml:"database_url"       envconfig:"DATABASE_URL"`
+
+	// Overlay networking is opt-in in 1.0 (CARA-74): cara-server joins the
+	// Headscale mesh on startup only when both HeadscaleURL and PreauthKeyFile
+	// are set, so that server→agent calls can reach agents on their overlay
+	// IPs.  When both are empty the server runs on the underlay as before.
+	HeadscaleURL string `yaml:"headscale_url" envconfig:"HEADSCALE_URL"`
+	// PreauthKeyFile is the path to a file containing the Headscale pre-auth
+	// key used to join the overlay.  The key itself is never logged.
+	PreauthKeyFile string `yaml:"preauth_key_file" envconfig:"HEADSCALE_PREAUTH_KEY_FILE"`
+	// OverlayHostname optionally overrides the hostname the server registers
+	// with Headscale.  Defaults to "cara-server" when empty.
+	OverlayHostname string `yaml:"overlay_hostname" envconfig:"OVERLAY_HOSTNAME"`
+	// OverlayStateDir optionally overrides where tsnet persists node keys.
+	// Defaults to a server-specific directory so it never collides with a
+	// co-located cara-agent's tsnet state.
+	OverlayStateDir string `yaml:"overlay_state_dir" envconfig:"OVERLAY_STATE_DIR"`
 }
 
 // Load reads cara-server config from file → env → flags (later sources win).
@@ -82,6 +98,10 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		Port:             os.Getenv("PORT"),
 		OtelCollectorUrl: os.Getenv("OTEL_COLLECTOR_URL"),
 		DatabaseURL:      os.Getenv("DATABASE_URL"),
+		HeadscaleURL:     os.Getenv("HEADSCALE_URL"),
+		PreauthKeyFile:   os.Getenv("HEADSCALE_PREAUTH_KEY_FILE"),
+		OverlayHostname:  os.Getenv("OVERLAY_HOSTNAME"),
+		OverlayStateDir:  os.Getenv("OVERLAY_STATE_DIR"),
 	}
 
 	return configutil.Merge[Config](cfg, envConfig)
@@ -94,6 +114,10 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.StringVar(&flagConfig.Port, "port", "", "listen port")
 	flag.StringVar(&flagConfig.OtelCollectorUrl, "otel_collector_url", "", "OpenTelemetry collector URL")
 	flag.StringVar(&flagConfig.DatabaseURL, "database_url", "", "PostgreSQL connection URL")
+	flag.StringVar(&flagConfig.HeadscaleURL, "headscale-url", "", "Headscale control-plane URL to join on startup (enables overlay networking)")
+	flag.StringVar(&flagConfig.PreauthKeyFile, "preauth-key-file", "", "path to a file containing the Headscale pre-auth key")
+	flag.StringVar(&flagConfig.OverlayHostname, "overlay-hostname", "", "hostname to register with Headscale (default: cara-server)")
+	flag.StringVar(&flagConfig.OverlayStateDir, "overlay-state-dir", "", "directory where tsnet persists overlay node keys (default: per-user cara-server dir)")
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)
 }
