@@ -22,6 +22,7 @@ import (
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/headscale"
+	serverhandler "NYCU-SDC/caravanserai/internal/server/handler"
 	"NYCU-SDC/caravanserai/internal/store"
 
 	handlerutil "github.com/NYCU-SDC/summer/pkg/handler"
@@ -265,7 +266,7 @@ func (h *Handler) deleteFromStoreWithRetry(ctx context.Context, name string) err
 func (h *Handler) configured(ctx context.Context, w http.ResponseWriter, logger *zap.Logger) bool {
 	if h.hs == nil {
 		h.problemWriter.WriteError(ctx, w,
-			errors.New("overlay administration is not configured: set headscale_api_url and headscale_api_key on cara-server"), logger)
+			fmt.Errorf("%w: overlay administration requires headscale_api_url and headscale_api_key on cara-server", serverhandler.ErrServiceNotConfigured), logger)
 		return false
 	}
 	return true

@@ -70,6 +70,53 @@ func TestServerConfig_Validate_Overlay(t *testing.T) {
 	}
 }
 
+func TestServerConfig_Validate_HeadscaleAPI(t *testing.T) {
+	base := func() Config {
+		return Config{DatabaseURL: "postgres://localhost/cara"}
+	}
+
+	tests := []struct {
+		name    string
+		apiURL  string
+		apiKey  string
+		wantErr bool
+	}{
+		{
+			name: "overlay admin disabled: both empty",
+		},
+		{
+			name:   "overlay admin enabled: both set",
+			apiURL: "http://localhost:8081",
+			apiKey: "secret",
+		},
+		{
+			name:    "half-configured: only URL set",
+			apiURL:  "http://localhost:8081",
+			wantErr: true,
+		},
+		{
+			name:    "half-configured: only key set",
+			apiKey:  "secret",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			cfg.HeadscaleAPIURL = tt.apiURL
+			cfg.HeadscaleAPIKey = tt.apiKey
+
+			err := cfg.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
 func TestServerConfig_Validate_RequiresDatabaseURL(t *testing.T) {
 	err := (&Config{}).Validate()
 	assert.ErrorContains(t, err, "database_url is required")

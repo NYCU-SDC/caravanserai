@@ -221,7 +221,9 @@ func TestNotConfigured(t *testing.T) {
 	resp, err := http.Get(srv.URL + "/api/v1/overlay/nodes")
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	assert.GreaterOrEqual(t, resp.StatusCode, 400)
+	// "Not configured" is a deployment gap, not a server fault, so it maps to
+	// 503 Service Unavailable rather than a generic 500.
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
 
 // --- helpers ---------------------------------------------------------------
