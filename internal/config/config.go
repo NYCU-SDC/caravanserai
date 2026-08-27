@@ -54,6 +54,13 @@ func (c *Config) Validate() error {
 	if (c.HeadscaleURL == "") != (c.PreauthKeyFile == "") {
 		return errors.New("headscale_url and preauth_key_file must be set together (or both left empty to disable overlay networking)")
 	}
+	// Headscale overlay administration is opt-in: either both HeadscaleAPIURL
+	// and HeadscaleAPIKey are set (endpoints enabled) or neither is (endpoints
+	// report "not configured"). A half-configured pair is almost always a
+	// mistake that would otherwise silently disable the endpoints, so reject it.
+	if (c.HeadscaleAPIURL == "") != (c.HeadscaleAPIKey == "") {
+		return errors.New("headscale_api_url and headscale_api_key must be set together (or both left empty to disable overlay administration)")
+	}
 	return nil
 }
 

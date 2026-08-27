@@ -14,6 +14,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/appinit"
 	"NYCU-SDC/caravanserai/internal/config"
 	"NYCU-SDC/caravanserai/internal/event"
+	"NYCU-SDC/caravanserai/internal/headscale"
 	"NYCU-SDC/caravanserai/internal/overlay"
 	"NYCU-SDC/caravanserai/internal/server/adapter"
 	"NYCU-SDC/caravanserai/internal/server/agentdialer"
@@ -21,6 +22,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/server/controller"
 	"NYCU-SDC/caravanserai/internal/server/handler"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
+	overlayhandler "NYCU-SDC/caravanserai/internal/server/handler/overlay"
 	projecthandler "NYCU-SDC/caravanserai/internal/server/handler/project"
 	secrethandler "NYCU-SDC/caravanserai/internal/server/handler/secret"
 	pgstore "NYCU-SDC/caravanserai/internal/store/postgres"
@@ -181,6 +183,20 @@ func main() {
 	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, agentDialer, problemWriter))
 	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter))
 	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
+
+	// Overlay administration (CARA-49): issue Headscale pre-auth keys and
+	// list/revoke overlay nodes. Only active when Headscale admin credentials
+	// are configured; otherwise the endpoints report "not configured".
+	var hsClient headscale.Client
+	if cfg.HeadscaleAPIURL != "" && cfg.HeadscaleAPIKey != "" {
+		hsClient = headscale.NewHTTPClient(cfg.HeadscaleAPIURL, cfg.HeadscaleAPIKey, logger)
+		logger.Info("Headscale overlay administration enabled", zap.String("api_url", cfg.HeadscaleAPIURL))
+	}
+	headscaleUser := cfg.HeadscaleUser
+	if headscaleUser == "" {
+		headscaleUser = "cara-node"
+	}
+	apiSrv.Register(overlayhandler.NewHandler(logger, hsClient, pgStore, headscaleUser, problemWriter))
 
 	// ============================================
 	// Controller Manager

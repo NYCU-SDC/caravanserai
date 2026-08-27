@@ -90,6 +90,88 @@ func (c *Client) DeleteNode(ctx context.Context, name string) error {
 	return checkStatus(resp)
 }
 
+// CreateOverlayPreAuthKey asks the server to issue a Headscale pre-auth key for
+// the given Cara node. The returned key is secret and shown to the operator
+// once.
+func (c *Client) CreateOverlayPreAuthKey(ctx context.Context, node, ttl string) (v1.PreAuthKeyResponse, error) {
+	body, err := json.Marshal(v1.CreatePreAuthKeyRequest{Node: node, TTL: ttl})
+	if err != nil {
+		return v1.PreAuthKeyResponse{}, fmt.Errorf("encode request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.BaseURL+"/api/v1/overlay/preauth-keys", bytes.NewReader(body))
+	if err != nil {
+		return v1.PreAuthKeyResponse{}, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return v1.PreAuthKeyResponse{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return v1.PreAuthKeyResponse{}, err
+	}
+
+	var out v1.PreAuthKeyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return v1.PreAuthKeyResponse{}, fmt.Errorf("decode response: %w", err)
+	}
+	return out, nil
+}
+
+// ListOverlayNodes returns the overlay nodes Headscale knows about.
+func (c *Client) ListOverlayNodes(ctx context.Context) (v1.OverlayNodeList, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/api/v1/overlay/nodes", nil)
+	if err != nil {
+		return v1.OverlayNodeList{}, fmt.Errorf("build request: %w", err)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return v1.OverlayNodeList{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return v1.OverlayNodeList{}, err
+	}
+
+	var list v1.OverlayNodeList
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return v1.OverlayNodeList{}, fmt.Errorf("decode response: %w", err)
+	}
+	return list, nil
+}
+
+// RevokeOverlayNode removes a node from Headscale and the Cara node store. The
+// returned response reports drift when only one side could be removed.
+func (c *Client) RevokeOverlayNode(ctx context.Context, name string) (v1.RevokeNodeResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+"/api/v1/overlay/nodes/"+name, nil)
+	if err != nil {
+		return v1.RevokeNodeResponse{}, fmt.Errorf("build request: %w", err)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return v1.RevokeNodeResponse{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return v1.RevokeNodeResponse{}, err
+	}
+
+	var out v1.RevokeNodeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return v1.RevokeNodeResponse{}, fmt.Errorf("decode response: %w", err)
+	}
+	return out, nil
+}
+
 // ApplyResult wraps the resource returned by an apply operation together with
 // whether it was newly created or updated (configured).
 type ApplyResult struct {

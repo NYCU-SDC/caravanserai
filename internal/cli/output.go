@@ -222,6 +222,39 @@ func (p *Printer) printNodeTable(nodes []v1.Node) error {
 	return w.Flush()
 }
 
+// PrintOverlayNodeList renders an OverlayNodeList in the configured format.
+func (p *Printer) PrintOverlayNodeList(list v1.OverlayNodeList) error {
+	switch p.Format {
+	case "json":
+		return printJSON(p.Out, list)
+	case "yaml":
+		return printYAML(p.Out, list)
+	default:
+		return p.printOverlayNodeTable(list.Nodes)
+	}
+}
+
+// printOverlayNodeTable writes a human-readable table with columns:
+// NAME  ID  OVERLAY IP  ONLINE
+func (p *Printer) printOverlayNodeTable(nodes []v1.OverlayNode) error {
+	w := tabwriter.NewWriter(p.Out, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "NAME\tID\tOVERLAY IP\tONLINE")
+
+	for _, n := range nodes {
+		name := n.Name
+		if name == "" {
+			name = "<unknown>"
+		}
+		ip := "<none>"
+		if len(n.IPAddresses) > 0 {
+			ip = n.IPAddresses[0]
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%t\n", name, n.ID, ip, n.Online)
+	}
+
+	return w.Flush()
+}
+
 // humanAge returns a compact human-readable duration since t.
 // Returns "<unknown>" if t is the zero value.
 func humanAge(t time.Time) string {

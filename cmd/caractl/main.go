@@ -47,6 +47,7 @@ func init() {
 	rootCmd.AddCommand(cli.NewPortForwardCmd())
 	rootCmd.AddCommand(cli.NewLogsCmd())
 	rootCmd.AddCommand(cli.NewNodeCmd())
+	rootCmd.AddCommand(cli.NewOverlayCmd())
 }
 
 func main() {
