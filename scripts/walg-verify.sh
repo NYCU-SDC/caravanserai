@@ -187,8 +187,19 @@ free_port() {
     printf '%s' "$port"
 }
 
+# Docker's own message is kept rather than discarded. The usual failure here is
+# a host port already in use, which names the port and is fixed in seconds —
+# while a bare "could not bring postgres up" sends the reader looking at the
+# database instead of at the thing holding the port.
 ensure_running() {
-    docker compose up -d --wait "$COMPOSE_SERVICE" >/dev/null 2>&1 || die "could not bring ${COMPOSE_SERVICE} up"
+    local err
+    err="$(mktemp)"
+    if ! docker compose up -d --wait "$COMPOSE_SERVICE" >/dev/null 2>"$err"; then
+        log "$(cat "$err")"
+        rm -f "$err"
+        die "could not bring ${COMPOSE_SERVICE} up"
+    fi
+    rm -f "$err"
 }
 
 ensure_probe_db() {
