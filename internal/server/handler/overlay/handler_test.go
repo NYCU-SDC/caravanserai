@@ -77,11 +77,30 @@ func (f *fakeStore) DeleteNode(_ context.Context, _ string) error {
 
 func newTestServer(t *testing.T, hs headscale.Client, s NodeDeleter) *httptest.Server {
 	t.Helper()
+	return newTestServerWithKeys(t, hs, s, nil)
+}
+
+func newTestServerWithKeys(t *testing.T, hs headscale.Client, s NodeDeleter, keys PreAuthKeyCreator) *httptest.Server {
+	t.Helper()
 	pw := problem.NewWithMapping(serverhandler.NewProblemMapping())
-	h := NewHandler(zap.NewNop(), hs, s, "cara-node", pw)
+	h := NewHandler(zap.NewNop(), hs, s, keys, "cara-node", pw)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux, middleware.NewSet())
 	return httptest.NewServer(mux)
+}
+
+// fakeKeyStore records CreatePreAuthKey calls for assertions.
+type fakeKeyStore struct {
+	created   []*store.PreAuthKey
+	createErr error
+}
+
+func (f *fakeKeyStore) CreatePreAuthKey(_ context.Context, key *store.PreAuthKey) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
+	f.created = append(f.created, key)
+	return nil
 }
 
 func TestCreatePreAuthKey_HappyPath(t *testing.T) {
@@ -99,6 +118,45 @@ func TestCreatePreAuthKey_HappyPath(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	assert.Equal(t, "secret-123", out.Key)
 	assert.Equal(t, 1, hs.createCalls)
+}
+
+func TestCreatePreAuthKey_PersistsMapping(t *testing.T) {
+	hs := &fakeHeadscale{createKey: headscale.PreAuthKey{Key: "secret-123"}}
+	keys := &fakeKeyStore{}
+	srv := newTestServerWithKeys(t, hs, &fakeStore{}, keys)
+	defer srv.Close()
+
+	body, _ := json.Marshal(v1.CreatePreAuthKeyRequest{Node: "agent-a", TTL: "1h"})
+	resp, err := http.Post(srv.URL+"/api/v1/overlay/preauth-keys", "application/json", bytes.NewReader(body))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	require.Len(t, keys.created, 1)
+	got := keys.created[0]
+	assert.Equal(t, "agent-a", got.CaraNodeName)
+	assert.Equal(t, store.PreAuthKeyStateActive, got.State)
+	// Only the hash and a short prefix are persisted — never the raw key.
+	assert.NotEqual(t, "secret-123", got.KeyHash)
+	assert.NotEmpty(t, got.KeyHash)
+	assert.NotContains(t, got.KeyHash, "secret-123")
+	assert.LessOrEqual(t, len(got.KeyPrefix), 8)
+}
+
+func TestCreatePreAuthKey_NoNodeSkipsMapping(t *testing.T) {
+	hs := &fakeHeadscale{createKey: headscale.PreAuthKey{Key: "secret-123"}}
+	keys := &fakeKeyStore{}
+	srv := newTestServerWithKeys(t, hs, &fakeStore{}, keys)
+	defer srv.Close()
+
+	// No target node: the key is still issued but there is nothing to map.
+	body, _ := json.Marshal(v1.CreatePreAuthKeyRequest{TTL: "1h"})
+	resp, err := http.Post(srv.URL+"/api/v1/overlay/preauth-keys", "application/json", bytes.NewReader(body))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	assert.Empty(t, keys.created, "no node means no mapping row")
 }
 
 func TestCreatePreAuthKey_InvalidTTL(t *testing.T) {

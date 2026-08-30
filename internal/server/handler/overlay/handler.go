@@ -22,6 +22,7 @@ import (
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/headscale"
+	"NYCU-SDC/caravanserai/internal/overlay/keyref"
 	serverhandler "NYCU-SDC/caravanserai/internal/server/handler"
 	"NYCU-SDC/caravanserai/internal/store"
 
@@ -50,11 +51,18 @@ type NodeDeleter interface {
 	DeleteNode(ctx context.Context, name string) error
 }
 
+// PreAuthKeyCreator persists the pre-auth key -> Cara Node mapping recorded
+// when a key is issued (CARA-68).
+type PreAuthKeyCreator interface {
+	CreatePreAuthKey(ctx context.Context, key *store.PreAuthKey) error
+}
+
 // Handler implements apiserver.RouteRegistrar for overlay admin endpoints.
 type Handler struct {
 	logger        *zap.Logger
 	hs            headscale.Client
 	store         NodeDeleter
+	keys          PreAuthKeyCreator
 	user          string
 	tracer        trace.Tracer
 	problemWriter *problem.HttpWriter
@@ -63,11 +71,12 @@ type Handler struct {
 // NewHandler creates an overlay admin Handler. hs may be nil when the server
 // was started without Headscale admin credentials; in that case every endpoint
 // reports that overlay administration is not configured.
-func NewHandler(logger *zap.Logger, hs headscale.Client, s NodeDeleter, user string, pw *problem.HttpWriter) *Handler {
+func NewHandler(logger *zap.Logger, hs headscale.Client, s NodeDeleter, keys PreAuthKeyCreator, user string, pw *problem.HttpWriter) *Handler {
 	return &Handler{
 		logger:        logger,
 		hs:            hs,
 		store:         s,
+		keys:          keys,
 		user:          user,
 		tracer:        otel.Tracer("overlay/handler"),
 		problemWriter: pw,
@@ -125,7 +134,30 @@ func (h *Handler) createPreAuthKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger.Info("Issued Headscale pre-auth key", zap.String("node", req.Node), zap.String("user", h.user))
+	// Record the durable key -> Cara Node mapping (CARA-68) so the agent's
+	// first heartbeat can be bound to the intended node. Only the hash and a
+	// short prefix are stored; the full key is never persisted or logged. When
+	// no target node was given there is nothing to map, so the mapping is
+	// skipped and the key is still returned.
+	hash, prefix := keyref.Hash(key.Key)
+	if h.keys != nil && req.Node != "" {
+		if err := h.keys.CreatePreAuthKey(traceCtx, &store.PreAuthKey{
+			KeyHash:      hash,
+			KeyPrefix:    prefix,
+			CaraNodeName: req.Node,
+			Expiration:   key.Expiration,
+			State:        store.PreAuthKeyStateActive,
+		}); err != nil {
+			logger.Error("Persist pre-auth key mapping failed",
+				zap.String("node", req.Node), zap.String("key_prefix", prefix), zap.Error(err))
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("issued key but failed to persist its node mapping: %w", err), logger)
+			return
+		}
+	}
+
+	logger.Info("Issued Headscale pre-auth key",
+		zap.String("node", req.Node), zap.String("user", h.user), zap.String("key_prefix", prefix))
 	handlerutil.WriteJSONResponse(w, http.StatusCreated, v1.PreAuthKeyResponse{
 		Key:        key.Key,
 		Expiration: key.Expiration,

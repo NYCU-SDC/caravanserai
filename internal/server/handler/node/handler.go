@@ -38,6 +38,7 @@ type Handler struct {
 	logger        *zap.Logger
 	store         store.NodeStore
 	projectStore  ProjectLister
+	keys          PreAuthKeyValidator
 	dialer        agentdialer.Dialer
 	tracer        trace.Tracer
 	problemWriter *problem.HttpWriter
@@ -78,11 +79,20 @@ func setOverlayStatus(node *v1.Node, now time.Time) {
 		node.Status.Network.OverlayIP, node.Status.LastHeartbeat, now, overlayOfflineThreshold)
 }
 
-func NewHandler(logger *zap.Logger, s store.NodeStore, ps ProjectLister, dialer agentdialer.Dialer, pw *problem.HttpWriter) *Handler {
+// PreAuthKeyValidator binds a heartbeat's pre-auth key reference to the Cara
+// Node it was issued for (CARA-68). It may be nil, in which case heartbeat
+// identity binding is skipped entirely.
+type PreAuthKeyValidator interface {
+	GetPreAuthKeyByHash(ctx context.Context, keyHash string) (*store.PreAuthKey, error)
+	MarkPreAuthKeyUsed(ctx context.Context, keyHash, usedByIP string, usedAt time.Time) error
+}
+
+func NewHandler(logger *zap.Logger, s store.NodeStore, ps ProjectLister, keys PreAuthKeyValidator, dialer agentdialer.Dialer, pw *problem.HttpWriter) *Handler {
 	return &Handler{
 		logger:        logger,
 		store:         s,
 		projectStore:  ps,
+		keys:          keys,
 		dialer:        dialer,
 		tracer:        otel.Tracer("node/handler"),
 		problemWriter: pw,
@@ -298,6 +308,10 @@ type heartbeatRequest struct {
 	Network     v1.NodeNetworkStatus `json:"network,omitempty"`
 	Capacity    v1.ResourceList      `json:"capacity,omitempty"`
 	Allocatable v1.ResourceList      `json:"allocatable,omitempty"`
+	// KeyRef is the hex SHA-256 of the pre-auth key the agent joined with. When
+	// present, the server binds this heartbeat to the Cara Node the key was
+	// issued for (CARA-68). It is a hash, not the key itself.
+	KeyRef string `json:"keyRef,omitempty"`
 }
 
 func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
@@ -368,6 +382,13 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 		status.Allocatable = req.Allocatable
 	}
 
+	// Bind the heartbeat to the Cara Node its pre-auth key was issued for
+	// (CARA-68). Rejections here stop the status update so a mismatched or
+	// expired key cannot mutate a node it does not own.
+	if ok := h.validatePreAuthKey(traceCtx, w, logger, name, req.KeyRef, status.Network.OverlayIP); !ok {
+		return
+	}
+
 	if err := h.store.UpdateNodeStatus(traceCtx, name, status); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.problemWriter.WriteError(traceCtx, w,
@@ -381,4 +402,85 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 
 	logger.Debug("Heartbeat received", zap.String("node", name))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// validatePreAuthKey binds a heartbeat's pre-auth key reference to the intended
+// Cara Node. It returns true when the heartbeat may proceed and false when it
+// has already written a rejection to w.
+//
+// Policy (CARA-68), checked in this order:
+//   - No keyRef, or no validator wired: nothing to bind, proceed.
+//   - keyRef is unknown to the store: proceed without binding. Keys may be
+//     created out of band (operator/dev bootstrap, design §6.3); the wrong-node
+//     protection below is what this ticket guarantees.
+//   - keyRef maps to a different Cara Node: reject (a key issued for node A must
+//     not claim node B). This is the security property this ticket adds.
+//   - keyRef maps to this node and is already used: proceed (idempotent — agents
+//     resend the ref on every heartbeat). Expiry is not re-checked here: it only
+//     gates the initial join, so a joined node must not start failing once its
+//     key's TTL elapses.
+//   - keyRef maps to this node, still active, but expired: reject.
+//   - keyRef maps to this node and is still active: mark it used, recording the
+//     overlay IP that consumed it.
+//
+// The keyRef is a hash; only its short prefix is ever logged.
+func (h *Handler) validatePreAuthKey(ctx context.Context, w http.ResponseWriter, logger *zap.Logger, name, keyRef, overlayIP string) bool {
+	if keyRef == "" || h.keys == nil {
+		return true
+	}
+
+	refPrefix := keyRef
+	if len(refPrefix) > 8 {
+		refPrefix = refPrefix[:8]
+	}
+
+	mapping, err := h.keys.GetPreAuthKeyByHash(ctx, keyRef)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			logger.Debug("Heartbeat pre-auth key not mapped; skipping identity binding",
+				zap.String("node", name), zap.String("key_ref_prefix", refPrefix))
+			return true
+		}
+		logger.Error("GetPreAuthKeyByHash failed during heartbeat",
+			zap.String("node", name), zap.Error(err))
+		h.problemWriter.WriteError(ctx, w, err, logger)
+		return false
+	}
+
+	if mapping.CaraNodeName != name {
+		logger.Warn("Heartbeat pre-auth key claims wrong node",
+			zap.String("node", name), zap.String("key_ref_prefix", refPrefix))
+		h.problemWriter.WriteError(ctx, w,
+			handlerutil.NewValidationError("keyRef", refPrefix,
+				fmt.Sprintf("pre-auth key does not authorize node %q", name)), logger)
+		return false
+	}
+
+	// A key that has already been consumed proves the node joined legitimately;
+	// its heartbeats must keep flowing (agents resend the ref forever). Expiry
+	// only gates the initial join, so short-circuit here before the expiry check
+	// — otherwise a joined node's heartbeats start failing once its key's TTL
+	// elapses, marking a healthy node NotReady.
+	if mapping.State != store.PreAuthKeyStateActive {
+		return true
+	}
+
+	if !mapping.Expiration.IsZero() && !mapping.Expiration.After(time.Now()) {
+		logger.Warn("Heartbeat pre-auth key expired",
+			zap.String("node", name), zap.String("key_ref_prefix", refPrefix))
+		h.problemWriter.WriteError(ctx, w,
+			handlerutil.NewValidationError("keyRef", refPrefix, "pre-auth key has expired"), logger)
+		return false
+	}
+
+	if err := h.keys.MarkPreAuthKeyUsed(ctx, keyRef, overlayIP, time.Now().UTC()); err != nil {
+		logger.Error("MarkPreAuthKeyUsed failed during heartbeat",
+			zap.String("node", name), zap.Error(err))
+		h.problemWriter.WriteError(ctx, w, err, logger)
+		return false
+	}
+	logger.Info("Pre-auth key consumed",
+		zap.String("node", name), zap.String("key_ref_prefix", refPrefix), zap.String("overlay_ip", overlayIP))
+
+	return true
 }

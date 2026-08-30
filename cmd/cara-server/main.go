@@ -180,7 +180,7 @@ func main() {
 	})
 
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
-	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, agentDialer, problemWriter))
+	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, pgStore, agentDialer, problemWriter))
 	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter))
 	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
 
@@ -196,7 +196,7 @@ func main() {
 	if headscaleUser == "" {
 		headscaleUser = "cara-node"
 	}
-	apiSrv.Register(overlayhandler.NewHandler(logger, hsClient, pgStore, headscaleUser, problemWriter))
+	apiSrv.Register(overlayhandler.NewHandler(logger, hsClient, pgStore, pgStore, headscaleUser, problemWriter))
 
 	// ============================================
 	// Controller Manager

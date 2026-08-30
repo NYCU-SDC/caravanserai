@@ -370,6 +370,23 @@ the command reports the drift and exits non-zero — re-running it is safe and
 retries the store cleanup. When cara-server has no Headscale API credentials the
 `overlay` endpoints report that overlay administration is not configured.
 
+##### Node identity binding
+
+When `create-preauth-key --node <name>` issues a key, cara-server records a
+durable mapping between that key and the target Cara Node in a `preauth_keys`
+table. Only a SHA-256 hash of the key and a short prefix are stored; the raw key
+is never persisted or logged.
+
+On its first heartbeat the agent sends the same hash as `keyRef`. cara-server
+uses it to bind the reported overlay identity to the intended Node: a key issued
+for node A cannot be used to claim node B (such a heartbeat is rejected), and the
+key is marked `used` once consumed. This composes with overlay-IP reporting
+(CARA-53): CARA-53 records `status.network.overlayIP` from the heartbeat, while
+this mapping is what proves that IP was reported by the node the key authorised.
+Keys created out of band (e.g. operator bootstrap) are unknown to the table and
+are allowed through without binding — only wrong-node and expired keys are
+rejected.
+
 | Setting | Flag | Env / YAML | Notes |
 |---|---|---|---|
 | Control-plane URL | `--headscale-url` | `HEADSCALE_URL` / `headscale_url` | Enables overlay when set |

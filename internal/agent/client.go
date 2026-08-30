@@ -35,6 +35,11 @@ type Client struct {
 	// overlayIP is the Headscale-assigned overlay IP set after the agent
 	// joins the overlay network.  Empty when overlay networking is disabled.
 	overlayIP string
+
+	// keyRef is the hex SHA-256 of the pre-auth key this agent joined with.
+	// Sent on heartbeats so the server can bind this node to the key it was
+	// issued for (CARA-68).  Empty when overlay networking is disabled.
+	keyRef string
 }
 
 // NewClient creates a Client that will identify itself as nodeName and dial
@@ -60,6 +65,13 @@ func (c *Client) SetOverlayIP(ip string) {
 // string when overlay networking is disabled.
 func (c *Client) OverlayIP() string {
 	return c.overlayIP
+}
+
+// SetKeyRef records the pre-auth key reference (a hash, never the key itself)
+// the agent joined the overlay with, so heartbeats can carry it for server-side
+// identity binding (CARA-68).
+func (c *Client) SetKeyRef(ref string) {
+	c.keyRef = ref
 }
 
 // Register calls POST /api/v1/nodes to self-register the node.
@@ -118,6 +130,7 @@ type heartbeatRequest struct {
 	Network     v1.NodeNetworkStatus `json:"network,omitempty"`
 	Capacity    v1.ResourceList      `json:"capacity,omitempty"`
 	Allocatable v1.ResourceList      `json:"allocatable,omitempty"`
+	KeyRef      string               `json:"keyRef,omitempty"`
 }
 
 // Heartbeat calls POST /api/v1/nodes/{name}/heartbeat.
@@ -134,6 +147,7 @@ func (c *Client) Heartbeat(ctx context.Context, status v1.NodeStatus) error {
 		Network:     network,
 		Capacity:    status.Capacity,
 		Allocatable: status.Allocatable,
+		KeyRef:      c.keyRef,
 	}
 
 	body, err := json.Marshal(req)

@@ -111,7 +111,7 @@ func run(m *testing.M) int {
 
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
 	agentDialer := agentdialer.New(agentdialer.Config{Nodes: pgStore})
-	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, agentDialer, problemWriter))
+	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, pgStore, agentDialer, problemWriter))
 	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter))
 	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
 
