@@ -4,7 +4,7 @@
 #
 #   walg-verify.sh [--confirm-destroy]
 #
-# Four tests, because they exercise different code paths:
+# Five tests, because they exercise different code paths:
 #
 #   point-in-time   restores to a recorded instant beside the live database.
 #                   Uses restore_command, recovery_target_time and
@@ -18,6 +18,9 @@
 #                   and the writes after that point must be asserted ABSENT
 #                   rather than treated as a failure. This is the case that says
 #                   what the archive actually guarantees.
+#
+#   verify mode     proves the self-cleaning restore mode answers a query,
+#                   publishes no host port and removes its scratch resources.
 #
 #   bare disk       deletes the pgdata volume and restores onto nothing.
 #                   Uses only restore_command. Requires --confirm-destroy
@@ -685,6 +688,40 @@ test_upload_lost() {
     pass "restore reached the last archived WAL; the unarchived write is correctly absent"
 }
 
+# --- self-cleaning verify mode ----------------------------------------------
+#
+# The other side restores deliberately use inspect mode because the harness must
+# query their markers. This test covers verify's distinct contract: query inside
+# the scratch container, no host port and no resources left behind.
+
+test_verify_mode() {
+    log "=== self-cleaning verify mode ==="
+    ensure_running
+
+    local journal="/tmp/cara-verify-${RUN_ID}-mode.log"
+    if ! RESTORE_JOURNAL="$journal" \
+        "${SCRIPT_DIR}/walg-restore.sh" verify >/dev/null 2>&1; then
+        tail -5 "$journal" 2>/dev/null
+        die "verify mode failed; full journal at ${journal}"
+    fi
+
+    local container volume
+    container="$(awk '/^  container /{print $2}' "$journal")"
+    volume="$(awk '/^  scratch volume /{print $3}' "$journal")"
+    [ -n "$container" ] || die "verify journal did not record its scratch container"
+    [ -n "$volume" ] || die "verify journal did not record its scratch volume"
+    grep -E '^  published ports +none$' "$journal" >/dev/null \
+        || die "verify mode did not prove that no host port was published"
+    grep -E '^  verified +instance answers queries' "$journal" >/dev/null \
+        || die "verify mode did not record a successful query"
+    ! docker inspect "$container" >/dev/null 2>&1 \
+        || die "verify mode left scratch container ${container} behind"
+    ! docker volume inspect "$volume" >/dev/null 2>&1 \
+        || die "verify mode left scratch volume ${volume} behind"
+
+    pass "verify mode answered a query, exposed no port and removed scratch resources"
+}
+
 # --- bare disk -------------------------------------------------------------
 
 test_bare_disk() {
@@ -766,6 +803,10 @@ assert_post_restore_backup() {
     docker compose exec -T -u postgres "$COMPOSE_SERVICE" wal-g backup-list </dev/null 2>/dev/null \
         | grep -F "$name" >/dev/null \
         || die "the post-restore backup ${name} is not in backup-list"
+    grep -F 'retain=skipped' "$backup_log" >/dev/null \
+        || die "post-restore backup ${name} did not record retain=skipped"
+    ! grep -F 'retaining ' "$backup_log" >/dev/null \
+        || die "post-restore backup ${name} unexpectedly ran retention"
 
     pass "re-baselined on the new timeline: ${name} is in the archive"
 }
@@ -803,6 +844,7 @@ fi
 test_point_in_time
 test_upload_resumed
 test_upload_lost
+test_verify_mode
 
 if [ "$CONFIRM_DESTROY" = "yes" ]; then
     test_bare_disk

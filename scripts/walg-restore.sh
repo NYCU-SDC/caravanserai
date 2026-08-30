@@ -675,11 +675,21 @@ case "$MODE" in
         log "RTO ends here. Start cara-server once this database is confirmed healthy."
         ;;
     verify)
+        # Verify is intentionally unreachable from the host. Prove that before
+        # querying or cleaning up, while the container still exists to inspect.
+        bindings="$(docker inspect -f '{{json .HostConfig.PortBindings}}' "$RESTORE_CONTAINER")" \
+            || die "could not inspect verify-mode port bindings"
+        case "$bindings" in
+            '{}'|null) record "published ports" "none" ;;
+            *) die "verify mode unexpectedly published host ports: ${bindings}" ;;
+        esac
+
         # Reaching a non-recovery state proves the mechanism; answering a query
         # proves the data is usable rather than merely present.
         dbs="$(target_psql -tAc 'SELECT count(*) FROM pg_database' 2>/dev/null | tr -d '\r' || true)"
         [ -n "$dbs" ] || die "the restored instance did not answer a query"
         record "verified" "instance answers queries, ${dbs} databases"
+
         log "cleaning up"
         cleanup_scratch_resources \
             || die "verify succeeded but its scratch resources could not be removed"
