@@ -82,34 +82,46 @@ pg_exec wal-g --version >/dev/null 2>&1 \
 command -v jq >/dev/null \
     || die "jq is required to read the backup catalogue; install it (apt install jq)"
 
-# Prove the archive is readable before doing anything expensive. Without this,
-# an unreachable object store, wrong credentials or a missing bucket all look
-# identical to "there are no backups yet" further down.
-#
-# An empty archive is a legitimate state on the first ever run, and WAL-G may
-# report it either as success with no rows or as an error. Both are accepted;
-# anything else is fatal and reported with WAL-G's own message.
-if ! archive_err="$(pg_exec wal-g backup-list 2>&1 >/dev/null)"; then
-    case "$archive_err" in
-        *[Nn]o\ backups\ found*) : ;;
-        *) die "cannot read the archive: ${archive_err}" ;;
-    esac
-fi
+# Read once and preserve the distinction between a valid empty archive and a
+# transport, credential or format failure. The caller captures stdout, so
+# diagnostics stay on stderr.
+read_backup_catalogue() {
+    local catalogue err_file message
+    err_file="$(mktemp)"
+    if catalogue="$(pg_exec wal-g backup-list --detail --json 2>"$err_file")"; then
+        rm -f "$err_file"
+        printf '%s' "$catalogue"
+        return 0
+    fi
 
-# Reads the JSON rather than the table: the table's first column is only the
-# name by convention, and nothing warns if that layout moves. Reachability is
-# established above, so an empty result here is the empty-archive case and is
-# correct; '|| true' is scoped to jq alone so a genuinely unreadable catalogue
-# still fails rather than being reported as "no new backup appeared".
-list_backup_names() {
-    local catalogue
-    catalogue="$(pg_exec wal-g backup-list --detail --json 2>/dev/null)" || return 0
-    printf '%s' "$catalogue" | jq -r '.[].backup_name' 2>/dev/null | sort || true
+    message="$(cat "$err_file")"
+    rm -f "$err_file"
+    case "$message" in
+        *[Nn]o\ backups\ found*) printf '[]' ;;
+        *)
+            printf 'cannot read the archive: %s\n' "$message" >&2
+            return 1
+            ;;
+    esac
+}
+
+backup_names_from_catalogue() {
+    local catalogue="$1"
+    printf '%s' "$catalogue" \
+        | jq -r '
+            if type != "array" then error("catalogue is not an array")
+            else .[] | if (.backup_name | type) == "string" and (.backup_name | length) > 0
+                then .backup_name else error("record has no backup_name") end
+            end' \
+        | sort
 }
 
 # --- backup ----------------------------------------------------------------
 
-before="$(list_backup_names)"
+catalogue_before="$(read_backup_catalogue)" \
+    || die "could not read backup catalogue before backup-push"
+before="$(backup_names_from_catalogue "$catalogue_before")" \
+    || die "could not parse backup catalogue before backup-push"
 
 log "starting base backup of $PGDATA"
 
@@ -128,7 +140,10 @@ log "backup-push finished in ${elapsed_ms}ms"
 # Resolve the name by diffing the list rather than reading LATEST. LATEST is a
 # moving reference, and the point of recording a name is to know exactly which
 # object this run produced.
-after="$(list_backup_names)"
+catalogue_after="$(read_backup_catalogue)" \
+    || die "could not read backup catalogue after backup-push"
+after="$(backup_names_from_catalogue "$catalogue_after")" \
+    || die "could not parse backup catalogue after backup-push"
 created="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | tr -d '\r')"
 
 if [ -z "$created" ]; then
@@ -153,19 +168,26 @@ log "created backup ${created}"
 # installs — but selecting on the name rather than matching text means a record
 # that does not exist reads as absent instead of as a near-miss on some other
 # backup's fields.
-detail="$(pg_exec wal-g backup-list --detail --json 2>/dev/null \
-    | jq -c --arg n "$created" '.[] | select(.backup_name == $n)' 2>/dev/null || true)"
+#
+# Two different kinds of failure, so two different responses. Not finding the
+# record at all is fatal: it means the catalogue this run just read does not
+# contain the backup this run just created, and nothing after that can be
+# trusted. Missing size fields are not — the backup exists and is restorable,
+# and the sizes are telemetry. Failing here would leave a valid backup behind
+# an exit code, skip retention entirely (it runs below), and turn one renamed
+# WAL-G field into an archive that grows without bound.
+detail="$(printf '%s' "$catalogue_after" \
+    | jq -ce --arg n "$created" '
+        map(select(.backup_name == $n))
+        | if length == 1 then .[0] else error("expected exactly one detail record") end')" \
+    || die "backup ${created} exists but its detail record could not be resolved"
+log "detail: ${detail}"
 
-if [ -n "$detail" ]; then
-    log "detail: ${detail}"
-    compressed="$(printf '%s' "$detail"   | jq -r '.compressed_size   // empty')"
-    uncompressed="$(printf '%s' "$detail" | jq -r '.uncompressed_size // empty')"
-else
-    # Not fatal — the backup itself succeeded — but the sizes are one of this
-    # ticket's deliverables, so losing them silently is not acceptable either.
-    log "WARNING: could not read the backup's detail record; sizes not captured"
-    compressed=""
-    uncompressed=""
+compressed="$(printf '%s' "$detail" | jq -r '.compressed_size   // empty')"
+uncompressed="$(printf '%s' "$detail" | jq -r '.uncompressed_size // empty')"
+if [ -z "$compressed" ] || [ -z "$uncompressed" ]; then
+    log "WARNING: backup ${created} succeeded but its size fields could not be read;" \
+        "WAL-G's detail format may have changed"
 fi
 
 # --- retention -------------------------------------------------------------
