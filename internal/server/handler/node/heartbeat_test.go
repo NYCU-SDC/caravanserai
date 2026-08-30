@@ -183,6 +183,26 @@ func TestHeartbeat_KeyRef_AlreadyUsedSameNode_Idempotent(t *testing.T) {
 	assert.Equal(t, 0, keys.markCalls, "an already-used key is not marked again")
 }
 
+func TestHeartbeat_KeyRef_UsedAndExpiredSameNode_Allowed(t *testing.T) {
+	// A key that was already consumed proves the node joined legitimately.
+	// Expiry only gates the initial join, so once the key is used its TTL
+	// elapsing must not start failing the node's heartbeats.
+	ns := &hbNodeStore{node: existingNode("agent-a")}
+	keys := &fakeKeyValidator{mapping: &store.PreAuthKey{
+		KeyHash: "hash-a", CaraNodeName: "agent-a", State: store.PreAuthKeyStateUsed,
+		Expiration: time.Now().Add(-1 * time.Hour),
+	}}
+	srv := newHeartbeatServer(t, ns, keys)
+	defer srv.Close()
+
+	resp := postHeartbeat(t, srv.URL, "agent-a", "hash-a", "100.64.0.5")
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	assert.True(t, ns.updated, "a joined node's heartbeats must not fail after its key expires")
+	assert.Equal(t, 0, keys.markCalls, "an already-used key is not marked again")
+}
+
 func TestHeartbeat_NoKeyRef_SkipsValidation(t *testing.T) {
 	ns := &hbNodeStore{node: existingNode("agent-a")}
 	keys := &fakeKeyValidator{mapping: &store.PreAuthKey{CaraNodeName: "other"}}
