@@ -41,19 +41,19 @@
 # Each run pushes one base backup per test into whatever archive the stack is
 # pointed at, and each of those triggers retention. With WALG_RETAIN_FULL at its
 # default of 7, two verification runs are enough to evict every real daily
-# backup and, with them, the WAL those backups depended on. That is harmless against a dev
-# archive and destructive against a real one, so the run refuses to start unless
-# the object store is a local one — see assert_development_stack below.
+# backup and, with them, the WAL those backups depended on. That is harmless
+# against a dev archive and destructive against a real one, so the run refuses to
+# start unless the archive proves it is the disposable development one — see
+# assert_declared_development_stack and assert_runtime_development_stack below.
+# A service named "minio" is not an identity, so the endpoint alone is not
+# enough; role, endpoint and prefix must all agree, on both the rendered config
+# and the running container.
 #
 #   COMPOSE_SERVICE   compose service running Postgres   (default: postgres)
 #   OBJECT_STORE_SERVICE
 #                     compose service backing the archive  (default: minio)
 #   LOCK_FILE         maintenance lock, shared with the backup and restore
 #                     scripts (default: /tmp/cara-control-plane-maintenance.lock)
-#   WALG_VERIFY_ALLOW_NON_DEV_ARCHIVE=yes
-#                     run anyway against a non-local object store. A break-glass
-#                     override for a person at a terminal — never for a
-#                     scheduled job.
 
 set -euo pipefail
 
@@ -64,6 +64,9 @@ cd "$REPO_ROOT"
 COMPOSE_SERVICE="${COMPOSE_SERVICE:-postgres}"
 OBJECT_STORE_SERVICE="${OBJECT_STORE_SERVICE:-minio}"
 LOCK_FILE="${LOCK_FILE:-/tmp/cara-control-plane-maintenance.lock}"
+DEV_ARCHIVE_ROLE="development"
+DEV_ARCHIVE_ENDPOINT="http://minio:9000"
+DEV_ARCHIVE_PREFIX="s3://cara-backups/cara/v1/control-plane/walg"
 PROD_PGDATA="/var/lib/postgresql/data"
 PROBE_DB="walg_verify"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -175,67 +178,165 @@ ensure_probe_db() {
                    at timestamptz not null default now())" >/dev/null
 }
 
-# --confirm-destroy says "I understand this deletes something". It does not say
-# which machine's database, and a script that lives in the repo will eventually
-# be run by someone who has not read the header. This answers the other half of
-# the question by looking at where the archive actually is.
-#
-# It gates the whole run rather than only the destructive test: the
-# point-in-time half is non-destructive to the database but still pushes a base
-# backup and applies retention, which against a real archive is the slower way
-# to lose the same thing.
-#
-# The endpoint is the discriminator because it is the one setting that has to
-# differ between the dev stack and anything real. An unset value means plain AWS
-# S3, which is emphatically not a development stack, so the catch-all is correct
-# for it.
-#
-# Answered without requiring anything to be running. A stopped host has to be
-# able to reach the refusal without this script starting its Compose stack
-# first: bringing production Postgres up as a side effect of a check that is
-# about to say no is precisely the surprise the check exists to prevent.
-#
-# A running container wins when there is one — it is authoritative for the
-# environment actually in use, which a compose file edited since startup is not.
-resolve_archive_endpoint() {
-    if docker compose ps --status running --services 2>/dev/null \
-        | grep -Fx "$COMPOSE_SERVICE" >/dev/null; then
-        docker compose exec -T "$COMPOSE_SERVICE" printenv AWS_ENDPOINT </dev/null 2>/dev/null \
-            | tr -d '\r' || true
-        return 0
-    fi
-    # Rendered as JSON and read with jq. Reading the YAML by hand needed a
-    # careful split, because the value carries its own colons ('http://',
-    # ':9000') and a naive field split returns 'http' — which it did, once.
+# Endpoint names are not identities: any Compose stack can call its service
+# "minio". Verification therefore requires the declared configuration and the
+# environment of the running Postgres container to agree on three independent
+# values. There is deliberately no production override in this destructive
+# harness.
+compose_env() {
+    local key="$1"
     docker compose config --format json 2>/dev/null \
-        | jq -r --arg svc "$COMPOSE_SERVICE" \
-            '.services[$svc].environment.AWS_ENDPOINT // empty' 2>/dev/null || true
+        | jq -er --arg svc "$COMPOSE_SERVICE" --arg key "$key" \
+            '.services[$svc].environment[$key] // empty'
 }
 
-assert_development_stack() {
-    local endpoint
-    endpoint="$(resolve_archive_endpoint)"
+runtime_env() {
+    docker compose exec -T "$COMPOSE_SERVICE" printenv "$1" </dev/null 2>/dev/null \
+        | tr -d '\r'
+}
 
-    case "$endpoint" in
-        http://minio:9000|http://localhost:*|http://127.0.0.1:*)
-            log "object store is ${endpoint} — development stack"
-            return 0
-            ;;
-    esac
+assert_archive_identity_values() {
+    local source="$1" role="$2" endpoint="$3" prefix="$4"
+    [ "$role" = "$DEV_ARCHIVE_ROLE" ] \
+        || die "${source} CARA_ARCHIVE_ROLE is '${role:-<unset>}', expected ${DEV_ARCHIVE_ROLE}"
+    [ "$endpoint" = "$DEV_ARCHIVE_ENDPOINT" ] \
+        || die "${source} AWS_ENDPOINT is '${endpoint:-<unset>}', expected ${DEV_ARCHIVE_ENDPOINT}"
+    [ "$prefix" = "$DEV_ARCHIVE_PREFIX" ] \
+        || die "${source} WALG_S3_PREFIX is '${prefix:-<unset>}', expected ${DEV_ARCHIVE_PREFIX}"
+}
 
-    if [ "${WALG_VERIFY_ALLOW_NON_DEV_ARCHIVE:-no}" = "yes" ]; then
-        log "WARNING: object store is ${endpoint:-<unset>}, not a development stack"
-        log "WARNING: continuing because WALG_VERIFY_ALLOW_NON_DEV_ARCHIVE=yes"
-        log "WARNING: this run pushes base backups into that archive and applies retention"
-        [ "$CONFIRM_DESTROY" = "yes" ] \
-            && log "WARNING: and --confirm-destroy will delete this machine's database"
+assert_declared_development_stack() {
+    command -v jq >/dev/null \
+        || die "jq is required to validate the development archive identity"
+
+    local role endpoint prefix
+    role="$(compose_env CARA_ARCHIVE_ROLE)" \
+        || die "could not read CARA_ARCHIVE_ROLE from the rendered Compose service '${COMPOSE_SERVICE}'"
+    endpoint="$(compose_env AWS_ENDPOINT)" \
+        || die "could not read AWS_ENDPOINT from the rendered Compose service '${COMPOSE_SERVICE}'"
+    prefix="$(compose_env WALG_S3_PREFIX)" \
+        || die "could not read WALG_S3_PREFIX from the rendered Compose service '${COMPOSE_SERVICE}'"
+    assert_archive_identity_values "declared" "$role" "$endpoint" "$prefix"
+    log "declared archive identity is the disposable development archive"
+}
+
+assert_runtime_development_stack() {
+    local role endpoint prefix
+    role="$(runtime_env CARA_ARCHIVE_ROLE)" \
+        || die "running ${COMPOSE_SERVICE} has no CARA_ARCHIVE_ROLE"
+    endpoint="$(runtime_env AWS_ENDPOINT)" \
+        || die "running ${COMPOSE_SERVICE} has no AWS_ENDPOINT"
+    prefix="$(runtime_env WALG_S3_PREFIX)" \
+        || die "running ${COMPOSE_SERVICE} has no WALG_S3_PREFIX"
+    assert_archive_identity_values "running container" "$role" "$endpoint" "$prefix"
+    log "running archive identity: endpoint=${DEV_ARCHIVE_ENDPOINT} prefix=${DEV_ARCHIVE_PREFIX}"
+}
+
+# A correct dev role and endpoint can still be pointed at another cluster's
+# prefix by copy/paste. If the archive already has backups, compare their
+# PostgreSQL system identifier with the live cluster before adding or pruning
+# anything. WAL-G emits the identifier as a JSON number; normalize both sides
+# through jq so the comparison uses the same numeric representation.
+assert_archive_cluster_identity() {
+    local local_id local_normalized archive_json archive_err archive_ids id count
+    local_id="$(pg -tAc 'SELECT system_identifier FROM pg_control_system()' | tr -d '\r')" \
+        || die "could not read the local PostgreSQL system identifier"
+    [ -n "$local_id" ] || die "local PostgreSQL returned an empty system identifier"
+    local_normalized="$(jq -nr --arg id "$local_id" '$id | tonumber | tostring')" \
+        || die "could not normalize local system identifier ${local_id}"
+
+    archive_err="$(mktemp)"
+    if ! archive_json="$(docker compose exec -T -u postgres "$COMPOSE_SERVICE" \
+        wal-g backup-list --detail --json </dev/null 2>"$archive_err")"; then
+        local message
+        message="$(cat "$archive_err")"
+        rm -f "$archive_err"
+        case "$message" in
+            *[Nn]o\ backups\ found*)
+                log "archive has no base backups yet; cluster identity will be established by this run"
+                return 0
+                ;;
+            *) die "cannot read archive identity: ${message}" ;;
+        esac
+    fi
+    rm -f "$archive_err"
+
+    printf '%s' "$archive_json" | jq -e 'type == "array"' >/dev/null \
+        || die "backup-list did not return a JSON array"
+    count="$(printf '%s' "$archive_json" | jq -r 'length')"
+    [ "$count" -gt 0 ] || {
+        log "archive has no base backups yet; cluster identity will be established by this run"
         return 0
+    }
+
+    archive_ids="$(printf '%s' "$archive_json" \
+        | jq -r 'if any(.[]; .system_identifier == null) then error("missing system_identifier") else .[].system_identifier | tostring end')" \
+        || die "could not read system_identifier from every archived backup"
+    # Reachable during ordinary development: the compose header suggests deleting
+    # only the pgdata volume to exercise a restore, and letting Postgres start
+    # after that runs initdb and mints a new identifier while the archive still
+    # holds the old cluster's backups. The message has to say how to get out of
+    # that state, because from here the guard refuses every run.
+    while IFS= read -r id; do
+        [ "$id" = "$local_normalized" ] && continue
+        log "ERROR: this cluster and the archive are not the same database."
+        log "       A cluster that was initialised fresh over an existing archive"
+        log "       looks exactly like this."
+        log "       Either restore this cluster from the archive:"
+        log "         ./scripts/walg-restore.sh takeover --confirm-destroy"
+        log "       or discard the archive and start over:"
+        log "         docker compose down && docker volume rm \$(docker compose config --format json | jq -r '.name')_minio-data"
+        die "archive belongs to system_identifier ${id}, local cluster is ${local_normalized}"
+    done <<<"$archive_ids"
+    log "archive and local PostgreSQL share system_identifier ${local_id}"
+}
+
+TARGET_CONTAINER=""
+TARGET_VOLUME=""
+
+assert_destructive_target() {
+    local -a containers=()
+    local service_label project_label expected_volume_key mount mount_type volume
+    local volume_project volume_key
+
+    mapfile -t containers < <(docker compose ps -q "$COMPOSE_SERVICE")
+    [ "${#containers[@]}" -eq 1 ] \
+        || die "expected exactly one running ${COMPOSE_SERVICE} container, found ${#containers[@]}"
+    TARGET_CONTAINER="${containers[0]}"
+
+    service_label="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$TARGET_CONTAINER")"
+    project_label="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$TARGET_CONTAINER")"
+    [ "$service_label" = "$COMPOSE_SERVICE" ] \
+        || die "target container is Compose service '${service_label:-<none>}', expected ${COMPOSE_SERVICE}"
+    [ -n "$project_label" ] || die "target container has no Compose project label"
+
+    expected_volume_key="$(docker compose config --format json \
+        | jq -er --arg svc "$COMPOSE_SERVICE" --arg target "$PROD_PGDATA" \
+            '.services[$svc].volumes[] | select(.target == $target and .type == "volume") | .source')" \
+        || die "Compose service ${COMPOSE_SERVICE} has no named volume at ${PROD_PGDATA}"
+
+    mount="$(docker inspect -f "{{range .Mounts}}{{if eq .Destination \"${PROD_PGDATA}\"}}{{.Type}}|{{.Name}}{{end}}{{end}}" "$TARGET_CONTAINER")"
+    IFS='|' read -r mount_type volume <<<"$mount"
+    [ "$mount_type" = "volume" ] && [ -n "$volume" ] \
+        || die "${PROD_PGDATA} is not backed by a named Docker volume; refusing destructive verification"
+
+    volume_project="$(docker volume inspect -f '{{ index .Labels "com.docker.compose.project" }}' "$volume")"
+    volume_key="$(docker volume inspect -f '{{ index .Labels "com.docker.compose.volume" }}' "$volume")"
+    [ "$volume_project" = "$project_label" ] \
+        || die "volume ${volume} belongs to Compose project '${volume_project:-<none>}', expected ${project_label}"
+    [ "$volume_key" = "$expected_volume_key" ] \
+        || die "volume ${volume} has Compose key '${volume_key:-<none>}', expected ${expected_volume_key}"
+
+    if docker compose ps --status running --services 2>/dev/null | grep -qx 'cara-server'; then
+        die "cara-server Compose service is running; stop it before destructive verification"
+    fi
+    if pgrep -x cara-server >/dev/null 2>&1; then
+        die "a host cara-server process is running; stop it before destructive verification"
     fi
 
-    log "ERROR: the object store is ${endpoint:-<unset>}, not the development MinIO."
-    log "       This run pushes base backups into it and applies retention;"
-    log "       with --confirm-destroy it also deletes this machine's database."
-    die "refusing to run against a non-development archive (override: WALG_VERIFY_ALLOW_NON_DEV_ARCHIVE=yes)"
+    TARGET_VOLUME="$volume"
+    log "destructive target: project=${project_label} service=${service_label}"
+    log "destructive target: container=${TARGET_CONTAINER} volume=${TARGET_VOLUME} pgdata=${PROD_PGDATA}"
 }
 
 drop_probe_db() {
@@ -592,6 +693,7 @@ test_bare_disk() {
     TEST_RUN="${RUN_ID}-baredisk"
     ensure_running
     ensure_probe_db
+    assert_destructive_target
 
     write_marker A
     log "taking a base backup"
@@ -599,32 +701,24 @@ test_bare_disk() {
     write_marker B
     seal_and_wait_for_archive
 
-    # Read the volume's real name from the running container rather than
-    # guessing at the compose project prefix.
-    local volume
-    volume="$(docker compose ps -q "$COMPOSE_SERVICE" | xargs -r docker inspect \
-        -f "{{range .Mounts}}{{if eq .Destination \"${PROD_PGDATA}\"}}{{.Name}}{{end}}{{end}}")"
-    [ -n "$volume" ] || die "could not determine the volume backing ${PROD_PGDATA}"
-    log "data volume is ${volume}"
+    # Re-resolve immediately before deletion. A container replaced while the
+    # earlier tests were running must not inherit this confirmation.
+    assert_destructive_target
+    log "stopping and removing the verified container, then deleting its volume"
 
-    # The container has to go before the volume can: Docker refuses to remove a
-    # volume that a container still references, even a stopped one. Never
-    # 'compose down -v' — that takes the MinIO volume and the backups with it.
-    log "stopping and removing the container, then deleting the volume"
-    # Before the first destructive command, not after. From here until the
-    # restore returns there is no Postgres and no data volume, and every exit
-    # path in between — a failed restore, a failed assertion, Ctrl-C — has to
-    # leave a working stack behind. What comes back is an empty cluster, which
-    # is the correct outcome: the volume this test deleted is gone either way,
-    # and a developer is better served by a stack that starts than by one that
-    # silently stays down.
-    RESTART_STACK_ON_EXIT="yes"
-    docker compose stop "$COMPOSE_SERVICE" >/dev/null 2>&1 || true
-    docker compose rm -f "$COMPOSE_SERVICE" >/dev/null 2>&1 || true
-    docker volume rm "$volume" >/dev/null || die "could not delete ${volume}"
+    # Once PGDATA is gone, starting the Compose service would initialize a new
+    # cluster with a different system_identifier and archive into the old prefix.
+    # Keep Postgres down on every failure path until takeover succeeds.
+    POSTGRES_MUST_STAY_DOWN="yes"
+    docker stop "$TARGET_CONTAINER" >/dev/null \
+        || die "could not stop verified container ${TARGET_CONTAINER}"
+    docker rm -f "$TARGET_CONTAINER" >/dev/null \
+        || die "could not remove verified container ${TARGET_CONTAINER}"
+    docker volume rm "$TARGET_VOLUME" >/dev/null \
+        || die "could not delete verified volume ${TARGET_VOLUME}"
 
-    docker volume inspect "$volume" >/dev/null 2>&1 \
-        && die "${volume} still exists; the test would have read local data"
+    docker volume inspect "$TARGET_VOLUME" >/dev/null 2>&1 \
+        && die "${TARGET_VOLUME} still exists; the test would have read local data"
     log "volume is gone — anything restored now came from the archive"
 
     local journal="/tmp/cara-verify-${RUN_ID}-baredisk.log"
@@ -693,9 +787,18 @@ exec 9>"$LOCK_FILE"
 flock -n 9 || die "another backup or restore holds ${LOCK_FILE}; wait for it to finish"
 export CARA_MAINTENANCE_LOCK_HELD=1
 
-# Before the stack is started, not after: see resolve_archive_endpoint.
-assert_development_stack
+# Refuse from the rendered config before starting anything, then verify the
+# running container because it is the environment WAL-G actually uses.
+assert_declared_development_stack
 ensure_running
+assert_runtime_development_stack
+assert_archive_cluster_identity
+
+if [ "$CONFIRM_DESTROY" = "yes" ]; then
+    # Validate the target before any test pushes backups or applies retention.
+    # test_bare_disk resolves it again immediately before deletion.
+    assert_destructive_target
+fi
 
 test_point_in_time
 test_upload_resumed
