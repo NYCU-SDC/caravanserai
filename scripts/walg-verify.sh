@@ -4,7 +4,8 @@
 #
 #   walg-verify.sh [--confirm-destroy]
 #
-# Five tests, because they exercise different code paths:
+# Two groups. The restore tests prove the data comes back; the guard tests prove
+# the refusals, which is the half that only matters when something is wrong.
 #
 #   point-in-time   restores to a recorded instant beside the live database.
 #                   Uses restore_command, recovery_target_time and
@@ -26,9 +27,29 @@
 #                   Uses only restore_command. Requires --confirm-destroy
 #                   because it destroys the local database to do its job.
 #
-# The first three are non-destructive to the database and always run; two of
-# them do interrupt the object store and one briefly stops Postgres, so none of
-# them belongs anywhere near a live service.
+# The guards, each running a real script in a subprocess and asserting both the
+# refusal and that nothing moved before it:
+#
+#   wrong service   COMPOSE_SERVICE pointed at another service in this stack.
+#   wrong archive   a correct role and endpoint over a foreign prefix.
+#   lock held       a second backup while this run holds the maintenance lock.
+#   cleanup failure a cleanup step reports failure; the steps after it must
+#                   still run, and the original exit code must survive.
+#   no confirmation takeover over a populated PGDATA without --confirm-destroy.
+#                   Refused, and refused before the directory is cleared.
+#
+# And one more restore test, gated on --confirm-destroy because it clears the
+# live data directory:
+#
+#   replacement     takeover over a populated PGDATA with confirmation. The
+#                   counterpart to bare disk: that one deletes the volume so
+#                   anything returning proves the archive was read, this one
+#                   leaves the files in place and proves they are cleared rather
+#                   than restored on top of.
+#
+# Everything except bare disk and replacement is non-destructive to the database and always
+# runs; two of the restore tests interrupt the object store and one briefly
+# stops Postgres, so none of this belongs anywhere near a live service.
 #
 # The bare-disk test is the one that matters most and the one easiest to fake.
 # docker-compose.yaml keeps Postgres data in a named volume, so removing the
@@ -722,6 +743,290 @@ test_verify_mode() {
     pass "verify mode answered a query, exposed no port and removed scratch resources"
 }
 
+# --- guards ------------------------------------------------------------------
+#
+# These prove the refusals rather than the happy path. A guard that refuses only
+# after deleting the volume is not a guard, so each test asserts two things: the
+# run failed, and the Docker state it was pointed at is unchanged.
+#
+# The scripts under test run as subprocesses with their own LOCK_FILE. The lock
+# is a separate concern with its own test below, and letting these inherit the
+# real one would have them refused by the lock before reaching the check being
+# tested — a pass for the wrong reason.
+
+# Captures combined output and returns 0 only when the command failed. The
+# command substitution sits inside 'if', which errexit exempts, so an expected
+# non-zero exit never aborts this script.
+run_expecting_failure() {
+    local __out="$1"; shift
+    local captured
+    if captured="$("$@" 2>&1)"; then
+        printf -v "$__out" '%s' "$captured"
+        return 1
+    fi
+    printf -v "$__out" '%s' "$captured"
+    return 0
+}
+
+# Enough of the Docker state to notice a container or volume being removed,
+# recreated or added. Compared as a whole rather than field by field, because
+# what matters is that nothing moved at all.
+docker_state_fingerprint() {
+    printf '%s|%s' \
+        "$(docker compose ps -q "$COMPOSE_SERVICE" 2>/dev/null | tr '\n' ',')" \
+        "$(docker volume ls -q 2>/dev/null | sort | tr '\n' ',')"
+}
+
+test_guard_wrong_compose_service() {
+    log "=== guard: wrong COMPOSE_SERVICE ==="
+    ensure_running
+
+    local before after output
+    before="$(docker_state_fingerprint)"
+
+    # minio is a real service in this stack, so this is the plausible typo: a
+    # name that resolves rather than one that fails to.
+    run_expecting_failure output env \
+        COMPOSE_SERVICE="$OBJECT_STORE_SERVICE" \
+        LOCK_FILE="/tmp/cara-verify-guard-$$.lock" \
+        "${SCRIPT_DIR}/walg-verify.sh" --confirm-destroy \
+        || die "pointing COMPOSE_SERVICE at ${OBJECT_STORE_SERVICE} was accepted"
+
+    case "$output" in
+        *CARA_ARCHIVE_ROLE*) : ;;
+        *) die "refused for the wrong reason: ${output}" ;;
+    esac
+
+    after="$(docker_state_fingerprint)"
+    [ "$before" = "$after" ] \
+        || die "the refused run changed Docker state"
+
+    pass "a wrong COMPOSE_SERVICE is refused before anything is stopped or removed"
+}
+
+test_guard_wrong_archive_identity() {
+    log "=== guard: wrong archive identity ==="
+    ensure_running
+
+    local before after output override
+    before="$(docker_state_fingerprint)"
+
+    # A correct role and endpoint pointed at another cluster's prefix — the
+    # copy/paste this check exists for. Only the declared config is perturbed;
+    # the refusal happens before anything is started, so no container ever sees
+    # this value.
+    override="$(mktemp --suffix=.yaml)"
+    cat >"$override" <<YAML
+services:
+  ${COMPOSE_SERVICE}:
+    environment:
+      WALG_S3_PREFIX: s3://cara-backups/cara/v1/some-other-cluster/walg
+YAML
+
+    run_expecting_failure output env \
+        COMPOSE_FILE="docker-compose.yaml:${override}" \
+        LOCK_FILE="/tmp/cara-verify-guard-$$.lock" \
+        "${SCRIPT_DIR}/walg-verify.sh" --confirm-destroy \
+        || { rm -f "$override"; die "a foreign WALG_S3_PREFIX was accepted"; }
+    rm -f "$override"
+
+    case "$output" in
+        *WALG_S3_PREFIX*) : ;;
+        *) die "refused for the wrong reason: ${output}" ;;
+    esac
+
+    after="$(docker_state_fingerprint)"
+    [ "$before" = "$after" ] \
+        || die "the refused run changed Docker state"
+
+    pass "a foreign archive prefix is refused before any backup or retention"
+}
+
+test_guard_maintenance_lock() {
+    log "=== guard: concurrent maintenance lock ==="
+    ensure_running
+
+    local output
+    # This run already holds the lock and hands children an opt-out through the
+    # environment. Removing that opt-out makes the child take the lock for real,
+    # which is what an unrelated cron backup would do.
+    run_expecting_failure output env --unset=CARA_MAINTENANCE_LOCK_HELD \
+        "${SCRIPT_DIR}/walg-backup.sh" \
+        || die "a second backup was allowed while the maintenance lock was held"
+
+    case "$output" in
+        *"${LOCK_FILE}"*) : ;;
+        *) die "refused for the wrong reason: ${output}" ;;
+    esac
+
+    # The holder has to be unharmed: a lock that survives by killing the process
+    # that owns it is worse than no lock.
+    pg -tAc 'SELECT 1' >/dev/null \
+        || die "the database is not reachable after the refused backup"
+
+    pass "a concurrent backup is refused and the lock holder is unaffected"
+}
+
+test_guard_cleanup_failure() {
+    log "=== guard: a failing cleanup step does not skip the rest ==="
+    ensure_running
+
+    local stub output volume real_docker
+    # Resolved here rather than hardcoded: Docker Desktop and snap installs put
+    # the binary somewhere other than /usr/bin, and a stub that shadows docker
+    # with a broken passthrough would fail every call rather than the one.
+    real_docker="$(command -v docker)" \
+        || die "docker is not on PATH"
+
+    stub="$(mktemp -d)"
+    # Reports a failure for the container removal while still performing it.
+    # Leaving the container in place would block the volume removal for a real
+    # reason, and the property under test is specifically that step two runs
+    # after step one reported failure — not that Docker refuses a busy volume.
+    cat >"${stub}/docker" <<STUB
+#!/bin/sh
+if [ "\$1" = "rm" ]; then
+    "${real_docker}" "\$@"
+    echo "injected cleanup failure" >&2
+    exit 1
+fi
+exec "${real_docker}" "\$@"
+STUB
+    chmod +x "${stub}/docker"
+
+    local journal="/tmp/cara-verify-${RUN_ID}-cleanupfail.log"
+    run_expecting_failure output env \
+        PATH="${stub}:${PATH}" \
+        RESTORE_JOURNAL="$journal" \
+        "${SCRIPT_DIR}/walg-restore.sh" verify \
+        || { rm -rf "$stub"; die "the injected cleanup failure was not reported"; }
+    rm -rf "$stub"
+
+    volume="$(awk '/^  scratch volume /{print $3}' "$journal")"
+    [ -n "$volume" ] || die "the failed run did not record its scratch volume"
+
+    # The assertion: the container removal reported failure, and the volume
+    # removal after it still ran.
+    ! docker volume inspect "$volume" >/dev/null 2>&1 \
+        || die "scratch volume ${volume} survived; cleanup stopped at the first failure"
+
+    pass "cleanup continued past a failing step and still reported the failure"
+}
+
+test_guard_takeover_needs_confirmation() {
+    log "=== guard: takeover over an existing cluster without confirmation ==="
+    TEST_RUN="${RUN_ID}-noconfirm"
+    ensure_running
+    ensure_probe_db
+    write_marker A
+
+    local journal="/tmp/cara-verify-${RUN_ID}-noconfirm.log"
+    local output found
+
+    # takeover refuses outright while the service is running, and that refusal
+    # would mask the one being tested. Stopping first puts the run at the check
+    # that actually matters: PGDATA is populated and no confirmation was given.
+    RESTART_POSTGRES_ON_EXIT="yes"
+    docker compose stop "$COMPOSE_SERVICE" >/dev/null 2>&1 \
+        || die "could not stop ${COMPOSE_SERVICE}"
+
+    run_expecting_failure output env RESTORE_JOURNAL="$journal" \
+        "${SCRIPT_DIR}/walg-restore.sh" takeover \
+        || die "takeover over a populated PGDATA was accepted without --confirm-destroy"
+
+    case "$output" in
+        *--confirm-destroy*) : ;;
+        *) die "refused for the wrong reason: ${output}" ;;
+    esac
+
+    # The refusal has to come before the clearing, not after. The journal is
+    # where the run records what it did, so absence of the clearing line is the
+    # evidence — an exit code alone cannot distinguish "refused" from "refused
+    # after wiping the directory".
+    ! grep -F 'clearing ' "$journal" >/dev/null 2>&1 \
+        || die "the refused run cleared PGDATA before refusing"
+    ! grep -E '^  destroyed +yes' "$journal" >/dev/null 2>&1 \
+        || die "the refused run recorded a destroyed cluster"
+
+    ensure_running
+    RESTART_POSTGRES_ON_EXIT="no"
+
+    found="$(markers_from docker compose exec -T -u postgres "$COMPOSE_SERVICE" psql -U postgres)"
+    [ "$found" = "A" ] \
+        || die "the existing cluster did not survive the refusal; expected marker A, got '${found:-<none>}'"
+
+    pass "takeover over a populated PGDATA is refused and leaves the cluster intact"
+}
+
+# --- takeover over an existing cluster ---------------------------------------
+#
+# Distinct from the bare-disk test. That one deletes the volume, so anything
+# that comes back proves the archive was read. This one leaves a populated
+# PGDATA in place and proves the opposite half: the script clears what is there
+# before restoring, rather than layering a restore on top of another
+# generation's files.
+
+test_takeover_replaces_existing_cluster() {
+    log "=== takeover replaces an existing cluster ==="
+    TEST_RUN="${RUN_ID}-replace"
+    ensure_running
+    ensure_probe_db
+    assert_destructive_target
+
+    # Recorded before the replacement. Restoring and promoting always branches
+    # onto a new timeline, so this is the assertion that separates "cleared and
+    # rebuilt from the archive" from "left the existing files in place" — the
+    # markers alone cannot, because they are present either way.
+    #
+    # An unarchived marker would be the obvious alternative, but it is not
+    # reliable here: 'docker compose stop' is a clean shutdown, and Postgres
+    # archives the current segment on its way down. That write would come back,
+    # and the test would fail for a reason that has nothing to do with takeover.
+    local timeline_before timeline_after
+    timeline_before="$(pg -tAc 'SELECT timeline_id FROM pg_control_checkpoint()' | tr -d '\r')"
+    [ -n "$timeline_before" ] || die "could not read the current timeline"
+
+    write_marker A
+    log "taking a base backup"
+    "${SCRIPT_DIR}/walg-backup.sh" >/dev/null 2>&1 || die "base backup failed"
+    write_marker B
+    seal_and_wait_for_archive
+
+    local journal="/tmp/cara-verify-${RUN_ID}-replace.log"
+    local found
+
+    POSTGRES_MUST_STAY_DOWN="yes"
+    docker compose stop "$COMPOSE_SERVICE" >/dev/null 2>&1 \
+        || die "could not stop ${COMPOSE_SERVICE}"
+
+    if ! RESTORE_JOURNAL="$journal" \
+        "${SCRIPT_DIR}/walg-restore.sh" takeover --confirm-destroy >/dev/null 2>&1; then
+        tail -5 "$journal" 2>/dev/null
+        die "the replacement restore failed; full journal at ${journal}"
+    fi
+    POSTGRES_MUST_STAY_DOWN="no"
+
+    # The path taken matters as much as the result. 'destroyed yes' is the
+    # journal's record that it went through the clearing branch rather than the
+    # "target was empty" one, which is the branch the bare-disk test exercises.
+    grep -E '^  destroyed +yes' "$journal" >/dev/null \
+        || die "the run did not record clearing the existing cluster"
+
+    timeline_after="$(pg -tAc 'SELECT timeline_id FROM pg_control_checkpoint()' | tr -d '\r')"
+    [ -n "$timeline_after" ] || die "could not read the timeline after the replacement"
+    [ "$timeline_after" -gt "$timeline_before" ] \
+        || die "timeline did not advance (${timeline_before} → ${timeline_after}); the cluster was not rebuilt"
+
+    found="$(markers_from docker compose exec -T -u postgres "$COMPOSE_SERVICE" psql -U postgres)"
+    [ "$found" = "A,B" ] \
+        || die "expected markers A,B after the replacement, got '${found:-<none>}'"
+
+    pass "takeover cleared a populated PGDATA and rebuilt it from the archive" \
+        "(timeline ${timeline_before} → ${timeline_after})"
+
+    assert_post_restore_backup "$journal"
+}
+
 # --- bare disk -------------------------------------------------------------
 
 test_bare_disk() {
@@ -846,11 +1151,21 @@ test_upload_resumed
 test_upload_lost
 test_verify_mode
 
+test_guard_wrong_compose_service
+test_guard_wrong_archive_identity
+test_guard_maintenance_lock
+test_guard_cleanup_failure
+test_guard_takeover_needs_confirmation
+
 if [ "$CONFIRM_DESTROY" = "yes" ]; then
+    # Replacement first, bare disk second. Replacement needs a populated PGDATA
+    # to clear, which is the state the stack is already in; bare disk deletes the
+    # volume outright, so running it first would leave nothing to replace.
+    test_takeover_replaces_existing_cluster
     test_bare_disk
 else
-    log "skipping the bare-disk test; pass --confirm-destroy to run it"
-    log "without it the archive has not been proven to work on an empty disk"
+    log "skipping the replacement and bare-disk tests; pass --confirm-destroy to run them"
+    log "without them the archive has not been proven to rebuild a data directory"
 fi
 
 [ "$RESTORE_OBJECT_STORE_ON_EXIT" = "no" ] \
