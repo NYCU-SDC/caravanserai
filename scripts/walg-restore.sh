@@ -66,13 +66,46 @@ usage() {
 # rm' leaves that behind, one orphan per run. -v only removes anonymous volumes,
 # so the named scratch volume and the production one are never at risk.
 CLEANUP_SCRATCH="no"
-cleanup() {
-    [ "$CLEANUP_SCRATCH" = "yes" ] || return 0
-    [ -n "${RESTORE_CONTAINER:-}" ] && docker rm -f -v "$RESTORE_CONTAINER" >/dev/null 2>&1
-    [ -n "${SCRATCH_VOLUME:-}" ] && docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1
-    return 0
+
+cleanup_scratch_resources() {
+    local failed=0
+
+    if [ -n "${RESTORE_CONTAINER:-}" ]; then
+        if ! docker inspect "$RESTORE_CONTAINER" >/dev/null 2>&1 \
+            || docker rm -f -v "$RESTORE_CONTAINER" >/dev/null 2>&1; then
+            RESTORE_CONTAINER=""
+        else
+            log "WARNING: could not remove scratch container ${RESTORE_CONTAINER}"
+            failed=1
+        fi
+    fi
+
+    if [ -n "${SCRATCH_VOLUME:-}" ]; then
+        if ! docker volume inspect "$SCRATCH_VOLUME" >/dev/null 2>&1 \
+            || docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1; then
+            SCRATCH_VOLUME=""
+        else
+            log "WARNING: could not remove scratch volume ${SCRATCH_VOLUME}"
+            failed=1
+        fi
+    fi
+
+    return "$failed"
 }
-trap cleanup EXIT
+
+cleanup() {
+    local rc="${1:-$?}" cleanup_failed=0
+    trap - EXIT
+    set +e
+
+    if [ "$CLEANUP_SCRATCH" = "yes" ]; then
+        cleanup_scratch_resources || cleanup_failed=1
+    fi
+
+    [ "$rc" -eq 0 ] && [ "$cleanup_failed" -ne 0 ] && rc=1
+    exit "$rc"
+}
+trap 'cleanup $?' EXIT
 
 log() {
     local line
@@ -637,7 +670,7 @@ case "$MODE" in
         # same opt-out, so the caller's lock keeps covering both.
         [ "${CARA_MAINTENANCE_LOCK_HELD:-0}" = "1" ] || exec 9>&-
         log "triggering a background base backup (does not gate service restoration)"
-        nohup "${SCRIPT_DIR}/walg-backup.sh" >>"${RESTORE_JOURNAL}.backup" 2>&1 &
+        nohup env WALG_APPLY_RETENTION=no "${SCRIPT_DIR}/walg-backup.sh" >>"${RESTORE_JOURNAL}.backup" 2>&1 &
         record "post-restore backup" "pid $!, log ${RESTORE_JOURNAL}.backup"
         log "RTO ends here. Start cara-server once this database is confirmed healthy."
         ;;
@@ -648,8 +681,8 @@ case "$MODE" in
         [ -n "$dbs" ] || die "the restored instance did not answer a query"
         record "verified" "instance answers queries, ${dbs} databases"
         log "cleaning up"
-        docker rm -f -v "$RESTORE_CONTAINER" >/dev/null 2>&1 || true
-        docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1 || true
+        cleanup_scratch_resources \
+            || die "verify succeeded but its scratch resources could not be removed"
         CLEANUP_SCRATCH="no"
         log "verify passed"
         ;;

@@ -87,22 +87,57 @@ die()  { printf '\n  FAIL  %s\n\n' "$*" >&2; exit 1; }
 # ownership of the inspect instance it deliberately asked to be left running.
 SCRATCH_CONTAINER=""
 SCRATCH_VOLUME=""
-# test_upload_lost stops Postgres deliberately. If an assertion after that point
-# fails, the trap has to put it back: leaving a developer's stack down as a side
-# effect of a failed test is its own small outage, and it also stops the probe
-# database from being cleaned up below.
-RESTART_STACK_ON_EXIT="no"
+RESTORE_OBJECT_STORE_ON_EXIT="no"
+RESTART_POSTGRES_ON_EXIT="no"
+POSTGRES_MUST_STAY_DOWN="no"
+
 cleanup() {
-    # -v so the scratch instance's anonymous volume goes with it; see the same
-    # note in walg-restore.sh. Named volumes are untouched by -v.
-    [ -n "$SCRATCH_CONTAINER" ] && docker rm -f -v "$SCRATCH_CONTAINER" >/dev/null 2>&1
-    [ -n "$SCRATCH_VOLUME" ] && docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1
-    # Before drop_probe_db, which needs a running server to do anything.
-    [ "$RESTART_STACK_ON_EXIT" = "yes" ] && docker compose up -d --wait >/dev/null 2>&1
+    local rc="${1:-$?}" cleanup_failed=0
+    trap - EXIT
+    set +e
+
+    # -v removes only the scratch container's anonymous volumes. Every cleanup
+    # action is independent so one Docker error cannot skip service recovery.
+    if [ -n "$SCRATCH_CONTAINER" ]; then
+        if ! docker inspect "$SCRATCH_CONTAINER" >/dev/null 2>&1 \
+            || docker rm -f -v "$SCRATCH_CONTAINER" >/dev/null 2>&1; then
+            SCRATCH_CONTAINER=""
+        else
+            log "WARNING: could not remove scratch container ${SCRATCH_CONTAINER}"
+            cleanup_failed=1
+        fi
+    fi
+    if [ -n "$SCRATCH_VOLUME" ]; then
+        if ! docker volume inspect "$SCRATCH_VOLUME" >/dev/null 2>&1 \
+            || docker volume rm "$SCRATCH_VOLUME" >/dev/null 2>&1; then
+            SCRATCH_VOLUME=""
+        else
+            log "WARNING: could not remove scratch volume ${SCRATCH_VOLUME}"
+            cleanup_failed=1
+        fi
+    fi
+
+    if [ "$RESTORE_OBJECT_STORE_ON_EXIT" = "yes" ]; then
+        if ! docker compose up -d --wait "$OBJECT_STORE_SERVICE" >/dev/null 2>&1; then
+            log "WARNING: could not restore ${OBJECT_STORE_SERVICE} during cleanup"
+            cleanup_failed=1
+        fi
+    fi
+
+    if [ "$RESTART_POSTGRES_ON_EXIT" = "yes" ] && [ "$POSTGRES_MUST_STAY_DOWN" = "no" ]; then
+        if ! docker compose up -d --wait "$COMPOSE_SERVICE" >/dev/null 2>&1; then
+            log "WARNING: could not restart ${COMPOSE_SERVICE} during cleanup"
+            cleanup_failed=1
+        fi
+    elif [ "$POSTGRES_MUST_STAY_DOWN" = "yes" ]; then
+        log "WARNING: ${COMPOSE_SERVICE} remains stopped because its PGDATA was not restored"
+    fi
+
     drop_probe_db
-    return 0
+    [ "$rc" -eq 0 ] && [ "$cleanup_failed" -ne 0 ] && rc=1
+    exit "$rc"
 }
-trap cleanup EXIT
+trap 'cleanup $?' EXIT
 
 # client_min_messages=warning because CREATE TABLE IF NOT EXISTS and friends
 # emit a NOTICE on the second run, and a test harness that prints "relation
@@ -126,7 +161,7 @@ free_port() {
 }
 
 ensure_running() {
-    docker compose up -d --wait >/dev/null 2>&1 || die "could not bring the stack up"
+    docker compose up -d --wait "$COMPOSE_SERVICE" >/dev/null 2>&1 || die "could not bring ${COMPOSE_SERVICE} up"
 }
 
 ensure_probe_db() {
@@ -277,7 +312,7 @@ stop_object_store() {
     # of them: it can be interrupted or partially succeed, so arming afterwards
     # leaves the very window it was meant to close. Arming when nothing was
     # actually stopped costs one no-op 'up -d --wait' in the trap.
-    RESTART_STACK_ON_EXIT="yes"
+    RESTORE_OBJECT_STORE_ON_EXIT="yes"
     docker compose stop "$OBJECT_STORE_SERVICE" >/dev/null 2>&1 \
         || die "could not stop ${OBJECT_STORE_SERVICE}"
 }
@@ -294,9 +329,11 @@ start_object_store() {
     deadline=$(( $(date +%s) + 120 ))
     while :; do
         cid="$(object_store_cid)"
-        [ -n "$cid" ] \
-            && [ "$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null)" = "healthy" ] \
-            && return 0
+        if [ -n "$cid" ] \
+            && [ "$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null)" = "healthy" ]; then
+            RESTORE_OBJECT_STORE_ON_EXIT="no"
+            return 0
+        fi
         [ "$(date +%s)" -ge "$deadline" ] \
             && die "${OBJECT_STORE_SERVICE} did not become healthy within 120s"
         sleep 2
@@ -522,6 +559,7 @@ test_upload_lost() {
     # The node dies here. Stopping Postgres before the object store comes back
     # is what makes the loss permanent: a running server would drain the backlog
     # the moment it could, and the test would silently become case 1.
+    RESTART_POSTGRES_ON_EXIT="yes"
     log "stopping ${COMPOSE_SERVICE} while the archive is still unreachable"
     docker compose stop "$COMPOSE_SERVICE" >/dev/null 2>&1 \
         || die "could not stop ${COMPOSE_SERVICE}"
@@ -542,6 +580,7 @@ test_upload_lost() {
     # startup, which is correct and happens after every assertion above.
     log "restarting ${COMPOSE_SERVICE}; the pending segment will drain now"
     ensure_running
+    RESTART_POSTGRES_ON_EXIT="no"
     pass "restore reached the last archived WAL; the unarchived write is correctly absent"
 }
 
@@ -594,6 +633,7 @@ test_bare_disk() {
         tail -5 "$journal" 2>/dev/null
         die "the restore itself failed; full journal at ${journal}"
     fi
+    POSTGRES_MUST_STAY_DOWN="no"
 
     local found lsn
     found="$(markers_from docker compose exec -T -u postgres "$COMPOSE_SERVICE" psql -U postgres)"
@@ -668,6 +708,8 @@ else
     log "without it the archive has not been proven to work on an empty disk"
 fi
 
-# Every test finished, so the stack is up and the trap has nothing to put back.
-RESTART_STACK_ON_EXIT="no"
+[ "$RESTORE_OBJECT_STORE_ON_EXIT" = "no" ] \
+    && [ "$RESTART_POSTGRES_ON_EXIT" = "no" ] \
+    && [ "$POSTGRES_MUST_STAY_DOWN" = "no" ] \
+    || die "verification finished with an armed cleanup state"
 log "done"

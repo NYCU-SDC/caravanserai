@@ -12,6 +12,8 @@
 #   COMPOSE_SERVICE     compose service running Postgres     (default: postgres)
 #   PGDATA              data directory inside the container  (default: /var/lib/postgresql/data)
 #   WALG_RETAIN_FULL    how many full backups to keep        (default: 7)
+#   WALG_APPLY_RETENTION
+#                       yes for scheduled backups, no after restore (default: yes)
 #   LOCK_FILE           maintenance lock, shared with the restore script
 #                       (default: /tmp/cara-control-plane-maintenance.lock)
 
@@ -26,6 +28,7 @@ cd "$REPO_ROOT"
 COMPOSE_SERVICE="${COMPOSE_SERVICE:-postgres}"
 PGDATA="${PGDATA:-/var/lib/postgresql/data}"
 WALG_RETAIN_FULL="${WALG_RETAIN_FULL:-7}"
+WALG_APPLY_RETENTION="${WALG_APPLY_RETENTION:-yes}"
 LOCK_FILE="${LOCK_FILE:-/tmp/cara-control-plane-maintenance.lock}"
 
 log() { printf '%s  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
@@ -49,6 +52,10 @@ pg_exec() { docker compose exec -T -u postgres "$COMPOSE_SERVICE" "$@" </dev/nul
 # archive it exists to maintain.
 case "$WALG_RETAIN_FULL" in
     ''|*[!0-9]*|0) die "WALG_RETAIN_FULL must be a positive integer, got '${WALG_RETAIN_FULL}'" ;;
+esac
+case "$WALG_APPLY_RETENTION" in
+    yes|no) : ;;
+    *) die "WALG_APPLY_RETENTION must be 'yes' or 'no', got '${WALG_APPLY_RETENTION}'" ;;
 esac
 
 # One maintenance lock for the whole family of scripts, held for the entire run
@@ -194,11 +201,19 @@ fi
 
 # Retention must go through 'delete retain FULL', never by age. WAL is only
 # safe to remove once no retained base backup still needs it, and WAL-G is what
-# knows that relationship.
-log "retaining ${WALG_RETAIN_FULL} full backups"
-pg_exec wal-g delete retain FULL "$WALG_RETAIN_FULL" --confirm \
-    || die "retention failed; the new backup exists but old ones were not pruned"
+# knows that relationship. A post-restore backup skips this irreversible step;
+# the next scheduled backup applies the normal policy after operators have had
+# time to validate the recovered timeline.
+retention="skipped"
+if [ "$WALG_APPLY_RETENTION" = "yes" ]; then
+    log "retaining ${WALG_RETAIN_FULL} full backups"
+    pg_exec wal-g delete retain FULL "$WALG_RETAIN_FULL" --confirm \
+        || die "retention failed; the new backup exists but old ones were not pruned"
+    retention="$WALG_RETAIN_FULL"
+else
+    log "retention skipped for this backup"
+fi
 
 log "done: backup=${created} duration=${elapsed_ms}ms" \
     "compressed=${compressed:-?} uncompressed=${uncompressed:-?}" \
-    "retain=${WALG_RETAIN_FULL}"
+    "retain=${retention}"
