@@ -77,6 +77,15 @@ services:
       timeout: 5s
       retries: 10
 
+  # Deliberately unpinned, unlike the WAL-G tarball in the Postgres image. This
+  # is development-only, bound to localhost, and the S3 surface WAL-G uses
+  # (v4-signed PUT/GET/LIST) is stable; a pin here would only freeze known
+  # vulnerabilities in place, since nothing in this repo bumps dependencies.
+  #
+  # The healthcheck below is the part that does depend on image internals: it
+  # assumes `mc` ships inside this image with a preconfigured `local` alias. If
+  # `up --wait` ever reports minio unhealthy right after an image pull, check
+  # that before suspecting the service itself.
   minio:
     image: minio/minio
     command: server /data --console-address ":9001"
