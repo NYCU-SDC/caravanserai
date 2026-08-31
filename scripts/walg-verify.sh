@@ -35,6 +35,8 @@
 #   lock held       a second backup while this run holds the maintenance lock.
 #   cleanup failure a cleanup step reports failure; the steps after it must
 #                   still run, and the original exit code must survive.
+#   unsafe exit     a destructive restore failed after Postgres started. EXIT
+#                   cleanup must stop it before restoring object-store access.
 #   no confirmation takeover over a populated PGDATA without --confirm-destroy.
 #                   Refused, and refused before the directory is cleared.
 #
@@ -118,6 +120,25 @@ RESTORE_OBJECT_STORE_ON_EXIT="no"
 RESTART_POSTGRES_ON_EXIT="no"
 POSTGRES_MUST_STAY_DOWN="no"
 
+stop_postgres_if_unsafe() {
+    [ "$POSTGRES_MUST_STAY_DOWN" = "yes" ] || return 0
+
+    # A failed takeover may already have started Postgres before replay times
+    # out or exits. Merely declining to restart it is therefore insufficient:
+    # stop the service before restoring object-store connectivity, otherwise a
+    # recovering instance can resume replay or promote while cleanup runs.
+    if ! docker compose stop "$COMPOSE_SERVICE" >/dev/null 2>&1; then
+        log "WARNING: could not stop unsafe ${COMPOSE_SERVICE} during cleanup"
+        return 1
+    fi
+    if docker compose ps --status running --services 2>/dev/null | grep -qx "$COMPOSE_SERVICE"; then
+        log "WARNING: ${COMPOSE_SERVICE} is still running although its PGDATA was not restored"
+        return 1
+    fi
+
+    log "WARNING: ${COMPOSE_SERVICE} remains stopped because its PGDATA was not restored"
+}
+
 cleanup() {
     local rc="${1:-$?}" cleanup_failed=0
     trap - EXIT
@@ -144,6 +165,10 @@ cleanup() {
         fi
     fi
 
+    # Stop an unsafe recovery target before making its archive reachable again.
+    # A later cleanup failure must not skip either action.
+    stop_postgres_if_unsafe || cleanup_failed=1
+
     if [ "$RESTORE_OBJECT_STORE_ON_EXIT" = "yes" ]; then
         if ! docker compose up -d --wait "$OBJECT_STORE_SERVICE" >/dev/null 2>&1; then
             log "WARNING: could not restore ${OBJECT_STORE_SERVICE} during cleanup"
@@ -156,8 +181,6 @@ cleanup() {
             log "WARNING: could not restart ${COMPOSE_SERVICE} during cleanup"
             cleanup_failed=1
         fi
-    elif [ "$POSTGRES_MUST_STAY_DOWN" = "yes" ]; then
-        log "WARNING: ${COMPOSE_SERVICE} remains stopped because its PGDATA was not restored"
     fi
 
     drop_probe_db
@@ -924,6 +947,37 @@ STUB
     pass "cleanup continued past a failing step and still reported the failure"
 }
 
+test_guard_unsafe_postgres_is_stopped() {
+    log "=== guard: an unsafe Postgres is stopped on failure ==="
+    ensure_running
+
+    local rc
+    # This subshell models the state after takeover has destroyed PGDATA and
+    # started Postgres, but a later replay/health check fails. It installs the
+    # same EXIT trap, sets the same state flag as the destructive tests, and
+    # exits with a distinctive code so the test also proves cleanup preserves
+    # the original failure instead of replacing it with success.
+    if (
+        POSTGRES_MUST_STAY_DOWN="yes"
+        trap 'cleanup $?' EXIT
+        exit 23
+    ); then
+        die "the simulated restore failure unexpectedly succeeded"
+    else
+        rc=$?
+    fi
+
+    [ "$rc" -eq 23 ] \
+        || die "cleanup replaced the original exit status 23 with ${rc}"
+    ! docker compose ps --status running --services 2>/dev/null | grep -qx "$COMPOSE_SERVICE" \
+        || die "${COMPOSE_SERVICE} kept running after an unsafe restore failure"
+
+    # The real failure path deliberately leaves it stopped for an operator. This
+    # harness restores the disposable dev stack only after proving that state.
+    ensure_running
+    pass "an unsafe restore failure stops Postgres and preserves its exit status"
+}
+
 test_guard_takeover_needs_confirmation() {
     log "=== guard: takeover over an existing cluster without confirmation ==="
     TEST_RUN="${RUN_ID}-noconfirm"
@@ -1166,6 +1220,7 @@ test_guard_wrong_compose_service
 test_guard_wrong_archive_identity
 test_guard_maintenance_lock
 test_guard_cleanup_failure
+test_guard_unsafe_postgres_is_stopped
 test_guard_takeover_needs_confirmation
 
 if [ "$CONFIRM_DESTROY" = "yes" ]; then
