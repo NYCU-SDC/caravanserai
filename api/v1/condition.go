@@ -111,6 +111,52 @@ func IsMaintenanceActive(conditions []Condition, now time.Time) bool {
 	return false
 }
 
+// UpsertCondition replaces the condition carrying cond.Type in conditions, or
+// appends it, returning the result.
+//
+// LastTransitionTime and LastHeartbeatTime are carried over from the stored
+// condition when the incoming one says the same thing — same Status, Reason and
+// Message — and transitioned is false.
+//
+// transitioned is how a caller reports a change the condition cannot see. The
+// Phase condition is the case that needs it: its Status is always True and the
+// value that actually moved lives in ProjectStatus.Phase, outside the condition
+// entirely. A Project can also carry a stale Phase condition, because
+// SetProjectScheduled moves the phase without touching conditions — so a node
+// flapping during scheduling can produce Scheduled -> Pending with an unchanged
+// Reason, which without this flag would keep a timestamp from the previous
+// visit to Pending.
+//
+// Callers that write a condition standing on its own — the rescheduler's
+// TerminatingAt and NotReadyAt clocks — pass false: for them the condition
+// fields are the whole story. The field means "when the Status last changed"; refreshing it on an
+// unchanged re-assertion misreports that, and it also defeats every downstream
+// no-op guard, because a status whose bytes differ is a status that must be
+// written. The agent re-reports the same phase, reason and message on every
+// poll tick for every Project on every node, so a moving timestamp turns each
+// of those into a database write and a project.updated event carrying no news.
+//
+// Rescheduler timers read LastTransitionTime as the moment a state began
+// (TerminatingAt, NotReadyAt), and Maintenance staleness is measured from it,
+// so preserving it is what those readers already assume.
+func UpsertCondition(conditions []Condition, cond Condition, transitioned bool) []Condition {
+	for i := range conditions {
+		if conditions[i].Type != cond.Type {
+			continue
+		}
+		if !transitioned &&
+			conditions[i].Status == cond.Status &&
+			conditions[i].Reason == cond.Reason &&
+			conditions[i].Message == cond.Message {
+			cond.LastTransitionTime = conditions[i].LastTransitionTime
+			cond.LastHeartbeatTime = conditions[i].LastHeartbeatTime
+		}
+		conditions[i] = cond
+		return conditions
+	}
+	return append(conditions, cond)
+}
+
 // Condition describes a single observable aspect of a resource's state.
 // It mirrors the Kubernetes Condition pattern so the mental model stays familiar.
 type Condition struct {

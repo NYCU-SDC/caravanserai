@@ -496,15 +496,21 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		// Scheduled, Running, or any future active phase: transition to Terminating.
-		status := project.Status
-		status.Phase = v1.ProjectPhaseTerminating
-		if err := h.store.UpdateProjectStatus(traceCtx, name, status); err != nil {
+		//
+		// The phase is set on whatever status the store read, not on the copy
+		// fetched above: a controller may have written NodeRef or a condition
+		// in between, and replacing the whole status would discard it.
+		err := h.store.UpdateProjectStatusWithRetry(traceCtx, name, func(status *v1.ProjectStatus) error {
+			status.Phase = v1.ProjectPhaseTerminating
+			return nil
+		})
+		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				h.problemWriter.WriteError(traceCtx, w,
 					fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
 				return
 			}
-			logger.Error("UpdateProjectStatus (Terminating) failed", zap.String("name", name), zap.Error(err))
+			logger.Error("Marking project Terminating failed", zap.String("name", name), zap.Error(err))
 			h.problemWriter.WriteError(traceCtx, w, err, logger)
 			return
 		}
@@ -554,52 +560,40 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch existing status to preserve fields we do not overwrite (nodeRef, etc.).
-	existing, err := h.store.GetProject(traceCtx, name)
+	// Fixed before the closure: the closure may run more than once, and this
+	// records when the agent observed the phase, not when a retry landed.
+	observedAt := time.Now().UTC()
+
+	// Only the fields this request carries are touched; everything else —
+	// NodeRef, conditions owned by controllers — is whatever the store read on
+	// this attempt. Replacing the whole status here is what used to discard a
+	// controller's concurrent write.
+	err := h.store.UpdateProjectStatusWithRetry(traceCtx, name, func(status *v1.ProjectStatus) error {
+		transitioned := status.Phase != req.Phase
+		status.Phase = req.Phase
+
+		if req.Reason == "" && req.Message == "" {
+			return nil
+		}
+		// UpsertCondition keeps the stored timestamp when this report says the
+		// same thing as the last one, which is what makes an unchanged tick a
+		// byte-level no-op the store can skip.
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypePhase,
+			Status:             v1.ConditionTrue,
+			Reason:             req.Reason,
+			Message:            req.Message,
+			LastTransitionTime: observedAt,
+		}, transitioned)
+		return nil
+	})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.problemWriter.WriteError(traceCtx, w,
 				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
 			return
 		}
-		logger.Error("GetProject failed during status patch", zap.String("name", name), zap.Error(err))
-		h.problemWriter.WriteError(traceCtx, w, err, logger)
-		return
-	}
-
-	status := existing.Status
-	status.Phase = req.Phase
-
-	// Update or append a Phase condition when reason/message are provided.
-	if req.Reason != "" || req.Message != "" {
-		now := time.Now().UTC()
-		cond := v1.Condition{
-			Type:               v1.ConditionTypePhase,
-			Status:             v1.ConditionTrue,
-			Reason:             req.Reason,
-			Message:            req.Message,
-			LastTransitionTime: now,
-		}
-		updated := false
-		for i, c := range status.Conditions {
-			if c.Type == v1.ConditionTypePhase {
-				status.Conditions[i] = cond
-				updated = true
-				break
-			}
-		}
-		if !updated {
-			status.Conditions = append(status.Conditions, cond)
-		}
-	}
-
-	if err := h.store.UpdateProjectStatus(traceCtx, name, status); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			h.problemWriter.WriteError(traceCtx, w,
-				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
-			return
-		}
-		logger.Error("UpdateProjectStatus failed", zap.String("name", name), zap.Error(err))
+		logger.Error("Project status patch failed", zap.String("name", name), zap.Error(err))
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
@@ -667,6 +661,19 @@ func (h *Handler) patchCondition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Unlike patchStatus, this stamps a fresh timestamp on every call rather
+	// than going through v1.UpsertCondition, and that is deliberate for now.
+	// PatchProjectCondition merges in SQL without reading first, so preserving
+	// the stored timestamp would need either a read — losing the atomicity the
+	// merge exists for — or the comparison pushed into jsonb.
+	//
+	// It is affordable because of who calls it: the only producer is the agent's
+	// backup runner, once when a backup starts and once when it ends, so every
+	// call really is a transition. If a caller ever re-asserts the same
+	// condition on a schedule, that stops being true — each repeat becomes a
+	// write and a project.updated event carrying no news, which is exactly what
+	// the guard in patchStatus exists to prevent. Give this the same treatment
+	// then.
 	now := time.Now().UTC()
 	condition := v1.Condition{
 		Type:               condType,

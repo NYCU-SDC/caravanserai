@@ -53,41 +53,30 @@ func (a *ProjectStoreAdapter) GetProjectPhase(ctx context.Context, name string) 
 }
 
 func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nodeRef string) error {
-	project, err := a.s.GetProject(ctx, name)
-	if err != nil {
-		return err
-	}
-	project.Status.Phase = v1.ProjectPhaseScheduled
-	project.Status.NodeRef = nodeRef
-	return a.s.UpdateProjectStatus(ctx, name, project.Status)
+	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		status.Phase = v1.ProjectPhaseScheduled
+		status.NodeRef = nodeRef
+		return nil
+	})
 }
 
 func (a *ProjectStoreAdapter) SetProjectPhase(ctx context.Context, name string, phase v1.ProjectPhase, reason, message string) error {
-	project, err := a.s.GetProject(ctx, name)
-	if err != nil {
-		return err
-	}
-	project.Status.Phase = phase
+	// Fixed before the closure, not inside it: the closure may run more than
+	// once, and this records when the transition was observed rather than when
+	// a retry happened to land.
 	now := time.Now().UTC()
-	cond := v1.Condition{
-		Type:               v1.ConditionTypePhase,
-		Status:             v1.ConditionTrue,
-		Reason:             reason,
-		Message:            message,
-		LastTransitionTime: now,
-	}
-	updated := false
-	for i, c := range project.Status.Conditions {
-		if c.Type == v1.ConditionTypePhase {
-			project.Status.Conditions[i] = cond
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		project.Status.Conditions = append(project.Status.Conditions, cond)
-	}
-	return a.s.UpdateProjectStatus(ctx, name, project.Status)
+	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		transitioned := status.Phase != phase
+		status.Phase = phase
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypePhase,
+			Status:             v1.ConditionTrue,
+			Reason:             reason,
+			Message:            message,
+			LastTransitionTime: now,
+		}, transitioned)
+		return nil
+	})
 }
 
 func (a *ProjectStoreAdapter) DeleteProject(ctx context.Context, name string) error {
@@ -124,61 +113,36 @@ func (a *ProjectStoreAdapter) ListProjectsByNodeRef(ctx context.Context, nodeRef
 // Clears nodeRef, sets phase=Pending, and records a Phase condition with
 // reason=NodeNotReady.
 func (a *ProjectStoreAdapter) SetProjectPending(ctx context.Context, name string) error {
-	project, err := a.s.GetProject(ctx, name)
-	if err != nil {
-		return err
-	}
-	project.Status.Phase = v1.ProjectPhasePending
-	project.Status.NodeRef = ""
 	now := time.Now().UTC()
-	cond := v1.Condition{
-		Type:               v1.ConditionTypePhase,
-		Status:             v1.ConditionTrue,
-		Reason:             "NodeNotReady",
-		Message:            "Node went NotReady; project reset to Pending for rescheduling",
-		LastTransitionTime: now,
-	}
-	updated := false
-	for i, c := range project.Status.Conditions {
-		if c.Type == v1.ConditionTypePhase {
-			project.Status.Conditions[i] = cond
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		project.Status.Conditions = append(project.Status.Conditions, cond)
-	}
-	return a.s.UpdateProjectStatus(ctx, name, project.Status)
+	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		transitioned := status.Phase != v1.ProjectPhasePending
+		status.Phase = v1.ProjectPhasePending
+		status.NodeRef = ""
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypePhase,
+			Status:             v1.ConditionTrue,
+			Reason:             "NodeNotReady",
+			Message:            "Node went NotReady; project reset to Pending for rescheduling",
+			LastTransitionTime: now,
+		}, transitioned)
+		return nil
+	})
 }
 
 // SetTerminatingAt satisfies controller.ReschedulerProjectStore.
 // Writes (or replaces) the TerminatingAt condition to record the time at which
 // the rescheduler first observed this project as stranded on a NotReady node.
 func (a *ProjectStoreAdapter) SetTerminatingAt(ctx context.Context, name string, at time.Time) error {
-	project, err := a.s.GetProject(ctx, name)
-	if err != nil {
-		return err
-	}
-	cond := v1.Condition{
-		Type:               v1.ConditionTypeTerminatingAt,
-		Status:             v1.ConditionTrue,
-		Reason:             "NodeNotReady",
-		Message:            "Node went NotReady while project was Terminating; force-termination timeout clock started",
-		LastTransitionTime: at,
-	}
-	updated := false
-	for i, c := range project.Status.Conditions {
-		if c.Type == v1.ConditionTypeTerminatingAt {
-			project.Status.Conditions[i] = cond
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		project.Status.Conditions = append(project.Status.Conditions, cond)
-	}
-	return a.s.UpdateProjectStatus(ctx, name, project.Status)
+	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypeTerminatingAt,
+			Status:             v1.ConditionTrue,
+			Reason:             "NodeNotReady",
+			Message:            "Node went NotReady while project was Terminating; force-termination timeout clock started",
+			LastTransitionTime: at,
+		}, false)
+		return nil
+	})
 }
 
 // SetNotReadyAt satisfies controller.ReschedulerProjectStore.
@@ -186,58 +150,33 @@ func (a *ProjectStoreAdapter) SetTerminatingAt(ctx context.Context, name string,
 // the rescheduler first observed this Running project as stranded on a NotReady
 // node.  The grace period clock starts from this timestamp.
 func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at time.Time) error {
-	project, err := a.s.GetProject(ctx, name)
-	if err != nil {
-		return err
-	}
-	cond := v1.Condition{
-		Type:               v1.ConditionTypeNotReadyAt,
-		Status:             v1.ConditionTrue,
-		Reason:             "NodeNotReady",
-		Message:            "Node went NotReady while project was Running; running grace period clock started",
-		LastTransitionTime: at,
-	}
-	updated := false
-	for i, c := range project.Status.Conditions {
-		if c.Type == v1.ConditionTypeNotReadyAt {
-			project.Status.Conditions[i] = cond
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		project.Status.Conditions = append(project.Status.Conditions, cond)
-	}
-	return a.s.UpdateProjectStatus(ctx, name, project.Status)
+	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypeNotReadyAt,
+			Status:             v1.ConditionTrue,
+			Reason:             "NodeNotReady",
+			Message:            "Node went NotReady while project was Running; running grace period clock started",
+			LastTransitionTime: at,
+		}, false)
+		return nil
+	})
 }
 
 // ForceTerminated satisfies controller.ReschedulerProjectStore.
 // Transitions the project to Terminated and records a Phase condition with
 // reason=TerminationTimeout.
 func (a *ProjectStoreAdapter) ForceTerminated(ctx context.Context, name string) error {
-	project, err := a.s.GetProject(ctx, name)
-	if err != nil {
-		return err
-	}
-	project.Status.Phase = v1.ProjectPhaseTerminated
 	now := time.Now().UTC()
-	cond := v1.Condition{
-		Type:               v1.ConditionTypePhase,
-		Status:             v1.ConditionTrue,
-		Reason:             "TerminationTimeout",
-		Message:            "Node was NotReady for too long; project force-terminated. Docker resources on the node may need manual cleanup.",
-		LastTransitionTime: now,
-	}
-	updated := false
-	for i, c := range project.Status.Conditions {
-		if c.Type == v1.ConditionTypePhase {
-			project.Status.Conditions[i] = cond
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		project.Status.Conditions = append(project.Status.Conditions, cond)
-	}
-	return a.s.UpdateProjectStatus(ctx, name, project.Status)
+	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		transitioned := status.Phase != v1.ProjectPhaseTerminated
+		status.Phase = v1.ProjectPhaseTerminated
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypePhase,
+			Status:             v1.ConditionTrue,
+			Reason:             "TerminationTimeout",
+			Message:            "Node was NotReady for too long; project force-terminated. Docker resources on the node may need manual cleanup.",
+			LastTransitionTime: now,
+		}, transitioned)
+		return nil
+	})
 }
