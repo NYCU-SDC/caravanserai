@@ -212,13 +212,12 @@ func (c *Client) ListScheduledProjects(ctx context.Context) ([]*v1.Project, erro
 	return projects, nil
 }
 
-// ListProjectsForReconcile calls GET /api/v1/projects with phase=Scheduled,
-// phase=Running, and phase=Terminating filters, restricted to this node via
-// nodeRef.  The result includes projects that need to be started, health-checked,
-// or torn down.
-func (c *Client) ListProjectsForReconcile(ctx context.Context) ([]*v1.Project, error) {
-	url := fmt.Sprintf("%s/api/v1/projects?phase=Scheduled&phase=Running&phase=Terminating&nodeRef=%s",
-		c.serverURL, c.nodeName)
+// ListProjectsAssignedToNode returns the complete ownership snapshot for this
+// node. It intentionally applies no phase filter: Failed and future phases are
+// still owned when status.nodeRef points here, even if they need no reconcile
+// action in this tick.
+func (c *Client) ListProjectsAssignedToNode(ctx context.Context) ([]*v1.Project, error) {
+	url := fmt.Sprintf("%s/api/v1/projects?nodeRef=%s", c.serverURL, c.nodeName)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build list projects request: %w", err)
