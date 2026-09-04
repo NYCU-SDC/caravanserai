@@ -27,6 +27,10 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: caravanserai
 
+      # Destructive restore verification refuses to run unless this exact marker
+      # is present in the running container. Production must never set it.
+      CARA_ARCHIVE_ROLE: development
+
       # WAL-G reads its configuration from the environment. Nothing here is
       # baked into the image; production supplies the same variables from its
       # own secret store (CARA-77).

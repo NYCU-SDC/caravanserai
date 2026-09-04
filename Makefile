@@ -80,6 +80,30 @@ dev-server: dev-up build
 dev-logs:
 	@docker compose logs -f
 
+# All three depend on .env for the same reason dev-up does: every docker compose
+# call below resolves MinIO's credentials through it, and the compose file uses
+# the ':?' form, so a clone that has never run dev-up fails inside Compose rather
+# than at a step that could have created the file. It only guarantees the file
+# exists — a .env that predates a new required variable is still the operator's
+# to reconcile, and the ':?' message names the variable when that happens.
+walg-backup: .env
+	@echo -e ":: $(GREEN)Taking a control-plane base backup...$(NC)"
+	@./scripts/walg-backup.sh \
+		&& echo -e "==> $(BLUE)Backup complete$(NC)" \
+		|| (echo -e "==> $(RED)Backup failed$(NC)" && exit 1)
+
+walg-restore: .env
+	@echo -e ":: $(GREEN)Restoring the control-plane database...$(NC)"
+	@./scripts/walg-restore.sh $(if $(MODE),$(MODE),verify) $(ARGS) \
+		&& echo -e "==> $(BLUE)Restore complete$(NC)" \
+		|| (echo -e "==> $(RED)Restore failed$(NC)" && exit 1)
+
+walg-verify: .env
+	@echo -e ":: $(GREEN)Verifying the control-plane backups...$(NC)"
+	@./scripts/walg-verify.sh $(ARGS) \
+		&& echo -e "==> $(BLUE)Verification complete$(NC)" \
+		|| (echo -e "==> $(RED)Verification failed$(NC)" && exit 1)
+
 install-hooks:
 	@echo -e ":: $(GREEN)Installing git hooks...$(NC)"
 	@git config core.hooksPath .githooks \
@@ -88,3 +112,4 @@ install-hooks:
 
 .PHONY: all prepare build run-server run-agent run-cli test test-integration schemas
 .PHONY: dev-up dev-down dev-reset dev-server dev-logs install-hooks
+.PHONY: walg-backup walg-restore walg-verify
