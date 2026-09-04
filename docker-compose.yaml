@@ -1,28 +1,122 @@
-# Development-only: provides PostgreSQL for cara-server and a local
-# Headscale control plane for overlay-networking work.
-# Server and agent are built and run locally via Makefile targets.
+# Development-only: provides PostgreSQL for cara-server, a local Headscale
+# control plane for overlay-networking work, and a MinIO object store for
+# control-plane WAL archiving.
 #
 # Usage:
-#   docker compose up -d        # start PostgreSQL + Headscale
+#   docker compose up -d        # start everything
 #   docker compose down         # stop (preserves data)
 #   docker compose down -v      # stop and wipe data volumes
+#
+# `down -v` removes the backups along with the database. To exercise a real
+# restore, remove only the pgdata volume and leave minio-data alone — a restore
+# that still has the original disk proves nothing. The scripted procedure for
+# that is CARA-70's.
+#
+# MinIO binds to localhost by default because its credentials are fixed in this
+# file; set MINIO_BIND=0.0.0.0 to reach it from another machine, which the
+# two-node agent testing does need.
+# Host ports can be overridden when something is already listening:
+#   POSTGRES_PORT=5434 MINIO_PORT=9100 docker compose up -d
 
 services:
   postgres:
-    image: postgres:16
+    build:
+      context: ./deploy/dev/postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
       POSTGRES_DB: caravanserai
+
+      # WAL-G reads its configuration from the environment. Nothing here is
+      # baked into the image; production supplies the same variables from its
+      # own secret store (CARA-77).
+      WALG_S3_PREFIX: s3://cara-backups/cara/v1/control-plane/walg
+      # Sourced from .env, which is gitignored. The ':?' form makes compose refuse
+      # to start with a named variable rather than substituting an empty string
+      # and leaving archive_command to fail against a bucket it cannot open.
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?missing; copy .env.example to .env}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?missing; copy .env.example to .env}
+      AWS_ENDPOINT: http://minio:9000
+      AWS_REGION: us-east-1
+      # Self-hosted S3 implementations generally lack the DNS wildcard that
+      # virtual-host addressing needs.
+      AWS_S3_FORCE_PATH_STYLE: "true"
+      # Refuse to overwrite an archived segment. Two clusters pointed at one
+      # prefix then fail loudly instead of silently corrupting each other's
+      # archive — the failure mode that leaves a backup unrestorable without
+      # anything having reported an error.
+      WALG_PREVENT_WAL_OVERWRITE: "true"
+      # Every base backup is full. Zero is already the default; stating it
+      # keeps the behaviour from drifting if upstream changes that.
+      WALG_DELTA_MAX_STEPS: "0"
+
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - wal_level=replica
+      # An upper bound on how long a partially-filled segment waits before it
+      # can be archived — not a polling interval, and not by itself an RPO
+      # guarantee: the push still has to succeed.
+      - -c
+      - archive_timeout=60s
+      - -c
+      - archive_command=wal-g wal-push %p
+
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
       timeout: 5s
       retries: 10
+
+  # Deliberately unpinned, unlike the WAL-G tarball in the Postgres image. This
+  # is development-only, bound to localhost, and the S3 surface WAL-G uses
+  # (v4-signed PUT/GET/LIST) is stable; a pin here would only freeze known
+  # vulnerabilities in place, since nothing in this repo bumps dependencies.
+  #
+  # The healthcheck below is the part that does depend on image internals: it
+  # assumes `mc` ships inside this image with a preconfigured `local` alias. If
+  # `up --wait` ever reports minio unhealthy right after an image pull, check
+  # that before suspecting the service itself.
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?missing; copy .env.example to .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?missing; copy .env.example to .env}
+    ports:
+      - "${MINIO_BIND:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+      - "${MINIO_BIND:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  # Creates the bucket once and exits. Postgres waits for it, because an
+  # archive_command firing against a missing bucket just accumulates failures
+  # in pg_stat_archiver until someone notices.
+  minio-init:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
+        mc mb --ignore-existing local/cara-backups
 
   headscale:
     image: headscale/headscale:v0.29.2
@@ -41,5 +135,6 @@ services:
 
 volumes:
   pgdata:
+  minio-data:
   headscale-data:
   headscale-run:
