@@ -233,7 +233,76 @@ func TestValidateNetworkOwnership(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateNetworkOwnership("cara-payments", tt.labels, project)
+			err := (&DockerRuntime{}).validateNetworkOwnership("cara-payments", tt.labels, project)
+			assert.Equal(t, tt.wantErr, err != nil)
+		})
+	}
+}
+
+// CARA-82: when the identity carries a UID, ownership filters scope the match
+// to exactly that Project lifetime so orphan stop/remove of a previous lifetime
+// never touches the current one.
+func TestContainerOwnershipFilters_IncludeUIDWhenPresent(t *testing.T) {
+	withUID := containerOwnershipFilters(ProjectIdentity{Namespace: "team-a", Name: "payments", UID: "uid-1"}).Get("label")
+	assert.ElementsMatch(t, []string{
+		"cara.project=payments",
+		"cara.namespace=team-a",
+		"cara.service",
+		"cara.uid=uid-1",
+	}, withUID)
+
+	// Compatibility mode: no UID in the identity means no UID filter, matching
+	// pre-CARA-82 behaviour.
+	noUID := containerOwnershipFilters(ProjectIdentity{Namespace: "team-a", Name: "payments"}).Get("label")
+	assert.ElementsMatch(t, []string{
+		"cara.project=payments",
+		"cara.namespace=team-a",
+		"cara.service",
+	}, noUID)
+}
+
+func TestResourceOwnershipFilters_IncludeUIDWhenPresent(t *testing.T) {
+	withUID := resourceOwnershipFilters(ProjectIdentity{Namespace: "team-a", Name: "payments", UID: "uid-1"}).Get("label")
+	assert.ElementsMatch(t, []string{
+		"cara.project=payments",
+		"cara.namespace=team-a",
+		"cara.uid=uid-1",
+	}, withUID)
+}
+
+// CARA-82: UID fencing on network adoption. When enforcing, an existing network
+// must carry the current Project's UID; a different or missing value is refused.
+// When not enforcing, UID is ignored so mixed-rollout networks keep working.
+func TestValidateNetworkOwnership_UID(t *testing.T) {
+	project := ProjectIdentity{Namespace: "team-a", Name: "payments", UID: "uid-new"}
+
+	tests := []struct {
+		name       string
+		enforceUID bool
+		labels     map[string]string
+		wantErr    bool
+	}{
+		{name: "enforce: matching UID", enforceUID: true, labels: map[string]string{
+			labelProject: "payments", labelNamespace: "team-a", labelUID: "uid-new",
+		}},
+		{name: "enforce: different UID rejected", enforceUID: true, labels: map[string]string{
+			labelProject: "payments", labelNamespace: "team-a", labelUID: "uid-old",
+		}, wantErr: true},
+		{name: "enforce: legacy missing UID rejected", enforceUID: true, labels: map[string]string{
+			labelProject: "payments", labelNamespace: "team-a",
+		}, wantErr: true},
+		{name: "compat: different UID tolerated", enforceUID: false, labels: map[string]string{
+			labelProject: "payments", labelNamespace: "team-a", labelUID: "uid-old",
+		}},
+		{name: "compat: legacy missing UID tolerated", enforceUID: false, labels: map[string]string{
+			labelProject: "payments", labelNamespace: "team-a",
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &DockerRuntime{enforceUID: tt.enforceUID}
+			err := r.validateNetworkOwnership("cara-payments", tt.labels, project)
 			assert.Equal(t, tt.wantErr, err != nil)
 		})
 	}

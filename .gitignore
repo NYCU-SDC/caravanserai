@@ -127,3 +127,10 @@ website/out/
 # that by accident.
 /docs/
 /NOTION_OVERVIEW.md
+
+# local overlay test artifacts (not part of repo)
+/agent-preauth.key
+/agent-win-preauth.key
+/server-preauth.key
+/mac-apikey.txt
+/cara-agent

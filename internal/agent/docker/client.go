@@ -31,6 +31,12 @@ const (
 	// Managed volume, so operators and future tooling can map a running
 	// container back to its host data directory.
 	labelNamespace = "cara.namespace"
+	// labelUID records the Project's immutable server-generated UID (CARA-82).
+	// It is the authoritative ownership check: a leftover container from a
+	// previous lifetime of the same name carries a different (or, for
+	// pre-UID resources, an empty) value and must not be adopted as the
+	// current Project.
+	labelUID = "cara.uid"
 	// labelVolume lists the Managed volumes bound into a container (comma
 	// separated).
 	labelVolume = "cara.volume"
@@ -48,6 +54,14 @@ type DockerRuntime struct {
 	client   *dockerclient.Client
 	logger   *zap.Logger
 	dataRoot string
+	// enforceUID gates UID ownership fencing (CARA-82). When false
+	// (compatibility mode, the default during a mixed-agent rollout) new
+	// resources are still labelled with their Project UID, but ownership
+	// decisions fall back to (namespace, name) so pre-UID containers keep
+	// working. When true, UID equality is required before adopting, stopping,
+	// or removing a resource; a same-name container with a different or missing
+	// UID is treated as not owned.
+	enforceUID bool
 }
 
 // NewDockerRuntime creates a DockerRuntime connected to the Docker daemon at
@@ -57,7 +71,7 @@ type DockerRuntime struct {
 //
 // dataRoot is the directory the agent owns for Managed volume data; Managed
 // volumes are bind-mounted from {dataRoot}/volumes/{namespace}/{project}/{volume}/data.
-func NewDockerRuntime(host, dataRoot string, logger *zap.Logger) (*DockerRuntime, error) {
+func NewDockerRuntime(host, dataRoot string, enforceUID bool, logger *zap.Logger) (*DockerRuntime, error) {
 	c, err := dockerclient.NewClientWithOpts(
 		dockerclient.WithHost(host),
 		dockerclient.WithAPIVersionNegotiation(),
@@ -65,7 +79,7 @@ func NewDockerRuntime(host, dataRoot string, logger *zap.Logger) (*DockerRuntime
 	if err != nil {
 		return nil, fmt.Errorf("docker: create client: %w", err)
 	}
-	return &DockerRuntime{client: c, logger: logger, dataRoot: dataRoot}, nil
+	return &DockerRuntime{client: c, logger: logger, dataRoot: dataRoot, enforceUID: enforceUID}, nil
 }
 
 // Close releases the underlying HTTP connection to the Docker daemon.
@@ -80,7 +94,7 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 	log := r.logger.With(zap.String("project", project.Name))
 
 	// 1. Ensure the bridge network exists.
-	if err := r.ensureNetwork(ctx, project.Namespace, project.Name); err != nil {
+	if err := r.ensureNetwork(ctx, project.Namespace, project.Name, project.ObjectMeta.UID); err != nil {
 		return fmt.Errorf("ensure network: %w", err)
 	}
 
@@ -93,7 +107,7 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 
 	// 3. Ensure every service container exists and is running.
 	for _, svc := range project.Spec.Services {
-		if err := r.ensureContainer(ctx, project.Namespace, project.Name, svc, project.Spec.Volumes); err != nil {
+		if err := r.ensureContainer(ctx, project.Namespace, project.Name, project.ObjectMeta.UID, svc, project.Spec.Volumes); err != nil {
 			r.rollback(ctx, project, log)
 			return fmt.Errorf("ensure container %q: %w", svc.Name, err)
 		}
@@ -217,18 +231,30 @@ func (r *DockerRuntime) RemoveProject(ctx context.Context, namespace, projectNam
 }
 
 func containerOwnershipFilters(project ProjectIdentity) filters.Args {
-	return filters.NewArgs(
+	args := filters.NewArgs(
 		filters.Arg("label", labelProject+"="+project.Name),
 		filters.Arg("label", labelNamespace+"="+project.Namespace),
 		filters.Arg("label", labelService),
 	)
+	// When the identity carries a UID, scope the match to exactly that Project
+	// lifetime (CARA-82) so a destructive orphan operation on a previous
+	// lifetime never touches the current one, and vice versa. Identities built
+	// in compatibility mode carry no UID and match by (namespace, name) as before.
+	if project.UID != "" {
+		args.Add("label", labelUID+"="+project.UID)
+	}
+	return args
 }
 
 func resourceOwnershipFilters(project ProjectIdentity) filters.Args {
-	return filters.NewArgs(
+	args := filters.NewArgs(
 		filters.Arg("label", labelProject+"="+project.Name),
 		filters.Arg("label", labelNamespace+"="+project.Namespace),
 	)
+	if project.UID != "" {
+		args.Add("label", labelUID+"="+project.UID)
+	}
+	return args
 }
 
 // ListLocalProjects implements Runtime. A container is Cara-owned only when
@@ -251,6 +277,14 @@ func (r *DockerRuntime) ListLocalProjects(ctx context.Context) ([]ProjectIdentit
 		project := ProjectIdentity{
 			Namespace: c.Labels[labelNamespace],
 			Name:      c.Labels[labelProject],
+		}
+		// UID is part of the identity only when enforcing (CARA-82). In
+		// compatibility mode it is left empty so ownership matches by
+		// (namespace, name), preserving pre-UID behaviour. When enforcing, a
+		// legacy container with no UID label keeps UID="" here, which will not
+		// match the current assignment's UID and is therefore quarantined.
+		if r.enforceUID {
+			project.UID = c.Labels[labelUID]
 		}
 		if project.Namespace == "" || project.Name == "" || c.Labels[labelService] == "" {
 			r.logger.Warn("Ignoring container with incomplete Cara ownership labels",
@@ -349,7 +383,7 @@ func (r *DockerRuntime) removeOwnedNetwork(ctx context.Context, project ProjectI
 		}
 		return fmt.Errorf("inspect network %q: %w", netName, err)
 	}
-	if err := validateNetworkOwnership(netName, owned.Labels, project); err != nil {
+	if err := r.validateNetworkOwnership(netName, owned.Labels, project); err != nil {
 		return fmt.Errorf("refuse to remove network: %w", err)
 	}
 	if err := r.client.NetworkRemove(ctx, owned.ID); err != nil && !isNotFound(err) {
@@ -358,7 +392,7 @@ func (r *DockerRuntime) removeOwnedNetwork(ctx context.Context, project ProjectI
 	return nil
 }
 
-func validateNetworkOwnership(netName string, labels map[string]string, project ProjectIdentity) error {
+func (r *DockerRuntime) validateNetworkOwnership(netName string, labels map[string]string, project ProjectIdentity) error {
 	if labels[labelProject] != project.Name {
 		return fmt.Errorf("network %q: Cara project ownership label does not match", netName)
 	}
@@ -366,6 +400,14 @@ func validateNetworkOwnership(netName string, labels map[string]string, project 
 	// namespace, but reject a conflicting one.
 	if namespace := labels[labelNamespace]; namespace != "" && namespace != project.Namespace {
 		return fmt.Errorf("network %q: namespace ownership label does not match", netName)
+	}
+	// UID fencing (CARA-82): when enforcing, an existing network must carry the
+	// current Project's UID. A different value is a previous lifetime; an empty
+	// value is a pre-UID (legacy) network. Neither may be adopted. When not
+	// enforcing, UID is ignored so mixed-rollout networks keep working.
+	if r.enforceUID && project.UID != "" && labels[labelUID] != project.UID {
+		return fmt.Errorf("network %q: UID ownership label %q does not match current Project UID %q",
+			netName, labels[labelUID], project.UID)
 	}
 	return nil
 }
@@ -473,13 +515,13 @@ func (r *DockerRuntime) GetContainerIPs(ctx context.Context, project *v1.Project
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
 // ensureNetwork creates the project's bridge network if it does not yet exist.
-func (r *DockerRuntime) ensureNetwork(ctx context.Context, namespace, projectName string) error {
+func (r *DockerRuntime) ensureNetwork(ctx context.Context, namespace, projectName, uid string) error {
 	netName := NetworkName(projectName)
-	identity := ProjectIdentity{Namespace: namespace, Name: projectName}
+	identity := ProjectIdentity{Namespace: namespace, Name: projectName, UID: uid}
 
 	existing, err := r.client.NetworkInspect(ctx, netName, network.InspectOptions{})
 	if err == nil {
-		if err := validateNetworkOwnership(netName, existing.Labels, identity); err != nil {
+		if err := r.validateNetworkOwnership(netName, existing.Labels, identity); err != nil {
 			return fmt.Errorf("existing network ownership: %w", err)
 		}
 		r.logger.Debug("Network already exists", zap.String("network", netName))
@@ -494,6 +536,7 @@ func (r *DockerRuntime) ensureNetwork(ctx context.Context, namespace, projectNam
 		Labels: map[string]string{
 			labelProject:   identity.Name,
 			labelNamespace: identity.Namespace,
+			labelUID:       identity.UID,
 		},
 	})
 	if err != nil {
@@ -622,7 +665,7 @@ func (r *DockerRuntime) buildBinds(namespace, projectName string, svc v1.Service
 // ensureContainer creates and starts the container for a single service if it
 // is not already running. vols is the project's volume list, used to resolve
 // each mount's bind source by volume type.
-func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectName string, svc v1.ServiceDef, vols []v1.VolumeDef) error {
+func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectName, uid string, svc v1.ServiceDef, vols []v1.VolumeDef) error {
 	cName := ContainerName(projectName, svc.Name)
 	log := r.logger.With(
 		zap.String("container", cName),
@@ -635,7 +678,16 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 	}
 
 	if err == nil {
-		// Container exists.
+		// Container exists. UID fencing (CARA-82): when enforcing, refuse to
+		// adopt a same-name container that carries a different UID (a previous
+		// lifetime) or no UID at all (a pre-UID/legacy container). Adopting it
+		// would let a stale or foreign container masquerade as the current
+		// Project. The orphan sweep is responsible for stopping and removing
+		// such containers; ensureContainer only refuses to reuse them.
+		if r.enforceUID && uid != "" && info.Config != nil && info.Config.Labels[labelUID] != uid {
+			return fmt.Errorf("refuse to adopt container %q: UID label %q does not match current Project UID %q",
+				cName, info.Config.Labels[labelUID], uid)
+		}
 		if info.State.Running {
 			log.Debug("Container already running")
 			return nil
@@ -677,6 +729,7 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 		labelProject:   projectName,
 		labelService:   svc.Name,
 		labelNamespace: namespace,
+		labelUID:       uid,
 	}
 	if len(managedNames) > 0 {
 		labels[labelVolume] = strings.Join(managedNames, ",")

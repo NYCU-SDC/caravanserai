@@ -50,10 +50,16 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 )
+
+// newUID returns a fresh, immutable, server-generated resource UID (CARA-82).
+// Generation lives in the store because that is the single point where a
+// resource is first persisted; clients never supply their own value.
+func newUID() string { return uuid.NewString() }
 
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
@@ -162,6 +168,8 @@ func (s *Store) CreateNode(ctx context.Context, node *v1.Node) error {
 	now := time.Now().UTC()
 	node.ObjectMeta.CreatedAt = now
 	node.ObjectMeta.UpdatedAt = now
+	// UID is server-owned and assigned once at creation; ignore any inbound value.
+	node.ObjectMeta.UID = newUID()
 
 	spec, err := json.Marshal(node.Spec)
 	if err != nil {
@@ -181,9 +189,9 @@ func (s *Store) CreateNode(ctx context.Context, node *v1.Node) error {
 	}
 
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO resources (kind, name, namespace, phase, spec, status, labels, annotations, created_at, updated_at, resource_version)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1)`,
-		kindNode, node.Name, defaultNamespace, string(node.Status.State),
+		INSERT INTO resources (kind, name, namespace, uid, phase, spec, status, labels, annotations, created_at, updated_at, resource_version)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1)`,
+		kindNode, node.Name, defaultNamespace, node.ObjectMeta.UID, string(node.Status.State),
 		spec, status, labels, annotations,
 		now, now,
 	)
@@ -206,19 +214,19 @@ func (s *Store) GetNode(ctx context.Context, name string) (*v1.Node, error) {
 
 func (s *Store) getNode(ctx context.Context, name string) (*v1.Node, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources
 		WHERE kind = $1 AND name = $2`,
 		kindNode, name,
 	)
 
 	var (
-		namespace                                     string
+		namespace, uid                                string
 		resourceVersion                               int64
 		rawSpec, rawStatus, rawLabels, rawAnnotations []byte
 		createdAt, updatedAt                          time.Time
 	)
-	if err := row.Scan(&namespace, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&namespace, &uid, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
@@ -228,7 +236,7 @@ func (s *Store) getNode(ctx context.Context, name string) (*v1.Node, error) {
 	node := &v1.Node{
 		TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindNode},
 		ObjectMeta: v1.ObjectMeta{
-			Name: name, Namespace: namespace, ResourceVersion: resourceVersion,
+			Name: name, UID: uid, Namespace: namespace, ResourceVersion: resourceVersion,
 			CreatedAt: createdAt, UpdatedAt: updatedAt,
 		},
 	}
@@ -241,7 +249,7 @@ func (s *Store) getNode(ctx context.Context, name string) (*v1.Node, error) {
 // ListNodes implements store.NodeStore.
 func (s *Store) ListNodes(ctx context.Context) ([]*v1.Node, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources WHERE kind = $1`, kindNode)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list nodes: %w", err)
@@ -251,18 +259,18 @@ func (s *Store) ListNodes(ctx context.Context) ([]*v1.Node, error) {
 	var nodes []*v1.Node
 	for rows.Next() {
 		var (
-			name, namespace                               string
+			name, namespace, uid                          string
 			resourceVersion                               int64
 			rawSpec, rawStatus, rawLabels, rawAnnotations []byte
 			createdAt, updatedAt                          time.Time
 		)
-		if err := rows.Scan(&name, &namespace, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&name, &namespace, &uid, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("postgres: scan node row: %w", err)
 		}
 		node := &v1.Node{
 			TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindNode},
 			ObjectMeta: v1.ObjectMeta{
-				Name: name, Namespace: namespace, ResourceVersion: resourceVersion,
+				Name: name, UID: uid, Namespace: namespace, ResourceVersion: resourceVersion,
 				CreatedAt: createdAt, UpdatedAt: updatedAt,
 			},
 		}
@@ -410,6 +418,8 @@ func (s *Store) CreateProject(ctx context.Context, project *v1.Project) error {
 	now := time.Now().UTC()
 	project.ObjectMeta.CreatedAt = now
 	project.ObjectMeta.UpdatedAt = now
+	// UID is server-owned and assigned once at creation; ignore any inbound value.
+	project.ObjectMeta.UID = newUID()
 	if project.ObjectMeta.Namespace == "" {
 		project.ObjectMeta.Namespace = defaultNamespace
 	}
@@ -432,9 +442,9 @@ func (s *Store) CreateProject(ctx context.Context, project *v1.Project) error {
 	}
 
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO resources (kind, name, namespace, phase, spec, status, labels, annotations, created_at, updated_at, resource_version)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1)`,
-		kindProject, project.Name, project.ObjectMeta.Namespace, string(project.Status.Phase),
+		INSERT INTO resources (kind, name, namespace, uid, phase, spec, status, labels, annotations, created_at, updated_at, resource_version)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1)`,
+		kindProject, project.Name, project.ObjectMeta.Namespace, project.ObjectMeta.UID, string(project.Status.Phase),
 		spec, status, labels, annotations,
 		now, now,
 	)
@@ -456,19 +466,19 @@ func (s *Store) GetProject(ctx context.Context, name string) (*v1.Project, error
 
 func (s *Store) getProject(ctx context.Context, name string) (*v1.Project, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources
 		WHERE kind = $1 AND namespace = $2 AND name = $3`,
 		kindProject, defaultNamespace, name,
 	)
 
 	var (
-		namespace                                     string
+		namespace, uid                                string
 		resourceVersion                               int64
 		rawSpec, rawStatus, rawLabels, rawAnnotations []byte
 		createdAt, updatedAt                          time.Time
 	)
-	if err := row.Scan(&namespace, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&namespace, &uid, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
@@ -478,7 +488,7 @@ func (s *Store) getProject(ctx context.Context, name string) (*v1.Project, error
 	project := &v1.Project{
 		TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindProject},
 		ObjectMeta: v1.ObjectMeta{
-			Name: name, Namespace: namespace, ResourceVersion: resourceVersion,
+			Name: name, UID: uid, Namespace: namespace, ResourceVersion: resourceVersion,
 			CreatedAt: createdAt, UpdatedAt: updatedAt,
 		},
 	}
@@ -491,7 +501,7 @@ func (s *Store) getProject(ctx context.Context, name string) (*v1.Project, error
 // ListProjects implements store.ProjectStore.
 func (s *Store) ListProjects(ctx context.Context) ([]*v1.Project, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources WHERE kind = $1 AND namespace = $2`, kindProject, defaultNamespace)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list projects: %w", err)
@@ -505,7 +515,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]*v1.Project, error) {
 // Uses the promoted phase column + idx_resources_kind_phase index.
 func (s *Store) ListProjectsByPhase(ctx context.Context, phase v1.ProjectPhase) ([]*v1.Project, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources WHERE kind = $1 AND namespace = $2 AND phase = $3`,
 		kindProject, defaultNamespace, string(phase),
 	)
@@ -531,7 +541,7 @@ func (s *Store) ListProjectsByPhases(ctx context.Context, phases []v1.ProjectPha
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources WHERE kind = $1 AND namespace = $2 AND phase = ANY($3)`,
 		kindProject, defaultNamespace, phaseStrings,
 	)
@@ -559,7 +569,7 @@ func (s *Store) ListProjectsByNodeRef(ctx context.Context, nodeRef string, phase
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources
 		WHERE kind = $1 AND namespace = $2 AND phase = ANY($3) AND status->>'nodeRef' = $4`,
 		kindProject, defaultNamespace, phaseStrings, nodeRef,
@@ -994,6 +1004,8 @@ func (s *Store) CreateSecret(ctx context.Context, secret *v1.Secret) error {
 	now := time.Now().UTC()
 	secret.ObjectMeta.CreatedAt = now
 	secret.ObjectMeta.UpdatedAt = now
+	// UID is server-owned and assigned once at creation; ignore any inbound value.
+	secret.ObjectMeta.UID = newUID()
 	if secret.ObjectMeta.Namespace == "" {
 		secret.ObjectMeta.Namespace = defaultNamespace
 	}
@@ -1016,9 +1028,9 @@ func (s *Store) CreateSecret(ctx context.Context, secret *v1.Secret) error {
 	}
 
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO resources (kind, name, namespace, phase, spec, status, labels, annotations, created_at, updated_at, resource_version)
-		VALUES ($1, $2, $3, '', $4, $5, $6, $7, $8, $9, 1)`,
-		kindSecret, secret.Name, secret.ObjectMeta.Namespace,
+		INSERT INTO resources (kind, name, namespace, uid, phase, spec, status, labels, annotations, created_at, updated_at, resource_version)
+		VALUES ($1, $2, $3, $4, '', $5, $6, $7, $8, $9, $10, 1)`,
+		kindSecret, secret.Name, secret.ObjectMeta.Namespace, secret.ObjectMeta.UID,
 		spec, status, labels, annotations,
 		now, now,
 	)
@@ -1035,19 +1047,19 @@ func (s *Store) CreateSecret(ctx context.Context, secret *v1.Secret) error {
 // GetSecret implements store.SecretStore.
 func (s *Store) GetSecret(ctx context.Context, name string) (*v1.Secret, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources
 		WHERE kind = $1 AND namespace = $2 AND name = $3`,
 		kindSecret, defaultNamespace, name,
 	)
 
 	var (
-		namespace                                     string
+		namespace, uid                                string
 		resourceVersion                               int64
 		rawSpec, rawStatus, rawLabels, rawAnnotations []byte
 		createdAt, updatedAt                          time.Time
 	)
-	if err := row.Scan(&namespace, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&namespace, &uid, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
@@ -1057,7 +1069,7 @@ func (s *Store) GetSecret(ctx context.Context, name string) (*v1.Secret, error) 
 	secret := &v1.Secret{
 		TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindSecret},
 		ObjectMeta: v1.ObjectMeta{
-			Name: name, Namespace: namespace, ResourceVersion: resourceVersion,
+			Name: name, UID: uid, Namespace: namespace, ResourceVersion: resourceVersion,
 			CreatedAt: createdAt, UpdatedAt: updatedAt,
 		},
 	}
@@ -1070,7 +1082,7 @@ func (s *Store) GetSecret(ctx context.Context, name string) (*v1.Secret, error) 
 // ListSecrets implements store.SecretStore.
 func (s *Store) ListSecrets(ctx context.Context) ([]*v1.Secret, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, namespace, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources WHERE kind = $1 AND namespace = $2`, kindSecret, defaultNamespace)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list secrets: %w", err)
@@ -1142,18 +1154,18 @@ func scanSecrets(rows pgx.Rows) ([]*v1.Secret, error) {
 	var secrets []*v1.Secret
 	for rows.Next() {
 		var (
-			name, namespace                               string
+			name, namespace, uid                          string
 			resourceVersion                               int64
 			rawSpec, rawStatus, rawLabels, rawAnnotations []byte
 			createdAt, updatedAt                          time.Time
 		)
-		if err := rows.Scan(&name, &namespace, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&name, &namespace, &uid, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("postgres: scan secret row: %w", err)
 		}
 		secret := &v1.Secret{
 			TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindSecret},
 			ObjectMeta: v1.ObjectMeta{
-				Name: name, Namespace: namespace, ResourceVersion: resourceVersion,
+				Name: name, UID: uid, Namespace: namespace, ResourceVersion: resourceVersion,
 				CreatedAt: createdAt, UpdatedAt: updatedAt,
 			},
 		}
@@ -1170,18 +1182,18 @@ func scanProjects(rows pgx.Rows) ([]*v1.Project, error) {
 	var projects []*v1.Project
 	for rows.Next() {
 		var (
-			name, namespace                               string
+			name, namespace, uid                          string
 			resourceVersion                               int64
 			rawSpec, rawStatus, rawLabels, rawAnnotations []byte
 			createdAt, updatedAt                          time.Time
 		)
-		if err := rows.Scan(&name, &namespace, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&name, &namespace, &uid, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("postgres: scan project row: %w", err)
 		}
 		project := &v1.Project{
 			TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindProject},
 			ObjectMeta: v1.ObjectMeta{
-				Name: name, Namespace: namespace, ResourceVersion: resourceVersion,
+				Name: name, UID: uid, Namespace: namespace, ResourceVersion: resourceVersion,
 				CreatedAt: createdAt, UpdatedAt: updatedAt,
 			},
 		}

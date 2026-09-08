@@ -77,6 +77,7 @@ var describeNodeCoveredFields = newStringSet(
 	"Kind",
 	// ObjectMeta (embedded)
 	"Name",
+	"UID",
 	"Namespace",
 	"ResourceVersion",
 	"Labels",
@@ -115,6 +116,7 @@ var describeProjectCoveredFields = newStringSet(
 	"Kind",
 	// ObjectMeta (embedded)
 	"Name",
+	"UID",
 	"Namespace",
 	"ResourceVersion",
 	"Labels",
@@ -144,6 +146,7 @@ var describeSecretCoveredFields = newStringSet(
 	"Kind",
 	// ObjectMeta (embedded)
 	"Name",
+	"UID",
 	"Namespace",
 	"ResourceVersion",
 	"Labels",

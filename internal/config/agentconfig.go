@@ -74,6 +74,15 @@ type AgentConfig struct {
 	// OverlayHostname optionally overrides the hostname the agent registers
 	// with Headscale.  Defaults to NodeName (the OS hostname) when empty.
 	OverlayHostname string `yaml:"overlay_hostname" envconfig:"OVERLAY_HOSTNAME"`
+	// UIDEnforcement turns on Project UID ownership fencing (CARA-82). When
+	// false (the default, "compatibility mode") new Docker resources are still
+	// labelled with their Project UID but ownership decisions fall back to
+	// (namespace, name), so an agent upgraded ahead of the fleet does not
+	// quarantine still-valid pre-UID containers. Enable it cluster-wide only
+	// after every agent understands UID-bearing reconcile payloads: a same-name
+	// container carrying a different or missing UID is then treated as not owned
+	// (refused for adoption and quarantined by the orphan sweep).
+	UIDEnforcement bool `yaml:"uid_enforcement" envconfig:"UID_ENFORCEMENT"`
 	// S3 configures the object store used for Managed volume backups.
 	// Leaving Endpoint empty disables backups; see S3Config.
 	S3 S3Config `yaml:"s3"`
@@ -238,6 +247,7 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 		HeadscaleURL:     os.Getenv("HEADSCALE_URL"),
 		PreauthKeyFile:   os.Getenv("HEADSCALE_PREAUTH_KEY_FILE"),
 		OverlayHostname:  os.Getenv("OVERLAY_HOSTNAME"),
+		UIDEnforcement:   os.Getenv("UID_ENFORCEMENT") == "true",
 		S3: S3Config{
 			Endpoint:  os.Getenv("S3_ENDPOINT"),
 			Bucket:    os.Getenv("S3_BUCKET"),
@@ -272,6 +282,7 @@ func AgentFromFlags(cfg *AgentConfig) (*AgentConfig, error) {
 	flag.StringVar(&flagConfig.HeadscaleURL, "headscale-url", "", "Headscale control-plane URL to join on startup (enables overlay networking)")
 	flag.StringVar(&flagConfig.PreauthKeyFile, "preauth-key-file", "", "path to a file containing the Headscale pre-auth key")
 	flag.StringVar(&flagConfig.OverlayHostname, "overlay-hostname", "", "hostname to register with Headscale (default: node name)")
+	flag.BoolVar(&flagConfig.UIDEnforcement, "uid-enforcement", false, "enforce Project UID ownership fencing (default: false, compatibility mode)")
 	flag.Parse()
 	return configutil.Merge[AgentConfig](cfg, flagConfig)
 }

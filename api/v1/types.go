@@ -19,6 +19,15 @@ type ObjectMeta struct {
 	// Name is the unique identifier within its Kind namespace.
 	Name string `json:"name" yaml:"name"`
 
+	// UID is an immutable, server-generated identity assigned once when the
+	// resource is first created. Unlike Name, it is never reused: deleting and
+	// recreating a resource with the same Name yields a different UID. Runtime
+	// ownership (e.g. Docker container labels) is fenced on UID so a delayed
+	// request or a leftover container from a previous lifetime of the same Name
+	// cannot be mistaken for the current resource. Clients cannot set or change
+	// it; any client-supplied value is ignored by the server.
+	UID string `json:"uid,omitempty" yaml:"uid,omitempty"`
+
 	// Namespace scopes this resource within its Kind. 1.0 locks every write to
 	// "" or "default" (enforced in ValidateNamespace); see api/v1/validation.go
 	// for the removal pointer once namespaces open up post-1.0.

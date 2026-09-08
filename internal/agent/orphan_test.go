@@ -81,7 +81,7 @@ func newSweepFixture(local ...docker.ProjectIdentity) (*mockRuntime, *sweepRecor
 			return record.removeErr
 		},
 		reconcileFn: func(_ context.Context, project *v1.Project) error {
-			record.reconciled = append(record.reconciled, projectIdentity(project))
+			record.reconciled = append(record.reconciled, projectIdentity(project, false))
 			return nil
 		},
 		getContainerIPs: func(context.Context, *v1.Project) (map[string]string, error) {
@@ -116,7 +116,7 @@ func sweep(
 	busy busyChecker,
 	projects ...*v1.Project,
 ) {
-	sweepOrphans(context.Background(), runtime, routes, tracker, busy, projects, zap.NewNop())
+	sweepOrphans(context.Background(), runtime, routes, tracker, busy, projects, false, zap.NewNop())
 }
 
 func TestSweepOrphans_StopsImmediatelyThenRemovesAfterGrace(t *testing.T) {
@@ -299,7 +299,7 @@ func TestReconcileProjects_ServerErrorResetsDeletionGrace(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	client := NewClient(zap.NewNop(), server.URL, "test-node")
-	reconcileProjects(context.Background(), client, runtime, nil, nil, tracker, zap.NewNop())
+	reconcileProjects(context.Background(), client, runtime, nil, nil, tracker, false, zap.NewNop())
 
 	// A fresh successful snapshot starts a new full grace period.
 	sweep(runtime, nil, tracker, nil)
@@ -310,4 +310,80 @@ func TestReconcileProjects_ServerErrorResetsDeletionGrace(t *testing.T) {
 	clock.advance(time.Second)
 	sweep(runtime, nil, tracker, nil)
 	assert.Equal(t, []docker.ProjectIdentity{project}, record.removed)
+}
+
+// identityUID builds a ProjectIdentity carrying a UID, mirroring what
+// DockerRuntime.ListLocalProjects emits when UID enforcement is on.
+func identityUID(namespace, name, uid string) docker.ProjectIdentity {
+	return docker.ProjectIdentity{Namespace: namespace, Name: name, UID: uid}
+}
+
+func assignedProjectUID(namespace, name, uid string, phase v1.ProjectPhase) *v1.Project {
+	p := assignedProject(namespace, name, phase)
+	p.ObjectMeta.UID = uid
+	return p
+}
+
+// With UID enforcement on, a leftover container from a previous lifetime of the
+// same (namespace, name) — a different UID — is not owned by the current
+// assignment and must be quarantined (stopped), even though the server still
+// assigns a Project with that name to this node (CARA-82 delete-and-recreate).
+func TestSweepOrphans_UIDEnforcement_QuarantinesPreviousLifetime(t *testing.T) {
+	oldLifetime := identityUID("default", "foo", "uid-old")
+	runtime, record := newSweepFixture(oldLifetime)
+	routes := &recordingRoutes{}
+	tracker := newOrphanTracker(&fakeClock{now: time.Now()})
+
+	// Server assigns a freshly recreated "foo" with a different UID.
+	current := assignedProjectUID("default", "foo", "uid-new", v1.ProjectPhaseRunning)
+	sweepOrphans(context.Background(), runtime, routes, tracker, nil,
+		[]*v1.Project{current}, true, zap.NewNop())
+
+	assert.Equal(t, []docker.ProjectIdentity{oldLifetime}, record.stopped,
+		"previous-lifetime container must be quarantined, not adopted as the new Project")
+	assert.Empty(t, record.reconciled, "the stale container must never be reconciled as current")
+}
+
+// With UID enforcement on, a pre-UID (legacy) container carries no UID label and
+// therefore cannot be proven to belong to the current assignment; it is
+// quarantined rather than silently adopted.
+func TestSweepOrphans_UIDEnforcement_QuarantinesLegacyContainer(t *testing.T) {
+	legacy := identityUID("default", "foo", "") // no UID label
+	runtime, record := newSweepFixture(legacy)
+	tracker := newOrphanTracker(&fakeClock{now: time.Now()})
+
+	current := assignedProjectUID("default", "foo", "uid-new", v1.ProjectPhaseRunning)
+	sweepOrphans(context.Background(), runtime, &recordingRoutes{}, tracker, nil,
+		[]*v1.Project{current}, true, zap.NewNop())
+
+	assert.Equal(t, []docker.ProjectIdentity{legacy}, record.stopped,
+		"legacy container with no UID must be quarantined under enforcement")
+}
+
+// A container whose UID matches the current assignment is owned and left alone.
+func TestSweepOrphans_UIDEnforcement_KeepsMatchingUID(t *testing.T) {
+	current := identityUID("default", "foo", "uid-new")
+	runtime, record := newSweepFixture(current)
+	tracker := newOrphanTracker(&fakeClock{now: time.Now()})
+
+	assigned := assignedProjectUID("default", "foo", "uid-new", v1.ProjectPhaseRunning)
+	sweepOrphans(context.Background(), runtime, &recordingRoutes{}, tracker, nil,
+		[]*v1.Project{assigned}, true, zap.NewNop())
+
+	assert.Empty(t, record.stopped, "a container with the matching UID must not be quarantined")
+}
+
+// In compatibility mode (enforcement off) a same-name container is matched by
+// (namespace, name) regardless of UID, preserving pre-CARA-82 behaviour so a
+// single upgraded agent does not quarantine still-valid containers.
+func TestSweepOrphans_CompatibilityMode_IgnoresUID(t *testing.T) {
+	legacy := identity("default", "foo") // ListLocalProjects emits no UID when off
+	runtime, record := newSweepFixture(legacy)
+	tracker := newOrphanTracker(&fakeClock{now: time.Now()})
+
+	current := assignedProjectUID("default", "foo", "uid-new", v1.ProjectPhaseRunning)
+	sweepOrphans(context.Background(), runtime, &recordingRoutes{}, tracker, nil,
+		[]*v1.Project{current}, false, zap.NewNop())
+
+	assert.Empty(t, record.stopped, "compatibility mode must match by name and keep the container")
 }
