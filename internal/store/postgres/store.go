@@ -743,6 +743,230 @@ func (s *Store) ClearProjectCondition(ctx context.Context, name string, conditio
 	return nil
 }
 
+// assignmentFenceWHERE is the SQL predicate that pins a write to one exact
+// assignment: the immutable UID column, and the nodeRef and generation carried
+// inside the status JSONB. COALESCE keeps the comparison total — a Pending row
+// with no nodeRef reads as '' and a row with no generation reads as 0, so an
+// Agent presenting an empty or zero fence still matches only a row that is
+// genuinely empty or zero, never NULL-swallowed into a false positive.
+//
+// The caller supplies the three bind parameters in order (uid, nodeRef,
+// generation); %d placeholders are filled by fmt so each query can number them
+// after its own leading parameters.
+const assignmentFenceWHERE = ` AND uid = $%d` +
+	` AND COALESCE(status->>'nodeRef', '') = $%d` +
+	` AND COALESCE((status->>'assignmentGeneration')::bigint, 0) = $%d`
+
+// fenceMatches reports whether p's current ownership equals the fence ref.
+// It is the Go-side mirror of assignmentFenceWHERE, used only to explain a
+// write that matched no row — never as the authority for allowing one, which
+// is always the SQL predicate above.
+func fenceMatches(ref store.AssignmentRef, p *v1.Project) bool {
+	return p.ObjectMeta.UID == ref.UID &&
+		p.Status.NodeRef == ref.NodeRef &&
+		p.Status.AssignmentGeneration == ref.Generation
+}
+
+// ReportProjectStatusFenced implements store.ProjectStore.
+//
+// It is UpdateProjectStatusWithRetry with an assignment fence welded onto the
+// compare-and-swap. The stale check is not a preflight SELECT: the snapshot it
+// reads is the same one the CAS is versioned against, and the swap's own WHERE
+// re-asserts the fence, so a reassignment that lands between the read and the
+// write turns the swap into a miss that classifies as stale rather than a
+// silently accepted overwrite.
+func (s *Store) ReportProjectStatusFenced(
+	ctx context.Context,
+	name string,
+	ref store.AssignmentRef,
+	mutate func(*v1.ProjectStatus) error,
+) error {
+	var lastConflict error
+
+	for attempt := 0; attempt < maxStatusUpdateAttempts; attempt++ {
+		project, err := s.getProject(ctx, name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+			}
+			return err
+		}
+
+		// Early stale exit on the snapshot the CAS will guard against. Retrying
+		// cannot make a stale fence current, so this returns immediately.
+		if !fenceMatches(ref, project) {
+			return fmt.Errorf("%w: project %q", store.ErrStaleAssignment, name)
+		}
+
+		current := project.Status
+		next := copyProjectStatus(current)
+		if err := mutate(&next); err != nil {
+			return err
+		}
+
+		unchanged, err := statusEqual(current, next)
+		if err != nil {
+			return fmt.Errorf("postgres: compare project status %q: %w", name, err)
+		}
+		if unchanged {
+			return nil
+		}
+
+		err = s.swapProjectStatusFenced(ctx, name, project.ObjectMeta.ResourceVersion, ref, next)
+		switch {
+		case err == nil:
+			s.publish(event.TopicProjectUpdated, name)
+			return nil
+		case errors.Is(err, store.ErrVersionConflict):
+			lastConflict = err
+		default:
+			return err
+		}
+	}
+
+	return lastConflict
+}
+
+// swapProjectStatusFenced is one compare-and-swap attempt whose WHERE also
+// carries the assignment fence. A miss is either a lost version race (retry),
+// a vanished row, or a fence that no longer matches (stale, no retry);
+// classifyFencedSwapMiss tells them apart.
+func (s *Store) swapProjectStatusFenced(
+	ctx context.Context,
+	name string,
+	expectedVersion int64,
+	ref store.AssignmentRef,
+	status v1.ProjectStatus,
+) error {
+	raw, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal project status: %w", err)
+	}
+
+	query := `
+		UPDATE resources
+		SET phase = $1, status = $2, updated_at = $3, resource_version = resource_version + 1
+		WHERE kind = $4 AND namespace = $5 AND name = $6 AND resource_version = $7` +
+		fmt.Sprintf(assignmentFenceWHERE, 8, 9, 10)
+
+	tag, err := s.pool.Exec(ctx, query,
+		string(status.Phase), raw, time.Now().UTC(),
+		kindProject, defaultNamespace, name, expectedVersion,
+		ref.UID, ref.NodeRef, ref.Generation,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: fenced update project status %q at version %d: %w", name, expectedVersion, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return s.classifyFencedSwapMiss(ctx, name, ref)
+	}
+	return nil
+}
+
+// classifyFencedSwapMiss explains a fenced compare-and-swap that matched no
+// row. A matching fence means only the version moved (a real race, retryable);
+// a mismatching fence means ownership changed under the Agent (stale, not
+// retryable); a missing row means the Project was deleted.
+func (s *Store) classifyFencedSwapMiss(ctx context.Context, name string, ref store.AssignmentRef) error {
+	project, err := s.getProject(ctx, name)
+	switch {
+	case err == nil && fenceMatches(ref, project):
+		return fmt.Errorf("%w: project %q", store.ErrVersionConflict, name)
+	case err == nil:
+		return fmt.Errorf("%w: project %q", store.ErrStaleAssignment, name)
+	case errors.Is(err, store.ErrNotFound):
+		return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+	default:
+		return fmt.Errorf("postgres: classify fenced project status update %q: %w", name, err)
+	}
+}
+
+// PatchProjectConditionFenced implements store.ProjectStore. It is
+// PatchProjectCondition with the assignment fence added to the single merge
+// UPDATE, so the check and the write are one statement.
+func (s *Store) PatchProjectConditionFenced(
+	ctx context.Context,
+	name string,
+	ref store.AssignmentRef,
+	condition v1.Condition,
+) error {
+	raw, err := json.Marshal([]v1.Condition{condition})
+	if err != nil {
+		return fmt.Errorf("postgres: marshal condition: %w", err)
+	}
+
+	newStatus := fmt.Sprintf("jsonb_set(status, '{conditions}', %s || $5::jsonb)", conditionsExcludingType)
+	query := fmt.Sprintf(`
+		UPDATE resources
+		SET status = %s, updated_at = $6, resource_version = resource_version + 1
+		WHERE kind = $1 AND namespace = $2 AND name = $3%s
+		  AND status IS DISTINCT FROM %s`,
+		newStatus, fmt.Sprintf(assignmentFenceWHERE, 7, 8, 9), newStatus)
+
+	tag, err := s.pool.Exec(ctx, query,
+		kindProject, defaultNamespace, name, string(condition.Type), raw, time.Now().UTC(),
+		ref.UID, ref.NodeRef, ref.Generation,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: fenced patch project condition %q: %w", name, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return s.classifyFencedConditionMiss(ctx, name, ref)
+	}
+
+	s.publish(event.TopicProjectUpdated, name)
+	return nil
+}
+
+// ClearProjectConditionFenced implements store.ProjectStore. It is
+// ClearProjectCondition with the same atomic fence as PatchProjectConditionFenced.
+func (s *Store) ClearProjectConditionFenced(
+	ctx context.Context,
+	name string,
+	ref store.AssignmentRef,
+	conditionType v1.ConditionType,
+) error {
+	newStatus := fmt.Sprintf("jsonb_set(status, '{conditions}', %s)", conditionsExcludingType)
+	query := fmt.Sprintf(`
+		UPDATE resources
+		SET status = %s, updated_at = $5, resource_version = resource_version + 1
+		WHERE kind = $1 AND namespace = $2 AND name = $3%s
+		  AND status IS DISTINCT FROM %s`,
+		newStatus, fmt.Sprintf(assignmentFenceWHERE, 6, 7, 8), newStatus)
+
+	tag, err := s.pool.Exec(ctx, query,
+		kindProject, defaultNamespace, name, string(conditionType), time.Now().UTC(),
+		ref.UID, ref.NodeRef, ref.Generation,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: fenced clear project condition %q: %w", name, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return s.classifyFencedConditionMiss(ctx, name, ref)
+	}
+
+	s.publish(event.TopicProjectUpdated, name)
+	return nil
+}
+
+// classifyFencedConditionMiss explains a fenced condition write that matched no
+// row. Unlike the CAS path there is no version to race: a matching fence means
+// the write changed nothing (a genuine no-op, nil), a mismatching fence means
+// the Agent lost ownership (stale), and a missing row means deletion.
+func (s *Store) classifyFencedConditionMiss(ctx context.Context, name string, ref store.AssignmentRef) error {
+	project, err := s.getProject(ctx, name)
+	switch {
+	case err == nil && fenceMatches(ref, project):
+		return nil
+	case err == nil:
+		return fmt.Errorf("%w: project %q", store.ErrStaleAssignment, name)
+	case errors.Is(err, store.ErrNotFound):
+		return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+	default:
+		return fmt.Errorf("postgres: classify fenced project condition %q: %w", name, err)
+	}
+}
+
 // classifyProjectNoOp resolves the two reasons a guarded update can affect no
 // rows: the Project does not exist, or the write changed nothing. Only the
 // former is an error.

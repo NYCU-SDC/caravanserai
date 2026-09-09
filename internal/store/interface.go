@@ -43,6 +43,37 @@ var ErrConflictState = errors.New("operation conflicts with current resource sta
 // folding them together would leave that decision with nothing to test.
 var ErrVersionConflict = errors.New("resource version conflict")
 
+// ErrStaleAssignment is returned when an Agent-authenticated write presents an
+// assignment fence — UID, nodeRef, and generation — that no longer matches the
+// Project's current ownership.  It is the ABA guard: a report from an Agent
+// that has since lost ownership (the Project moved to another Node, or came
+// back to the same Node under a newer generation) is rejected without changing
+// status, conditions, resourceVersion, or publishing an event.
+//
+// It is deliberately distinct from both ErrVersionConflict and ErrConflictState.
+// ErrVersionConflict means "you lost a race, read again and retry"; retrying a
+// stale assignment would only re-confirm the mismatch.  The caller (the Agent)
+// must instead stop and wait for a fresh ownership snapshot.  Handlers map it to
+// HTTP 409 without exposing the underlying identity mismatch.
+var ErrStaleAssignment = errors.New("stale assignment fence")
+
+// AssignmentRef is the ownership fence an Agent presents on every write: the
+// Project UID it was told to run, the Node it believes it is, and the
+// assignment generation that authorised it.  The store validates all three
+// atomically inside the guarded mutation — never as a separate preflight
+// SELECT — so a reassignment cannot slip between a check and the write it
+// guards.
+type AssignmentRef struct {
+	// UID is the immutable Project identity from ObjectMeta (CARA-82).
+	UID string
+	// NodeRef is the Node the Agent believes currently owns the Project.
+	NodeRef string
+	// Generation is the assignment generation the Agent was granted. A value
+	// of zero is only ever current for a NeverAssigned Project, which no Agent
+	// reports on, so a zero fence from an Agent is always stale.
+	Generation int64
+}
+
 // Store is the top-level persistence interface.  A single concrete type
 // (e.g. sqlite.Store) implements all methods; tests may implement a subset
 // via a narrow sub-interface or a hand-rolled stub.
@@ -233,6 +264,29 @@ type ProjectStore interface {
 	// status, with the same isolation guarantees as PatchProjectCondition.
 	// Removing an absent condition is a no-op.
 	ClearProjectCondition(ctx context.Context, name string, conditionType v1.ConditionType) error
+
+	// ReportProjectStatusFenced is the Agent's status-report path. It behaves
+	// like UpdateProjectStatusWithRetry — a compare-and-swap read-modify-write
+	// with the same no-op and retry semantics — but the guarding UPDATE also
+	// carries the assignment fence (UID, nodeRef, generation) in its WHERE
+	// clause. A mutation whose fence no longer matches the row commits nothing
+	// and returns ErrStaleAssignment; it never retries, because a stale fence
+	// cannot become current by re-reading. The predicate guards the write
+	// itself, so a reassignment landing between the read and the swap is caught
+	// atomically rather than through a preflight check.
+	ReportProjectStatusFenced(ctx context.Context, name string, ref AssignmentRef, mutate func(*v1.ProjectStatus) error) error
+
+	// PatchProjectConditionFenced is the fenced form of PatchProjectCondition:
+	// the assignment predicate is added directly to the single UPDATE that
+	// merges the condition, so validation and mutation are one atomic statement.
+	// Returns ErrStaleAssignment when the fence does not match, ErrNotFound when
+	// the Project is gone, and nil for an unchanged no-op.
+	PatchProjectConditionFenced(ctx context.Context, name string, ref AssignmentRef, condition v1.Condition) error
+
+	// ClearProjectConditionFenced is the fenced form of ClearProjectCondition,
+	// with the same atomic predicate and error semantics as
+	// PatchProjectConditionFenced.
+	ClearProjectConditionFenced(ctx context.Context, name string, ref AssignmentRef, conditionType v1.ConditionType) error
 
 	// UpdateProjectSpec writes only the user-mutable fields of a Project
 	// (spec, labels, annotations). Status is preserved. The update is only

@@ -355,7 +355,7 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	states, err := runtime.InspectProject(ctx, p)
 	if err != nil {
 		log.Warn("Failed to inspect project containers", zap.Error(err))
-		_ = client.UpdateProjectStatus(ctx, p.Name,
+		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p),
 			v1.ProjectPhaseFailed,
 			"InspectError",
 			err.Error(),
@@ -373,7 +373,7 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	if len(failedSvcs) > 0 {
 		msg := "Containers exited with errors: " + strings.Join(failedSvcs, ", ")
 		log.Warn("Project has failed containers", zap.String("detail", msg))
-		_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "ContainerExited", msg)
+		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "ContainerExited", msg)
 		return
 	}
 
@@ -386,7 +386,7 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	}
 	if runningCount == len(p.Spec.Services) && len(p.Spec.Services) > 0 {
 		log.Debug("All containers running, nothing to do")
-		if err := client.UpdateProjectStatus(ctx, p.Name,
+		if err := client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p),
 			v1.ProjectPhaseRunning,
 			"ContainersRunning",
 			"All containers running",
@@ -404,10 +404,10 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 		switch {
 		case errors.Is(err, ErrSecretNotFound):
 			log.Warn("Referenced secret does not exist", zap.Error(err))
-			_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "SecretNotFound", err.Error())
+			_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "SecretNotFound", err.Error())
 		case errors.Is(err, errSecretKeyNotFound):
 			log.Warn("Referenced secret key does not exist", zap.Error(err))
-			_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "SecretKeyNotFound", err.Error())
+			_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "SecretKeyNotFound", err.Error())
 		default:
 			// Transient fetch failure (network, 5xx): do not fail the
 			// project — skip this tick and retry on the next poll.
@@ -435,18 +435,18 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 			return
 		default:
 			log.Error("Failed to prepare volume data", zap.Error(err))
-			_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "RestoreError", err.Error())
+			_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "RestoreError", err.Error())
 			return
 		}
 	}
 
 	if err := runtime.ReconcileProject(ctx, resolved); err != nil {
 		log.Error("Failed to reconcile project", zap.Error(err))
-		_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "ReconcileError", err.Error())
+		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "ReconcileError", err.Error())
 		return
 	}
 
-	if err := client.UpdateProjectStatus(ctx, p.Name,
+	if err := client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p),
 		v1.ProjectPhaseRunning,
 		"ContainersRunning",
 		"All containers running",
@@ -566,7 +566,7 @@ func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 
 	if err := runtime.RemoveProject(ctx, p.Namespace, p.Name, p.Spec); err != nil {
 		log.Error("Failed to remove project resources", zap.Error(err))
-		_ = client.UpdateProjectStatus(ctx, p.Name,
+		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p),
 			v1.ProjectPhaseFailed,
 			"RemoveError",
 			err.Error(),
@@ -580,7 +580,7 @@ func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	}
 
 	log.Info("Project resources removed, reporting Terminated")
-	if err := client.UpdateProjectStatus(ctx, p.Name,
+	if err := client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p),
 		v1.ProjectPhaseTerminated,
 		"ResourcesRemoved",
 		"All Docker resources have been removed",
@@ -602,7 +602,7 @@ func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime,
 	states, err := runtime.InspectProject(ctx, p)
 	if err != nil {
 		log.Warn("Failed to inspect project containers", zap.Error(err))
-		_ = client.UpdateProjectStatus(ctx, p.Name,
+		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p),
 			v1.ProjectPhaseFailed,
 			"InspectError",
 			err.Error(),
@@ -620,7 +620,7 @@ func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime,
 	if len(crashedSvcs) > 0 {
 		msg := "Containers crashed: " + strings.Join(crashedSvcs, ", ")
 		log.Warn("Project has crashed containers", zap.String("detail", msg))
-		_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "ContainerCrashed", msg)
+		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "ContainerCrashed", msg)
 		return
 	}
 
@@ -640,7 +640,7 @@ func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime,
 		msg := fmt.Sprintf("Missing containers for services: %s (expected %d, found %d)",
 			strings.Join(missingSvcs, ", "), len(p.Spec.Services), len(states))
 		log.Warn("Project has missing containers", zap.String("detail", msg))
-		_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "ContainerMissing", msg)
+		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "ContainerMissing", msg)
 		return
 	}
 
@@ -655,7 +655,7 @@ func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime,
 	if len(exitedSvcs) > 0 {
 		msg := "Containers exited cleanly: " + strings.Join(exitedSvcs, ", ")
 		log.Warn("Project has exited containers", zap.String("detail", msg))
-		_ = client.UpdateProjectStatus(ctx, p.Name, v1.ProjectPhaseFailed, "ContainerExited", msg)
+		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "ContainerExited", msg)
 		return
 	}
 

@@ -69,6 +69,7 @@ func newTestHandler(s store.ProjectStore) *Handler {
 		zap.NewNop(),
 		s,
 		problem.NewWithMapping(handler.NewProblemMapping()),
+		false, // compatibility mode: existing tests exercise the unfenced path
 	)
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -37,6 +38,15 @@ const (
 	// pre-UID resources, an empty) value and must not be adopted as the
 	// current Project.
 	labelUID = "cara.uid"
+	// labelGeneration records the assignment generation a container was created
+	// under (CARA-83). Containers are assignment-scoped: within one Project
+	// lifetime (one UID) the Scheduler can grant ownership to Node A, move it to
+	// Node B, and grant it back to Node A under a higher generation. A leftover
+	// container from the first Node-A grant carries the same UID as the current
+	// one but an older generation, so UID equality alone would wrongly adopt it.
+	// The generation label is the runtime half of the ABA fence: a destructive
+	// or adoption operation requires the generation to match too.
+	labelGeneration = "cara.generation"
 	// labelVolume lists the Managed volumes bound into a container (comma
 	// separated).
 	labelVolume = "cara.volume"
@@ -107,7 +117,7 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 
 	// 3. Ensure every service container exists and is running.
 	for _, svc := range project.Spec.Services {
-		if err := r.ensureContainer(ctx, project.Namespace, project.Name, project.ObjectMeta.UID, svc, project.Spec.Volumes); err != nil {
+		if err := r.ensureContainer(ctx, project.Namespace, project.Name, project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec.Volumes); err != nil {
 			r.rollback(ctx, project, log)
 			return fmt.Errorf("ensure container %q: %w", svc.Name, err)
 		}
@@ -412,6 +422,14 @@ func (r *DockerRuntime) validateNetworkOwnership(netName string, labels map[stri
 	return nil
 }
 
+// generationLabel renders an assignment generation as the string stored in the
+// cara.generation container label. A plain base-10 int64 so the label round
+// trips through Docker and compares by string equality against a freshly
+// formatted current generation.
+func generationLabel(generation int64) string {
+	return strconv.FormatInt(generation, 10)
+}
+
 func shortID(id string) string {
 	if len(id) <= 12 {
 		return id
@@ -665,7 +683,7 @@ func (r *DockerRuntime) buildBinds(namespace, projectName string, svc v1.Service
 // ensureContainer creates and starts the container for a single service if it
 // is not already running. vols is the project's volume list, used to resolve
 // each mount's bind source by volume type.
-func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectName, uid string, svc v1.ServiceDef, vols []v1.VolumeDef) error {
+func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectName, uid string, generation int64, svc v1.ServiceDef, vols []v1.VolumeDef) error {
 	cName := ContainerName(projectName, svc.Name)
 	log := r.logger.With(
 		zap.String("container", cName),
@@ -687,6 +705,15 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 		if r.enforceUID && uid != "" && info.Config != nil && info.Config.Labels[labelUID] != uid {
 			return fmt.Errorf("refuse to adopt container %q: UID label %q does not match current Project UID %q",
 				cName, info.Config.Labels[labelUID], uid)
+		}
+		// Generation fencing (CARA-83): even when the UID matches, a container
+		// left by an earlier grant of ownership within this same lifetime carries
+		// an older generation. Adopting it would let a stale assignment's
+		// container serve the current one. The orphan sweep stops and removes it;
+		// ensureContainer only refuses to reuse it.
+		if r.enforceUID && info.Config != nil && info.Config.Labels[labelGeneration] != generationLabel(generation) {
+			return fmt.Errorf("refuse to adopt container %q: generation label %q does not match current assignment generation %d",
+				cName, info.Config.Labels[labelGeneration], generation)
 		}
 		if info.State.Running {
 			log.Debug("Container already running")
@@ -726,10 +753,11 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 	}
 
 	labels := map[string]string{
-		labelProject:   projectName,
-		labelService:   svc.Name,
-		labelNamespace: namespace,
-		labelUID:       uid,
+		labelProject:    projectName,
+		labelService:    svc.Name,
+		labelNamespace:  namespace,
+		labelUID:        uid,
+		labelGeneration: generationLabel(generation),
 	}
 	if len(managedNames) > 0 {
 		labels[labelVolume] = strings.Join(managedNames, ",")
