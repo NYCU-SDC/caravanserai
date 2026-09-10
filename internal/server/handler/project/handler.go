@@ -13,10 +13,12 @@
 package project
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -37,15 +39,25 @@ type Handler struct {
 	store         store.ProjectStore
 	tracer        trace.Tracer
 	problemWriter *problem.HttpWriter
+
+	// enforceAssignment is the server side of the UID_ENFORCEMENT rollout
+	// switch (CARA-82, CARA-83). When false (compatibility mode) an Agent report
+	// carrying a complete fence is still validated, but a legacy report missing
+	// UID or generation falls back to the unfenced write path. When true, a
+	// report without a complete fence is rejected as a stale assignment.
+	enforceAssignment bool
 }
 
-// NewHandler creates a Project Handler.
-func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter) *Handler {
+// NewHandler creates a Project Handler. enforceAssignment turns on strict
+// rejection of Agent writes that do not carry a complete assignment fence; it
+// should be wired from the server's UID_ENFORCEMENT config.
+func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter, enforceAssignment bool) *Handler {
 	return &Handler{
-		logger:        logger,
-		store:         s,
-		tracer:        otel.Tracer("project/handler"),
-		problemWriter: pw,
+		logger:            logger,
+		store:             s,
+		tracer:            otel.Tracer("project/handler"),
+		problemWriter:     pw,
+		enforceAssignment: enforceAssignment,
 	}
 }
 
@@ -243,6 +255,15 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 	if project.Status.Phase == "" {
 		project.Status.Phase = v1.ProjectPhasePending
 	}
+
+	// A freshly created Project is the only thing that may claim NeverAssigned
+	// at generation zero: the server is watching it from birth, so it can prove
+	// no Agent has ever owned it. Assignment generation is server-owned status,
+	// so any value a client tried to send is overwritten here rather than
+	// trusted. This is what later lets a still-Pending Project be hard-deleted
+	// directly, while a migrated Unknown row cannot.
+	project.Status.AssignmentGeneration = 0
+	project.Status.AssignmentHistory = v1.AssignmentHistoryNeverAssigned
 
 	if err := h.store.CreateProject(traceCtx, &project); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
@@ -472,9 +493,16 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch project.Status.Phase {
-	case v1.ProjectPhasePending, v1.ProjectPhaseFailed:
-		// No Docker resources exist; safe to delete immediately.
+	// Direct hard-delete is only safe when the Project was provably never
+	// assigned to a Node. NeverAssigned history means no Agent ever held runtime
+	// for it, so there is nothing to strand. A Pending or Failed Project with
+	// Known or Unknown history may still have containers or Managed volume data
+	// on some Node — an empty nodeRef or a zero generation is not proof
+	// otherwise — so it must enter the Terminating cleanup lifecycle, where the
+	// Agent stops and removes resources before the record is dropped.
+	// WorkloadStopped is never a substitute for ResourcesRemoved.
+	if (project.Status.Phase == v1.ProjectPhasePending || project.Status.Phase == v1.ProjectPhaseFailed) &&
+		project.Status.AssignmentHistory == v1.AssignmentHistoryNeverAssigned {
 		if err := h.store.DeleteProject(traceCtx, name); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				h.problemWriter.WriteError(traceCtx, w,
@@ -486,9 +514,13 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logger.Info("Project deleted immediately", zap.String("project", name),
-			zap.String("phase", string(project.Status.Phase)))
+			zap.String("phase", string(project.Status.Phase)),
+			zap.String("assignmentHistory", string(project.Status.AssignmentHistory)))
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
+	switch project.Status.Phase {
 	case v1.ProjectPhaseTerminating:
 		// Already in progress; idempotent.
 		logger.Info("Project already terminating", zap.String("project", name))
@@ -523,10 +555,45 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 // statusPatchRequest is the body the Agent sends to report observed phase.
 // Only Phase and an optional Message are accepted; other status fields
 // (NodeRef, Conditions) are preserved from the existing record.
+//
+// UID, NodeRef, and AssignmentGeneration carry the assignment fence the Agent
+// was granted (CARA-83). AssignmentGeneration is a pointer so a legacy Agent
+// that omits it is distinguishable from one reporting generation zero: nil
+// means "no fence sent", which is only accepted under compatibility mode.
 type statusPatchRequest struct {
-	Phase   v1.ProjectPhase `json:"phase"`
-	Reason  string          `json:"reason,omitempty"`
-	Message string          `json:"message,omitempty"`
+	Phase                v1.ProjectPhase `json:"phase"`
+	Reason               string          `json:"reason,omitempty"`
+	Message              string          `json:"message,omitempty"`
+	UID                  string          `json:"uid,omitempty"`
+	NodeRef              string          `json:"nodeRef,omitempty"`
+	AssignmentGeneration *int64          `json:"assignmentGeneration,omitempty"`
+}
+
+// resolveFence interprets the assignment fields an Agent presented and decides
+// whether the fenced write path must be used.
+//
+// A complete fence (UID, nodeRef, and an explicit generation) always takes the
+// fenced path. An incomplete fence comes from an Agent that predates CARA-83:
+// under strict enforcement it is rejected as stale here, and the caller must
+// return; under compatibility mode it falls back to the unfenced path so the
+// old Agent keeps working. The returned proceed flag is false only when an
+// error problem has already been written.
+func (h *Handler) resolveFence(
+	ctx context.Context,
+	w http.ResponseWriter,
+	logger *zap.Logger,
+	name, uid, nodeRef string,
+	generation *int64,
+) (ref store.AssignmentRef, fenced, proceed bool) {
+	if uid == "" || nodeRef == "" || generation == nil {
+		if h.enforceAssignment {
+			h.problemWriter.WriteError(ctx, w,
+				fmt.Errorf("%w: project %q: request is missing an assignment fence", store.ErrStaleAssignment, name), logger)
+			return store.AssignmentRef{}, false, false
+		}
+		return store.AssignmentRef{}, false, true
+	}
+	return store.AssignmentRef{UID: uid, NodeRef: nodeRef, Generation: *generation}, true, true
 }
 
 // patchStatus handles PATCH /api/v1/projects/{name}/status.
@@ -560,6 +627,11 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ref, fenced, proceed := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
+	if !proceed {
+		return
+	}
+
 	// Fixed before the closure: the closure may run more than once, and this
 	// records when the agent observed the phase, not when a retry landed.
 	observedAt := time.Now().UTC()
@@ -568,7 +640,7 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 	// NodeRef, conditions owned by controllers — is whatever the store read on
 	// this attempt. Replacing the whole status here is what used to discard a
 	// controller's concurrent write.
-	err := h.store.UpdateProjectStatusWithRetry(traceCtx, name, func(status *v1.ProjectStatus) error {
+	mutate := func(status *v1.ProjectStatus) error {
 		transitioned := status.Phase != req.Phase
 		status.Phase = req.Phase
 
@@ -586,7 +658,18 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 			LastTransitionTime: observedAt,
 		}, transitioned)
 		return nil
-	})
+	}
+
+	// The fenced path re-asserts (UID, nodeRef, generation) inside the guarding
+	// UPDATE, so a report from an Agent that has since lost ownership is
+	// rejected as stale without touching the row. The unfenced path is only
+	// reachable in compatibility mode for a legacy Agent.
+	var err error
+	if fenced {
+		err = h.store.ReportProjectStatusFenced(traceCtx, name, ref, mutate)
+	} else {
+		err = h.store.UpdateProjectStatusWithRetry(traceCtx, name, mutate)
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.problemWriter.WriteError(traceCtx, w,
@@ -617,11 +700,16 @@ var agentWritableConditions = map[v1.ConditionType]bool{
 }
 
 // conditionPatchRequest is the body sent to
-// PATCH /api/v1/projects/{name}/conditions/{type}.
+// PATCH /api/v1/projects/{name}/conditions/{type}. UID, NodeRef, and
+// AssignmentGeneration carry the assignment fence, with the same
+// legacy-vs-strict semantics as statusPatchRequest.
 type conditionPatchRequest struct {
-	Status  v1.ConditionStatus `json:"status"`
-	Reason  string             `json:"reason,omitempty"`
-	Message string             `json:"message,omitempty"`
+	Status               v1.ConditionStatus `json:"status"`
+	Reason               string             `json:"reason,omitempty"`
+	Message              string             `json:"message,omitempty"`
+	UID                  string             `json:"uid,omitempty"`
+	NodeRef              string             `json:"nodeRef,omitempty"`
+	AssignmentGeneration *int64             `json:"assignmentGeneration,omitempty"`
 }
 
 // patchCondition handles PATCH /api/v1/projects/{name}/conditions/{type}.
@@ -674,6 +762,11 @@ func (h *Handler) patchCondition(w http.ResponseWriter, r *http.Request) {
 	// write and a project.updated event carrying no news, which is exactly what
 	// the guard in patchStatus exists to prevent. Give this the same treatment
 	// then.
+	ref, fenced, proceed := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
+	if !proceed {
+		return
+	}
+
 	now := time.Now().UTC()
 	condition := v1.Condition{
 		Type:               condType,
@@ -684,7 +777,13 @@ func (h *Handler) patchCondition(w http.ResponseWriter, r *http.Request) {
 		LastTransitionTime: now,
 	}
 
-	if err := h.store.PatchProjectCondition(traceCtx, name, condition); err != nil {
+	var err error
+	if fenced {
+		err = h.store.PatchProjectConditionFenced(traceCtx, name, ref, condition)
+	} else {
+		err = h.store.PatchProjectCondition(traceCtx, name, condition)
+	}
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.problemWriter.WriteError(traceCtx, w,
 				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
@@ -719,7 +818,35 @@ func (h *Handler) deleteCondition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.ClearProjectCondition(traceCtx, name, condType); err != nil {
+	// DELETE carries no body, so the fence travels as query parameters. An
+	// absent assignmentGeneration parameter is a nil generation — the same
+	// "no fence sent" signal a missing body field is on the patch paths.
+	uid := r.URL.Query().Get("uid")
+	nodeRef := r.URL.Query().Get("nodeRef")
+	var generation *int64
+	if raw := r.URL.Query().Get("assignmentGeneration"); raw != "" {
+		g, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError("assignmentGeneration", raw,
+					"assignmentGeneration must be an integer"), logger)
+			return
+		}
+		generation = &g
+	}
+
+	ref, fenced, proceed := h.resolveFence(traceCtx, w, logger, name, uid, nodeRef, generation)
+	if !proceed {
+		return
+	}
+
+	var err error
+	if fenced {
+		err = h.store.ClearProjectConditionFenced(traceCtx, name, ref, condType)
+	} else {
+		err = h.store.ClearProjectCondition(traceCtx, name, condType)
+	}
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.problemWriter.WriteError(traceCtx, w,
 				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)

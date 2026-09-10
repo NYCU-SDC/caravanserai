@@ -147,14 +147,14 @@ type fakeConditions struct {
 	setErr error
 }
 
-func (f *fakeConditions) SetMaintenance(context.Context, ResourceKey, string) error {
+func (f *fakeConditions) SetMaintenance(context.Context, ResourceKey, string, string, int64, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "set")
 	return f.setErr
 }
 
-func (f *fakeConditions) ClearMaintenance(context.Context, ResourceKey) error {
+func (f *fakeConditions) ClearMaintenance(context.Context, ResourceKey, string, string, int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "clear")

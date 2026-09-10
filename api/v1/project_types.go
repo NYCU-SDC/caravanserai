@@ -67,6 +67,61 @@ func (ProjectPhase) JSONSchema() *jsonschema.Schema {
 	}
 }
 
+// AssignmentHistory records whether a Project has ever held a Node assignment,
+// and how confidently that is known. It exists because nodeRef alone cannot
+// answer "was this Project ever assigned?": an empty nodeRef looks identical
+// whether the Project was never scheduled or was assigned and later released.
+// The distinction gates destructive actions — only a Project that was provably
+// never assigned may be hard-deleted without first fencing possible runtime
+// leftovers on some Node.
+type AssignmentHistory string
+
+const (
+	// AssignmentHistoryNeverAssigned means the Project has never been granted a
+	// Node assignment. It is the only history that permits direct deletion,
+	// because no Agent can be holding runtime resources for it.
+	AssignmentHistoryNeverAssigned AssignmentHistory = "NeverAssigned"
+
+	// AssignmentHistoryKnown means the Project has been assigned at least once
+	// and its assignment generation is a trustworthy fence. New assignments and
+	// stale-report rejection rely on this being accurate.
+	AssignmentHistoryKnown AssignmentHistory = "Known"
+
+	// AssignmentHistoryUnknown means the Project's assignment history could not
+	// be proven — typically an existing row migrated in without enough evidence
+	// to declare it NeverAssigned. It is treated conservatively: ineligible for
+	// immediate deletion or automatic takeover until cleanup or fencing evidence
+	// resolves it to Known or NeverAssigned.
+	AssignmentHistoryUnknown AssignmentHistory = "Unknown"
+)
+
+// IsValid reports whether h is one of the recognised AssignmentHistory
+// constants. The empty string is not valid: every Project row carries an
+// explicit history once migration 005 has run.
+func (h AssignmentHistory) IsValid() bool {
+	switch h {
+	case AssignmentHistoryNeverAssigned,
+		AssignmentHistoryKnown,
+		AssignmentHistoryUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// JSONSchema returns a JSON Schema with the allowed AssignmentHistory values.
+func (AssignmentHistory) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type: "string",
+		Enum: []any{
+			string(AssignmentHistoryNeverAssigned),
+			string(AssignmentHistoryKnown),
+			string(AssignmentHistoryUnknown),
+		},
+		Description: "Whether a Project has ever held a Node assignment, and how confidently that is known.",
+	}
+}
+
 // EnvVar is a single environment variable to inject into a container.
 // Exactly one of Value or ValueFrom may be set (enforced at apply time).
 type EnvVar struct {
@@ -261,6 +316,22 @@ type ProjectStatus struct {
 
 	// NodeRef is the name of the Node the Scheduler chose. Empty while Pending.
 	NodeRef string `json:"nodeRef,omitempty" yaml:"nodeRef,omitempty"`
+
+	// AssignmentGeneration is a server-owned counter that increments by one on
+	// every successful Pending-to-Scheduled assignment. Together with UID and
+	// nodeRef it forms the fence an Agent must present on every write: a report
+	// carrying an older generation is rejected as stale, which defeats the ABA
+	// problem that UID and nodeRef alone cannot — a Project reassigned A→B→A
+	// reuses the Node name but never a generation. Clearing nodeRef revokes the
+	// current generation but does not reset the counter.
+	//
+	// This is not a user manifest field; clients cannot set it.
+	AssignmentGeneration int64 `json:"assignmentGeneration,omitempty" yaml:"assignmentGeneration,omitempty"`
+
+	// AssignmentHistory records whether this Project was ever assigned a Node,
+	// gating whether it may be hard-deleted directly or must enter the cleanup
+	// lifecycle first. Server-owned; not a user manifest field.
+	AssignmentHistory AssignmentHistory `json:"assignmentHistory,omitempty" yaml:"assignmentHistory,omitempty"`
 
 	// Conditions is a list of granular observable states.
 	Conditions []Condition `json:"conditions,omitempty" yaml:"conditions,omitempty"`

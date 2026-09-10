@@ -69,6 +69,20 @@ func NewProblemMapping() func(error) problem.Problem {
 				Detail: err.Error(),
 			}
 
+		// A stale assignment is a 409 like the others, but the detail is fixed
+		// rather than derived from the error: the underlying mismatch names the
+		// UID, nodeRef, and generation the caller failed to match, and echoing
+		// those back would expose internal ownership identity. The Agent does
+		// not need them — it must stop and re-poll ownership, not repair the
+		// fence from the response.
+		case errors.Is(err, store.ErrStaleAssignment):
+			return problem.Problem{
+				Title:  "Conflict",
+				Status: 409,
+				Type:   "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/409",
+				Detail: "assignment is stale; the Project is no longer owned by this assignment",
+			}
+
 		default:
 			return problem.Problem{}
 		}

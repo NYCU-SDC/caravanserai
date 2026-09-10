@@ -41,10 +41,12 @@ func (retainedOwnership) Resolve(context.Context, agentbackup.ResourceKey) agent
 
 type noopConditions struct{}
 
-func (noopConditions) SetMaintenance(context.Context, agentbackup.ResourceKey, string) error {
+func (noopConditions) SetMaintenance(context.Context, agentbackup.ResourceKey, string, string, int64, string) error {
 	return nil
 }
-func (noopConditions) ClearMaintenance(context.Context, agentbackup.ResourceKey) error { return nil }
+func (noopConditions) ClearMaintenance(context.Context, agentbackup.ResourceKey, string, string, int64) error {
+	return nil
+}
 
 // ── harness ──────────────────────────────────────────────────────────────────
 

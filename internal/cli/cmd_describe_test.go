@@ -133,6 +133,8 @@ var describeProjectCoveredFields = newStringSet(
 	// Status
 	"Status.Phase",
 	"Status.NodeRef",
+	"Status.AssignmentGeneration",
+	"Status.AssignmentHistory",
 	"Status.Conditions",
 )
 

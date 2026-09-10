@@ -275,6 +275,8 @@ func describeProject(w io.Writer, project *v1.Project) {
 	fmt.Fprintln(w, "Status:")
 	printField(w, "  Phase", stringOrNone(string(project.Status.Phase)))
 	printField(w, "  Node", stringOrNone(project.Status.NodeRef))
+	printField(w, "  Assignment Generation", fmt.Sprintf("%d", project.Status.AssignmentGeneration))
+	printField(w, "  Assignment History", stringOrNone(string(project.Status.AssignmentHistory)))
 
 	// Conditions
 	fmt.Fprintln(w)

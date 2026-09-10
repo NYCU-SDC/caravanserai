@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -24,6 +25,37 @@ import (
 // ErrNodeNotFound is returned by Heartbeat when the server responds with 404,
 // indicating the node no longer exists and should re-register.
 var ErrNodeNotFound = errors.New("node not found")
+
+// ErrStaleAssignment is returned by the fenced status and condition writes when
+// the server rejects the report with 409 Conflict (CARA-83). The server maps
+// both a stale assignment fence and a lost optimistic-concurrency race to 409,
+// and the Agent's correct response to either is identical: this view of the
+// Project is no longer authoritative, so it must abandon the report and wait
+// for the next ownership poll to re-derive the current UID, nodeRef, and
+// generation rather than retrying the same stale data.
+var ErrStaleAssignment = errors.New("stale assignment: report rejected by server")
+
+// AssignmentFence is the ownership identity an Agent presents on every write:
+// the Project UID it was told to run, the Node it believes it is, and the
+// assignment generation that authorised it. The server validates all three
+// atomically against the Project's current ownership.
+type AssignmentFence struct {
+	UID        string
+	NodeRef    string
+	Generation int64
+}
+
+// fenceForProject reads the assignment fence from a Project the Agent received
+// in an ownership poll. The three fields are exactly what the Scheduler wrote
+// when it granted this assignment, so echoing them back is what proves the
+// Agent is acting on the current grant and not a stale one.
+func fenceForProject(p *v1.Project) AssignmentFence {
+	return AssignmentFence{
+		UID:        p.ObjectMeta.UID,
+		NodeRef:    p.Status.NodeRef,
+		Generation: p.Status.AssignmentGeneration,
+	}
+}
 
 // Client is an HTTP client for the cara-server node API.
 type Client struct {
@@ -282,18 +314,28 @@ func (c *Client) GetProject(ctx context.Context, name string) (*v1.Project, erro
 }
 
 // conditionPatchRequest is the body sent to
-// PATCH /api/v1/projects/{name}/conditions/{type}.
+// PATCH /api/v1/projects/{name}/conditions/{type}. The uid/nodeRef/generation
+// triple is the assignment fence the server validates atomically.
 type conditionPatchRequest struct {
-	Status  v1.ConditionStatus `json:"status"`
-	Reason  string             `json:"reason,omitempty"`
-	Message string             `json:"message,omitempty"`
+	Status               v1.ConditionStatus `json:"status"`
+	Reason               string             `json:"reason,omitempty"`
+	Message              string             `json:"message,omitempty"`
+	UID                  string             `json:"uid,omitempty"`
+	NodeRef              string             `json:"nodeRef,omitempty"`
+	AssignmentGeneration *int64             `json:"assignmentGeneration,omitempty"`
 }
 
 // PatchProjectCondition sets one condition on a Project without touching its
 // phase. Used to advertise Maintenance during a backup: the Project must stay
 // Running throughout, so the backup cannot report itself by moving the phase.
-func (c *Client) PatchProjectCondition(ctx context.Context, projectName string, condType v1.ConditionType, status v1.ConditionStatus, reason, message string) error {
-	body, err := json.Marshal(conditionPatchRequest{Status: status, Reason: reason, Message: message})
+// The fence is presented so the server can reject the write if this Agent no
+// longer owns the assignment; a 409 comes back as ErrStaleAssignment.
+func (c *Client) PatchProjectCondition(ctx context.Context, projectName string, fence AssignmentFence, condType v1.ConditionType, status v1.ConditionStatus, reason, message string) error {
+	gen := fence.Generation
+	body, err := json.Marshal(conditionPatchRequest{
+		Status: status, Reason: reason, Message: message,
+		UID: fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &gen,
+	})
 	if err != nil {
 		return fmt.Errorf("marshal condition patch request: %w", err)
 	}
@@ -311,19 +353,28 @@ func (c *Client) PatchProjectCondition(ctx context.Context, projectName string, 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusConflict {
+		return ErrStaleAssignment
+	}
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("patch condition: unexpected status %s", resp.Status)
 	}
 	return nil
 }
 
-// ClearProjectCondition removes one condition from a Project.
-func (c *Client) ClearProjectCondition(ctx context.Context, projectName string, condType v1.ConditionType) error {
+// ClearProjectCondition removes one condition from a Project. The fence travels
+// as query parameters because a DELETE carries no body.
+func (c *Client) ClearProjectCondition(ctx context.Context, projectName string, fence AssignmentFence, condType v1.ConditionType) error {
 	url := fmt.Sprintf("%s/api/v1/projects/%s/conditions/%s", c.serverURL, projectName, condType)
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return fmt.Errorf("build condition delete request: %w", err)
 	}
+	q := req.URL.Query()
+	q.Set("uid", fence.UID)
+	q.Set("nodeRef", fence.NodeRef)
+	q.Set("assignmentGeneration", strconv.FormatInt(fence.Generation, 10))
+	req.URL.RawQuery = q.Encode()
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -331,6 +382,9 @@ func (c *Client) ClearProjectCondition(ctx context.Context, projectName string, 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusConflict {
+		return ErrStaleAssignment
+	}
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("clear condition: unexpected status %s", resp.Status)
 	}
@@ -339,18 +393,26 @@ func (c *Client) ClearProjectCondition(ctx context.Context, projectName string, 
 
 // projectStatusRequest is the body sent to PATCH /api/v1/projects/{name}/status.
 type projectStatusRequest struct {
-	Phase   v1.ProjectPhase `json:"phase"`
-	Reason  string          `json:"reason,omitempty"`
-	Message string          `json:"message,omitempty"`
+	Phase                v1.ProjectPhase `json:"phase"`
+	Reason               string          `json:"reason,omitempty"`
+	Message              string          `json:"message,omitempty"`
+	UID                  string          `json:"uid,omitempty"`
+	NodeRef              string          `json:"nodeRef,omitempty"`
+	AssignmentGeneration *int64          `json:"assignmentGeneration,omitempty"`
 }
 
 // UpdateProjectStatus calls PATCH /api/v1/projects/{name}/status to report the
-// observed phase to the server.  phase should be Running or Failed.
-func (c *Client) UpdateProjectStatus(ctx context.Context, projectName string, phase v1.ProjectPhase, reason, message string) error {
+// observed phase to the server.  phase should be Running or Failed. The fence
+// is presented so a report from an Agent that has lost ownership is rejected;
+// a 409 comes back as ErrStaleAssignment, telling the caller to stop and wait
+// for the next ownership poll rather than retry the same stale report.
+func (c *Client) UpdateProjectStatus(ctx context.Context, projectName string, fence AssignmentFence, phase v1.ProjectPhase, reason, message string) error {
+	gen := fence.Generation
 	reqBody := projectStatusRequest{
 		Phase:   phase,
 		Reason:  reason,
 		Message: message,
+		UID:     fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &gen,
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -371,6 +433,9 @@ func (c *Client) UpdateProjectStatus(ctx context.Context, projectName string, ph
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusConflict {
+		return ErrStaleAssignment
+	}
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("update project status: unexpected status %s", resp.Status)
 	}
