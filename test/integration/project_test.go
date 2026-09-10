@@ -539,3 +539,57 @@ func TestProjectForceDelete(t *testing.T) {
 		drainBody(resp)
 	})
 }
+
+// TestProjectUIDLifecycle exercises CARA-82 at the HTTP + database layer:
+//   - every created Project gets a non-empty server-generated UID,
+//   - a client-supplied UID is ignored,
+//   - deleting and recreating the same name yields a different UID.
+func TestProjectUIDLifecycle(t *testing.T) {
+	const name = "e2e-uid-lifecycle"
+
+	create := func(t *testing.T, clientUID string) v1.Project {
+		t.Helper()
+		body := mustMarshal(t, v1.Project{
+			ObjectMeta: v1.ObjectMeta{Name: name, UID: clientUID},
+			Spec: v1.ProjectSpec{
+				Services: []v1.ServiceDef{{Name: "web", Image: "nginx:alpine"}},
+			},
+		})
+		resp := doRequest(t, http.MethodPost, "/api/v1/projects", body)
+		require.Equal(t, http.StatusCreated, resp.StatusCode)
+		drainBody(resp)
+		return getProject(t, name)
+	}
+
+	// First lifetime: client tries to dictate a UID, server must override it.
+	first := create(t, "client-supplied-uid-must-be-ignored")
+	require.NotEmpty(t, first.ObjectMeta.UID, "server must assign a UID")
+	assert.NotEqual(t, "client-supplied-uid-must-be-ignored", first.ObjectMeta.UID,
+		"server must ignore a client-supplied UID")
+
+	// Applying (updating) the spec must preserve the UID.
+	updateBody := mustMarshal(t, v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: name},
+		Spec: v1.ProjectSpec{
+			Services: []v1.ServiceDef{{Name: "web", Image: "nginx:1.27"}},
+		},
+	})
+	resp := doRequest(t, http.MethodPut, "/api/v1/projects/"+name, updateBody)
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, resp.StatusCode)
+	drainBody(resp)
+	assert.Equal(t, first.ObjectMeta.UID, getProject(t, name).ObjectMeta.UID,
+		"update must not change the UID")
+
+	// Delete, then recreate the same name: the new lifetime must have a new UID.
+	resp = doRequest(t, http.MethodDelete, "/api/v1/projects/"+name, nil)
+	require.Contains(t, []int{http.StatusOK, http.StatusNoContent, http.StatusAccepted}, resp.StatusCode)
+	drainBody(resp)
+
+	second := create(t, "")
+	assert.NotEmpty(t, second.ObjectMeta.UID)
+	assert.NotEqual(t, first.ObjectMeta.UID, second.ObjectMeta.UID,
+		"a recreated Project of the same name must receive a different UID")
+
+	// Cleanup.
+	drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+name, nil))
+}

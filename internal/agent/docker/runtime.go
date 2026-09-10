@@ -20,12 +20,24 @@ import (
 // ProjectIdentity identifies one Project's Docker resources. Namespace is
 // included even while the API still treats names as globally unique so a
 // destructive runtime operation never broadens to another namespace.
+//
+// UID is the immutable server-generated Project identity (CARA-82). It fences
+// ownership across Project lifetimes: a leftover container from a previous
+// lifetime of the same (namespace, name) carries a different UID, and a pre-UID
+// (legacy) container carries an empty UID. UID is empty for identities built in
+// compatibility mode, where ownership falls back to (namespace, name).
 type ProjectIdentity struct {
 	Namespace string
 	Name      string
+	UID       string
 }
 
-func (p ProjectIdentity) String() string { return p.Namespace + "/" + p.Name }
+func (p ProjectIdentity) String() string {
+	if p.UID == "" {
+		return p.Namespace + "/" + p.Name
+	}
+	return p.Namespace + "/" + p.Name + "@" + p.UID
+}
 
 // ContainerState holds the observed state of a single service container.
 type ContainerState struct {

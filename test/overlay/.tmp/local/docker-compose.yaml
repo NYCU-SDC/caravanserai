@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: caravanserai
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  headscale:
+    image: headscale/headscale:v0.29.2
+    command: serve
+    ports:
+      - "8081:8080"
+    volumes:
+      - /Users/chenxinan/sdc/cara/caravanserai/deploy/dev/headscale/config.yaml:/etc/headscale/config.yaml:ro
+      - headscale-data:/var/lib/headscale
+      - headscale-run:/var/run/headscale
+    healthcheck:
+      test: ["CMD", "headscale", "health"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+volumes:
+  pgdata:
+  headscale-data:
+  headscale-run:
