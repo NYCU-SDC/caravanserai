@@ -3,6 +3,7 @@ package overlay
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -114,6 +115,21 @@ func (c *TsnetClient) OverlayIP() string {
 // transport would panic on first use.
 func (c *TsnetClient) HTTPTransport() http.RoundTripper {
 	return &http.Transport{DialContext: c.srv.Dial}
+}
+
+// Listen returns a net.Listener that accepts connections arriving on this
+// node's overlay IP.  It is the inbound counterpart to HTTPTransport and must
+// likewise be called after a successful Join; before then c.srv is nil.
+//
+// A plain net.Listen on the host stack is NOT reachable over the overlay.
+// tsnet is a userspace network stack, so the node's 100.64.0.0/10 address is
+// not an OS interface: traffic addressed to it is dispatched only to listeners
+// created here, and tsnet drops the connection when none exists rather than
+// forwarding it to the host's loopback.  Serving the agent API on the host
+// socket alone therefore leaves the overlay IP with nothing listening, which
+// is what made cara-server's probe, logs and port-forward calls fail.
+func (c *TsnetClient) Listen(network, addr string) (net.Listener, error) {
+	return c.srv.Listen(network, addr)
 }
 
 // Close leaves the overlay network.  It is safe to call when Join never ran.
