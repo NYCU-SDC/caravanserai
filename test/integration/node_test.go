@@ -42,6 +42,7 @@ var verbose = flag.Bool("verbose", false, "enable verbose infrastructure logging
 var suite struct {
 	serverURL string
 	client    *http.Client
+	store     *pgstore.Store
 }
 
 // problemResponse is the RFC 9457 Problem Details structure returned by
@@ -112,7 +113,7 @@ func run(m *testing.M) int {
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
 	agentDialer := agentdialer.New(agentdialer.Config{Nodes: pgStore})
 	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, pgStore, agentDialer, problemWriter))
-	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter))
+	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter, false))
 	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
 
 	ts := httptest.NewServer(apiSrv.Handler())
@@ -120,6 +121,7 @@ func run(m *testing.M) int {
 
 	suite.serverURL = ts.URL
 	suite.client = ts.Client()
+	suite.store = pgStore
 
 	return m.Run()
 }

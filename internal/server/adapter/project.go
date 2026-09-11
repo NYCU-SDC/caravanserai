@@ -54,6 +54,20 @@ func (a *ProjectStoreAdapter) GetProjectPhase(ctx context.Context, name string) 
 
 func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nodeRef string) error {
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		// Bump the assignment generation exactly once per real transition into
+		// Scheduled. The guard is "was not already Scheduled": a scheduler retry
+		// or a semantic no-op that re-asserts an existing Scheduled assignment
+		// re-reads phase=Scheduled and skips the bump, so generation never
+		// advances twice for one grant of ownership. Under OCC the phase read
+		// here reflects the committed row and only the winning attempt persists,
+		// so the increment is exactly-once even across retries.
+		//
+		// A grant of ownership is always Known history, whatever the row
+		// migrated in as: the counter it now carries is a trustworthy fence.
+		if status.Phase != v1.ProjectPhaseScheduled {
+			status.AssignmentGeneration++
+			status.AssignmentHistory = v1.AssignmentHistoryKnown
+		}
 		status.Phase = v1.ProjectPhaseScheduled
 		status.NodeRef = nodeRef
 		return nil
@@ -117,6 +131,12 @@ func (a *ProjectStoreAdapter) SetProjectPending(ctx context.Context, name string
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
 		transitioned := status.Phase != v1.ProjectPhasePending
 		status.Phase = v1.ProjectPhasePending
+		// Clearing nodeRef revokes the current assignment but must not reset the
+		// generation counter: the next assignment has to advance past every
+		// generation this Project ever held, or a stale report from an earlier
+		// owner could match a recycled number. AssignmentHistory likewise stays
+		// as-is (it was assigned, so it is Known) — releasing ownership never
+		// makes a Project look never-assigned.
 		status.NodeRef = ""
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypePhase,

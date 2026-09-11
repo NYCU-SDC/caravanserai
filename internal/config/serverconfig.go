@@ -43,6 +43,18 @@ type Config struct {
 	// HeadscaleUser is the Headscale user new pre-auth keys are created under.
 	// Defaults to "cara-node".
 	HeadscaleUser string `yaml:"headscale_user" envconfig:"HEADSCALE_USER"`
+
+	// UIDEnforcement turns on strict UID and assignment-generation fencing on
+	// the server side (CARA-82, CARA-83). It shares the agent's UID_ENFORCEMENT
+	// switch on purpose: UID and generation are one ownership identity, rolled
+	// out together. When false (the default, "compatibility mode") an Agent
+	// report that carries a complete UID + nodeRef + generation fence is still
+	// validated atomically, but a legacy report missing that fence is accepted
+	// through the unfenced path so an un-upgraded Agent keeps working. When
+	// true, a report missing UID or generation is rejected as a stale
+	// assignment rather than accepted. Enable it cluster-wide only after every
+	// Agent sends the fence and legacy runtime ownership has been remediated.
+	UIDEnforcement bool `yaml:"uid_enforcement" envconfig:"UID_ENFORCEMENT"`
 }
 
 // Load reads cara-server config from file → env → flags (later sources win).
@@ -116,6 +128,7 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		HeadscaleAPIURL:  os.Getenv("HEADSCALE_API_URL"),
 		HeadscaleAPIKey:  os.Getenv("HEADSCALE_API_KEY"),
 		HeadscaleUser:    os.Getenv("HEADSCALE_USER"),
+		UIDEnforcement:   os.Getenv("UID_ENFORCEMENT") == "true",
 	}
 
 	return configutil.Merge[Config](cfg, envConfig)
@@ -135,6 +148,7 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.StringVar(&flagConfig.HeadscaleAPIURL, "headscale-api-url", "", "Headscale management API URL (enables overlay admin endpoints)")
 	flag.StringVar(&flagConfig.HeadscaleAPIKey, "headscale-api-key", "", "Headscale management API key")
 	flag.StringVar(&flagConfig.HeadscaleUser, "headscale-user", "", "Headscale user new pre-auth keys are created under (default: cara-node)")
+	flag.BoolVar(&flagConfig.UIDEnforcement, "uid-enforcement", false, "enforce Project UID and assignment-generation fencing (default: false, compatibility mode)")
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)
 }

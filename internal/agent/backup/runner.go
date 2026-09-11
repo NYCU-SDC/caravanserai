@@ -37,9 +37,13 @@ type OwnershipResolver interface {
 // exists for observability and as an input to the future recovery
 // controller; it is never what protects correctness, so every method's
 // failure is logged and ignored rather than aborting a backup.
+// The uid/nodeRef/generation triple is the assignment fence the server
+// validates the Maintenance write against (CARA-83). It is passed as primitives
+// rather than a shared type so this package stays free of any dependency on the
+// agent client that implements it.
 type ConditionReporter interface {
-	SetMaintenance(ctx context.Context, key ResourceKey, reason string) error
-	ClearMaintenance(ctx context.Context, key ResourceKey) error
+	SetMaintenance(ctx context.Context, key ResourceKey, uid, nodeRef string, generation int64, reason string) error
+	ClearMaintenance(ctx context.Context, key ResourceKey, uid, nodeRef string, generation int64) error
 }
 
 // RouteRefresher re-points the ingress proxy at a Project's containers after
@@ -215,13 +219,14 @@ func (r *Runner) Run(ctx context.Context, project *v1.Project) (err error) {
 	}
 	log = log.With(zap.String("backupID", backupID))
 
-	if err := r.conditions.SetMaintenance(ctx, key, "BackingUp"); err != nil {
+	uid, nodeRef, generation := project.ObjectMeta.UID, project.Status.NodeRef, project.Status.AssignmentGeneration
+	if err := r.conditions.SetMaintenance(ctx, key, uid, nodeRef, generation, "BackingUp"); err != nil {
 		// Correctness is already protected by the claim above; losing the
 		// condition only costs visibility.
 		log.Warn("Failed to set Maintenance condition", zap.Error(err))
 	}
 	defer func() {
-		if clearErr := r.conditions.ClearMaintenance(context.WithoutCancel(ctx), key); clearErr != nil {
+		if clearErr := r.conditions.ClearMaintenance(context.WithoutCancel(ctx), key, uid, nodeRef, generation); clearErr != nil {
 			log.Warn("Failed to clear Maintenance condition", zap.Error(clearErr))
 		}
 	}()

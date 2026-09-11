@@ -27,14 +27,16 @@ type conditionReporter struct {
 	client *Client
 }
 
-func (c conditionReporter) SetMaintenance(ctx context.Context, key backup.ResourceKey, reason string) error {
-	return c.client.PatchProjectCondition(ctx, key.Name,
+func (c conditionReporter) SetMaintenance(ctx context.Context, key backup.ResourceKey, uid, nodeRef string, generation int64, reason string) error {
+	fence := AssignmentFence{UID: uid, NodeRef: nodeRef, Generation: generation}
+	return c.client.PatchProjectCondition(ctx, key.Name, fence,
 		v1.ConditionTypeMaintenance, v1.ConditionTrue, reason,
 		"Containers are stopped for a Managed volume backup")
 }
 
-func (c conditionReporter) ClearMaintenance(ctx context.Context, key backup.ResourceKey) error {
-	return c.client.ClearProjectCondition(ctx, key.Name, v1.ConditionTypeMaintenance)
+func (c conditionReporter) ClearMaintenance(ctx context.Context, key backup.ResourceKey, uid, nodeRef string, generation int64) error {
+	fence := AssignmentFence{UID: uid, NodeRef: nodeRef, Generation: generation}
+	return c.client.ClearProjectCondition(ctx, key.Name, fence, v1.ConditionTypeMaintenance)
 }
 
 // restoreTimeout bounds a single Project's restore. Generous, because it
