@@ -12,6 +12,7 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	caravolume "NYCU-SDC/caravanserai/internal/agent/volume"
 
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
@@ -61,7 +62,7 @@ const (
 // DockerRuntime is the production implementation of Runtime backed by the
 // Docker Engine API.
 type DockerRuntime struct {
-	client   *dockerclient.Client
+	client   dockerAPI
 	logger   *zap.Logger
 	dataRoot string
 	// enforceUID gates UID ownership fencing (CARA-82). When false
@@ -501,6 +502,7 @@ func (r *DockerRuntime) InspectProject(ctx context.Context, project *v1.Project)
 			ContainerID: info.ID,
 			Status:      info.State.Status,
 			ExitCode:    info.State.ExitCode,
+			NotOwned:    r.checkContainerOwnership(name, info, ownerOf(project), svc.Name),
 		})
 	}
 
@@ -696,24 +698,19 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 	}
 
 	if err == nil {
-		// Container exists. UID fencing (CARA-82): when enforcing, refuse to
-		// adopt a same-name container that carries a different UID (a previous
-		// lifetime) or no UID at all (a pre-UID/legacy container). Adopting it
-		// would let a stale or foreign container masquerade as the current
-		// Project. The orphan sweep is responsible for stopping and removing
-		// such containers; ensureContainer only refuses to reuse them.
-		if r.enforceUID && uid != "" && info.Config != nil && info.Config.Labels[labelUID] != uid {
-			return fmt.Errorf("refuse to adopt container %q: UID label %q does not match current Project UID %q",
-				cName, info.Config.Labels[labelUID], uid)
-		}
-		// Generation fencing (CARA-83): even when the UID matches, a container
-		// left by an earlier grant of ownership within this same lifetime carries
-		// an older generation. Adopting it would let a stale assignment's
-		// container serve the current one. The orphan sweep stops and removes it;
-		// ensureContainer only refuses to reuse it.
-		if r.enforceUID && info.Config != nil && info.Config.Labels[labelGeneration] != generationLabel(generation) {
-			return fmt.Errorf("refuse to adopt container %q: generation label %q does not match current assignment generation %d",
-				cName, info.Config.Labels[labelGeneration], generation)
+		// Container exists. It is adopted only if it belongs to this
+		// assignment, by the same rule recovery and the health check use
+		// (checkContainerOwnership): the project, service and namespace labels
+		// always, and with UID enforcement on the UID (CARA-82) and the
+		// assignment generation (CARA-83) too. A container from a previous
+		// lifetime, an earlier grant, or no cara labels at all would otherwise
+		// masquerade as the current Project. The orphan sweep is responsible
+		// for stopping and removing such containers; ensureContainer only
+		// refuses to reuse them. A container whose config cannot be read is
+		// refused rather than adopted.
+		owner := containerOwner{Namespace: namespace, Project: projectName, UID: uid, Generation: generation}
+		if oErr := r.checkContainerOwnership(cName, info, owner, svc.Name); oErr != nil {
+			return fmt.Errorf("refuse to adopt: %w", oErr)
 		}
 		if info.State.Running {
 			log.Debug("Container already running")
@@ -913,4 +910,286 @@ func isNotFound(err error) bool {
 	// Fallback: some Docker API calls return a different error type for 404.
 	return strings.Contains(err.Error(), "No such") ||
 		strings.Contains(err.Error(), "not found")
+}
+
+// RecoverServices implements Runtime.
+//
+// The contract that matters is what it does NOT do: no rollback, ever. See the
+// interface comment — ReconcileProject's rollback calls RemoveProject, which
+// on a Project that is still serving traffic would delete the healthy
+// containers and their Ephemeral volumes because one other container could not
+// be recreated.
+// recoveryTargets picks the named services out of the spec, in spec order.
+//
+// Spec order, not the caller's order: a service is started after whatever it
+// depends on, the same ordering ReconcileProject relies on. Both the preflight
+// and the recovery walk this list, so both see the same services in the same
+// order.
+func recoveryTargets(project *v1.Project, services []string) []v1.ServiceDef {
+	wanted := make(map[string]bool, len(services))
+	for _, name := range services {
+		wanted[name] = true
+	}
+
+	targets := make([]v1.ServiceDef, 0, len(services))
+	for _, svc := range project.Spec.Services {
+		if wanted[svc.Name] {
+			targets = append(targets, svc)
+		}
+	}
+	return targets
+}
+
+// PreflightRecovery implements Runtime.
+func (r *DockerRuntime) PreflightRecovery(ctx context.Context, project *v1.Project, services []string) error {
+	return r.preflightTargets(ctx, project, recoveryTargets(project, services))
+}
+
+// preflightTargets checks every target service before any of them is touched:
+// that any container already under its name belongs to this assignment, and
+// that every volume it mounts is present. It only reads.
+//
+// Checking service by service as each is recovered would mean discovering that
+// the second service's data is gone, or its container stale, only after the
+// first has already been started. A half-recovered Project is harder to reason
+// about than one that was refused outright.
+func (r *DockerRuntime) preflightTargets(ctx context.Context, project *v1.Project, targets []v1.ServiceDef) error {
+	for _, svc := range targets {
+		name := ContainerName(project.Name, svc.Name)
+		info, err := r.client.ContainerInspect(ctx, name)
+		switch {
+		case err != nil && !isNotFound(err):
+			return fmt.Errorf("preflight %q: inspect %q: %w", svc.Name, name, err)
+		case err == nil:
+			if oErr := r.checkContainerOwnership(name, info, ownerOf(project), svc.Name); oErr != nil {
+				return fmt.Errorf("preflight %q: %w", svc.Name, oErr)
+			}
+		}
+		if err := r.preflightVolumes(ctx, project, svc); err != nil {
+			return fmt.Errorf("preflight %q: %w", svc.Name, err)
+		}
+	}
+	return nil
+}
+
+// checkContainerOwnership reports whether an existing container belongs to the
+// assignment being recovered, returning a *ContainerNotOwnedError if not.
+//
+// The project, service and namespace labels are checked in every mode: they
+// are what makes a container this Project's at all. A namespace label that is
+// absent is tolerated only in compatibility mode, where containers created
+// before the label existed must keep working. With UID enforcement on, the UID
+// and the assignment generation must match too — the same rule ensureContainer
+// applies before adopting a container, and the one CARA-83 depends on.
+//
+// A container with no labels at all cannot be shown to be ours, so it is
+// treated as not ours.
+func (r *DockerRuntime) checkContainerOwnership(name string, info types.ContainerJSON, owner containerOwner, service string) error {
+	var labels map[string]string
+	if info.Config != nil {
+		labels = info.Config.Labels
+	}
+	mismatch := func(label, want string) error {
+		return &ContainerNotOwnedError{Container: name, Service: service, Label: label, Want: want, Got: labels[label]}
+	}
+
+	if labels[labelProject] != owner.Project {
+		return mismatch(labelProject, owner.Project)
+	}
+	if labels[labelService] != service {
+		return mismatch(labelService, service)
+	}
+	if ns := labels[labelNamespace]; ns != owner.Namespace && (ns != "" || r.enforceUID) {
+		return mismatch(labelNamespace, owner.Namespace)
+	}
+	if !r.enforceUID {
+		return nil
+	}
+	if labels[labelUID] != owner.UID {
+		return mismatch(labelUID, owner.UID)
+	}
+	if want := generationLabel(owner.Generation); labels[labelGeneration] != want {
+		return mismatch(labelGeneration, want)
+	}
+	return nil
+}
+
+// containerOwner is the assignment a container must belong to: the fields
+// checkContainerOwnership compares against the container's labels. It is a
+// separate type so the Project-shaped callers and ensureContainer, which is
+// handed the fields one by one, apply exactly the same rule.
+type containerOwner struct {
+	Namespace  string
+	Project    string
+	UID        string
+	Generation int64
+}
+
+func ownerOf(project *v1.Project) containerOwner {
+	return containerOwner{
+		Namespace:  project.Namespace,
+		Project:    project.Name,
+		UID:        project.ObjectMeta.UID,
+		Generation: project.Status.AssignmentGeneration,
+	}
+}
+
+// preflightVolumes verifies that every volume the service mounts is already
+// there. It only reads: nothing is created, moved, or repaired.
+//
+// This is what stops a recovery from quietly destroying data. Docker creates
+// what a container needs and does not have, at create time and at start time
+// alike: a bind source that does not exist becomes a new empty root-owned
+// directory, and a named volume that does not exist is created empty. The
+// operation then succeeds, so the service comes up looking healthy while
+// serving nothing — a Postgres whose data directory was lost starts as an
+// empty database, or re-initialises one, and the next backup writes that
+// emptiness over the last good copy. A container that fails to start is a
+// visible fault; this is a silent one, which is why it is the more dangerous
+// of the two.
+//
+// Failing instead keeps the situation recoverable. A missing volume is not a
+// container fault and has no container-level fix; restoring it from a backup
+// is the restore path's job, and deciding whether to do that at all is an
+// operator's. Recovery's contribution is to stop and say so.
+func (r *DockerRuntime) preflightVolumes(ctx context.Context, project *v1.Project, svc v1.ServiceDef) error {
+	byName := make(map[string]v1.VolumeDef, len(project.Spec.Volumes))
+	for _, v := range project.Spec.Volumes {
+		byName[v.Name] = v
+	}
+
+	for _, vm := range svc.VolumeMounts {
+		vol, ok := byName[vm.Name]
+		if !ok {
+			return fmt.Errorf("service %q mounts undeclared volume %q", svc.Name, vm.Name)
+		}
+
+		switch vol.Type {
+		case v1.VolumeTypeManaged:
+			hostPath, err := caravolume.HostPath(r.dataRoot, project.Namespace, project.Name, vm.Name)
+			if err != nil {
+				return fmt.Errorf("derive host path for volume %q: %w", vm.Name, err)
+			}
+			unavailable := func(detail string) error {
+				return &VolumeUnavailableError{Service: svc.Name, Volume: vm.Name, Type: vol.Type, Detail: detail}
+			}
+			info, err := os.Stat(hostPath)
+			if err != nil {
+				return unavailable(fmt.Sprintf("%s is missing, recovery will not recreate it: %v", hostPath, err))
+			}
+			if !info.IsDir() {
+				return unavailable(fmt.Sprintf("%s exists but is not a directory", hostPath))
+			}
+			if err := unix.Access(hostPath, unix.R_OK|unix.W_OK); err != nil {
+				return unavailable(fmt.Sprintf("%s is not accessible: %v", hostPath, err))
+			}
+
+		case v1.VolumeTypeEphemeral:
+			vName := VolumeName(project.Name, vm.Name)
+			if _, err := r.client.VolumeInspect(ctx, vName); err != nil {
+				if isNotFound(err) {
+					return &VolumeUnavailableError{Service: svc.Name, Volume: vm.Name, Type: vol.Type,
+						Detail: fmt.Sprintf("docker volume %s no longer exists, recovery will not create it empty", vName)}
+				}
+				return fmt.Errorf("inspect ephemeral volume %s: %w", vName, err)
+			}
+
+		default:
+			return fmt.Errorf("service %q mounts volume %q of unsupported type %q", svc.Name, vm.Name, vol.Type)
+		}
+	}
+
+	return nil
+}
+
+func (r *DockerRuntime) RecoverServices(ctx context.Context, project *v1.Project, services []string) error {
+	log := r.logger.With(zap.String("project", project.Name))
+
+	targets := recoveryTargets(project, services)
+
+	// ── Pass 1: read-only preflight ───────────────────────────────────────
+	//
+	// This repeats the check the caller already made through
+	// PreflightRecovery, and must not be removed because of that. The two
+	// calls answer different questions: the caller's decides whether to spend
+	// a recovery attempt at all, this one closes the window between that
+	// decision and the first Docker call, in which a volume can still be
+	// deleted or a container replaced. Data safety rests on this check, not
+	// on the caller's.
+	if err := r.preflightTargets(ctx, project, targets); err != nil {
+		return err
+	}
+
+	// ── Pass 2: recovery ──────────────────────────────────────────────────
+
+	// The network is repaired if it is gone: creating it is idempotent, has an
+	// ownership guard, and cannot lose data. Volumes are not, deliberately —
+	// which is what pass 1 has just established.
+	if err := r.ensureNetwork(ctx, project.Namespace, project.Name, project.ObjectMeta.UID); err != nil {
+		return fmt.Errorf("ensure network: %w", err)
+	}
+
+	for _, svc := range targets {
+		name := ContainerName(project.Name, svc.Name)
+		info, err := r.client.ContainerInspect(ctx, name)
+
+		// Ownership is checked again on the copy about to be acted on. Pass 1
+		// saw an earlier inspect; this is the one the start or remove below
+		// uses, so this is the check that actually guards the mutation.
+		if err == nil {
+			if oErr := r.checkContainerOwnership(name, info, ownerOf(project), svc.Name); oErr != nil {
+				return oErr
+			}
+		}
+
+		switch {
+		case err != nil && !isNotFound(err):
+			return fmt.Errorf("inspect %q: %w", name, err)
+
+		case err != nil:
+			// No container at all — create and start it. ensureContainer pulls
+			// the image, so a registry failure surfaces here rather than as a
+			// confusing "no such image" from the create call.
+			log.Info("Recreating missing container", zap.String("service", svc.Name))
+			if cErr := r.ensureContainer(ctx, project.Namespace, project.Name,
+				project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec.Volumes); cErr != nil {
+				return fmt.Errorf("recreate %q: %w", name, cErr)
+			}
+
+		case info.State.Running:
+			// Already back, most likely recovered by an earlier attempt whose
+			// result this poll had not yet observed. Only counted as recovered
+			// because the ownership check above passed: a stale container that
+			// happens to be running is not this assignment's recovery.
+			log.Debug("Container already running", zap.String("service", svc.Name))
+
+		case info.State.Status == "dead":
+			// A dead container cannot be started; Docker could neither run nor
+			// remove it. Removing it by force and building a new one is the
+			// only way forward, and it is safe: the container is the only
+			// thing discarded, and its volumes are not.
+			log.Info("Removing dead container before recreating", zap.String("service", svc.Name))
+			if rErr := r.client.ContainerRemove(ctx, info.ID, container.RemoveOptions{Force: true}); rErr != nil {
+				return fmt.Errorf("remove dead %q: %w", name, rErr)
+			}
+			if cErr := r.ensureContainer(ctx, project.Namespace, project.Name,
+				project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec.Volumes); cErr != nil {
+				return fmt.Errorf("recreate dead %q: %w", name, cErr)
+			}
+
+		default:
+			// Exited or created: the container is intact, so starting it is
+			// the narrowest operation that fixes it. Intact is not the same as
+			// complete — a bind source deleted while the container was stopped
+			// would be recreated empty by the start — which is why pass 1
+			// covers this branch as well.
+			log.Info("Starting stopped container",
+				zap.String("service", svc.Name), zap.String("status", info.State.Status))
+			if sErr := r.client.ContainerStart(ctx, info.ID, container.StartOptions{}); sErr != nil {
+				return fmt.Errorf("start %q: %w", name, sErr)
+			}
+		}
+	}
+
+	return nil
 }

@@ -696,7 +696,8 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 // timers the rescheduler reads, so the endpoint accepts only the conditions
 // agents legitimately own.
 var agentWritableConditions = map[v1.ConditionType]bool{
-	v1.ConditionTypeMaintenance: true,
+	v1.ConditionTypeMaintenance:     true,
+	v1.ConditionTypeRecoveryBlocked: true,
 }
 
 // conditionPatchRequest is the body sent to
@@ -755,13 +756,20 @@ func (h *Handler) patchCondition(w http.ResponseWriter, r *http.Request) {
 	// the stored timestamp would need either a read — losing the atomicity the
 	// merge exists for — or the comparison pushed into jsonb.
 	//
-	// It is affordable because of who calls it: the only producer is the agent's
-	// backup runner, once when a backup starts and once when it ends, so every
-	// call really is a transition. If a caller ever re-asserts the same
-	// condition on a schedule, that stops being true — each repeat becomes a
-	// write and a project.updated event carrying no news, which is exactly what
-	// the guard in patchStatus exists to prevent. Give this the same treatment
-	// then.
+	// It is affordable because of who calls it, and each producer keeps it
+	// that way. The backup runner writes Maintenance once when a backup starts
+	// and clears it once when it ends, so every call really is a transition.
+	// The recovery path evaluates RecoveryBlocked on every poll, but compares
+	// against the condition it has just read and only writes when the reason
+	// or message would change — so it too writes only on a transition.
+	//
+	// A producer that re-asserted the same condition on a schedule without
+	// that comparison would turn each repeat into a write and a
+	// project.updated event carrying no news, which is exactly what the guard
+	// in patchStatus exists to prevent. Moving the comparison here, into the
+	// merge, would cover every producer at once; it is not done yet because
+	// it changes Maintenance too, whose staleness is measured from the
+	// timestamp this stamps.
 	ref, fenced, proceed := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
 	if !proceed {
 		return

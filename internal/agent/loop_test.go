@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -26,6 +27,8 @@ type mockRuntime struct {
 	getContainerIPs func(ctx context.Context, project *v1.Project) (map[string]string, error)
 	stopFn          func(ctx context.Context, project *v1.Project) error
 	startFn         func(ctx context.Context, project *v1.Project) error
+	recoverFn       func(ctx context.Context, project *v1.Project, services []string) error
+	preflightFn     func(ctx context.Context, project *v1.Project, services []string) error
 	listLocalFn     func(ctx context.Context) ([]docker.ProjectIdentity, error)
 	stopOrphanFn    func(ctx context.Context, project docker.ProjectIdentity) error
 	removeOrphanFn  func(ctx context.Context, project docker.ProjectIdentity) error
@@ -69,6 +72,20 @@ func (m *mockRuntime) StopProject(ctx context.Context, project *v1.Project) erro
 func (m *mockRuntime) StartProject(ctx context.Context, project *v1.Project) error {
 	if m.startFn != nil {
 		return m.startFn(ctx, project)
+	}
+	return nil
+}
+
+func (m *mockRuntime) RecoverServices(ctx context.Context, project *v1.Project, services []string) error {
+	if m.recoverFn != nil {
+		return m.recoverFn(ctx, project, services)
+	}
+	return nil
+}
+
+func (m *mockRuntime) PreflightRecovery(ctx context.Context, project *v1.Project, services []string) error {
+	if m.preflightFn != nil {
+		return m.preflightFn(ctx, project, services)
 	}
 	return nil
 }
@@ -215,7 +232,9 @@ func TestHealthCheckOne(t *testing.T) {
 				},
 			}
 
-			healthCheckOne(context.Background(), client, rt, nil, tt.project, zap.NewNop())
+			// A nil tracker disables tier-1 recovery, so these cases assert the
+			// behaviour that existed before CARA-86: report and stop.
+			healthCheckOne(context.Background(), client, rt, nil, nil, nil, tt.project, zap.NewNop())
 
 			require.Len(t, *updates, tt.wantCount)
 			if tt.wantCount > 0 {
@@ -246,7 +265,7 @@ func TestHealthCheckOne_InspectError(t *testing.T) {
 		},
 	}
 
-	healthCheckOne(context.Background(), client, rt, nil, project, zap.NewNop())
+	healthCheckOne(context.Background(), client, rt, nil, nil, nil, project, zap.NewNop())
 
 	require.Len(t, *updates, 1)
 	u := (*updates)[0]
@@ -280,7 +299,7 @@ func TestHealthCheckOne_CrashedBeforeMissing(t *testing.T) {
 		},
 	}
 
-	healthCheckOne(context.Background(), client, rt, nil, project, zap.NewNop())
+	healthCheckOne(context.Background(), client, rt, nil, nil, nil, project, zap.NewNop())
 
 	require.Len(t, *updates, 1)
 	u := (*updates)[0]
@@ -373,7 +392,7 @@ func TestBootstrapRunningProjects(t *testing.T) {
 		},
 	}
 
-	bootstrapRunningProjects(context.Background(), client, rt, nil, zap.NewNop())
+	bootstrapRunningProjects(context.Background(), client, rt, nil, nil, nil, zap.NewNop())
 
 	// Only "running-crashed" should have generated a status update (Failed).
 	// "running-healthy" is healthy (no-op). "scheduled-new" is skipped
@@ -500,4 +519,18 @@ func TestResolveSecretsKeyNotFound(t *testing.T) {
 	_, err := resolveSecrets(context.Background(), client, secretRefProject())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errSecretKeyNotFound)
+}
+
+// secretRefError exists so recovery can name the failing Secret without
+// parsing text, but reconcileOne publishes Error() as a status message, so the
+// text must be exactly what it was before the type existed.
+func TestSecretRefErrorKeepsTheExistingMessages(t *testing.T) {
+	notFound := &secretRefError{Service: "db", Env: "PW", Secret: "creds", Key: "pw",
+		Err: fmt.Errorf("%w: %s", ErrSecretNotFound, "creds")}
+	assert.Equal(t, `service "db" env "PW": secret not found: creds`, notFound.Error())
+	assert.ErrorIs(t, notFound, ErrSecretNotFound)
+
+	keyMissing := &secretRefError{Service: "db", Env: "PW", Secret: "creds", Key: "pw", Err: errSecretKeyNotFound}
+	assert.Equal(t, `service "db" env "PW": secret "creds": secret key not found: "pw"`, keyMissing.Error())
+	assert.ErrorIs(t, keyMissing, errSecretKeyNotFound)
 }

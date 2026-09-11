@@ -45,6 +45,10 @@ type AssignmentFence struct {
 	Generation int64
 }
 
+// NodeName is the name this agent registered under. It is what a Project's
+// status.nodeRef must equal for the Project to be this node's to act on.
+func (c *Client) NodeName() string { return c.nodeName }
+
 // fenceForProject reads the assignment fence from a Project the Agent received
 // in an ownership poll. The three fields are exactly what the Scheduler wrote
 // when it granted this assignment, so echoing them back is what proves the

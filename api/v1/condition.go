@@ -29,6 +29,13 @@
 //	  when it first observes a Running project on a NotReady node.
 //	  LastTransitionTime is the start of the running grace-period clock.
 //	  The condition is never updated after it is set; only read.
+//
+//	  ConditionTypeMaintenance — set and cleared by the agent around an
+//	  operation that stops containers on purpose, such as a backup.
+//
+//	  ConditionTypeRecoveryBlocked — set by the agent when it has refused to
+//	  recover a Project's containers because doing so would be unsafe, and
+//	  cleared once the reason is gone.
 package v1
 
 import "time"
@@ -78,6 +85,22 @@ const (
 	// after MaintenanceStaleAfter so a crashed operation cannot mark a
 	// Project as under maintenance forever.
 	ConditionTypeMaintenance ConditionType = "Maintenance"
+
+	// ConditionTypeRecoveryBlocked indicates that the agent found a Project's
+	// containers down and deliberately did not restart them, because a
+	// precondition for doing so safely does not hold. Status=True with
+	// Reason="VolumeUnavailable" means a volume a service mounts is missing
+	// from the node, and starting the container would have run it against
+	// empty data.
+	//
+	// The phase stays Running on purpose. Failed is terminal for the agent's
+	// poll loop, so a Project reported Failed would never be retried even
+	// after the data is restored; Running keeps it under observation, and the
+	// agent clears this condition and resumes recovery on its own once the
+	// precondition holds again. Until then the Project is down and nothing in
+	// cara will bring it back — this condition is how that becomes visible
+	// without logging into the node.
+	ConditionTypeRecoveryBlocked ConditionType = "RecoveryBlocked"
 
 	// ConditionTypeDiskPressure indicates whether the node's disk usage is
 	// approaching capacity. Set by the NodeConditionController based on

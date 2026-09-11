@@ -299,7 +299,7 @@ func TestReconcileProjects_ServerErrorResetsDeletionGrace(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	client := NewClient(zap.NewNop(), server.URL, "test-node")
-	reconcileProjects(context.Background(), client, runtime, nil, nil, tracker, false, zap.NewNop())
+	reconcileProjects(context.Background(), client, runtime, nil, nil, tracker, nil, false, zap.NewNop())
 
 	// A fresh successful snapshot starts a new full grace period.
 	sweep(runtime, nil, tracker, nil)

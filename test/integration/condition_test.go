@@ -209,3 +209,71 @@ func TestProjectConditionOnMissingProject(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	drainBody(resp)
 }
+
+// TestProjectConditionRecoveryBlockedKeepsProjectRunning is the guarantee
+// CARA-86 depends on when it refuses a recovery: the block is visible on the
+// Project while the phase stays Running. Were the block to move the phase to
+// Failed, the agent's poll loop would drop the Project and never recover it
+// once the missing data was restored.
+func TestProjectConditionRecoveryBlockedKeepsProjectRunning(t *testing.T) {
+	const projectName = "e2e-condition-recovery-blocked"
+
+	createBody := mustMarshal(t, v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: projectName},
+		Spec: v1.ProjectSpec{
+			Services: []v1.ServiceDef{{Name: "db", Image: "postgres:16"}},
+		},
+	})
+	resp := doRequest(t, http.MethodPost, "/api/v1/projects", createBody)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	drainBody(resp)
+
+	t.Cleanup(func() {
+		resp := doRequest(t, http.MethodDelete, "/api/v1/projects/"+projectName+"?force=true", nil)
+		drainBody(resp)
+	})
+
+	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status",
+		mustMarshal(t, map[string]string{
+			"phase": "Running", "reason": "ContainersRunning", "message": "All containers running",
+		}))
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	drainBody(resp)
+
+	// ── Block ───────────────────────────────────────────────────────────────
+
+	resp = doRequest(t, http.MethodPatch,
+		"/api/v1/projects/"+projectName+"/conditions/RecoveryBlocked",
+		mustMarshal(t, map[string]string{
+			"status": "True", "reason": "VolumeUnavailable",
+			"message": `managed volume "db-data" is missing`,
+		}))
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	drainBody(resp)
+
+	blocked := getProject(t, projectName)
+	assert.Equal(t, v1.ProjectPhaseRunning, blocked.Status.Phase,
+		"a blocked recovery must not move the Project to Failed")
+
+	cond, ok := findCondition(blocked.Status.Conditions, v1.ConditionTypeRecoveryBlocked)
+	require.True(t, ok, "RecoveryBlocked should be present")
+	assert.Equal(t, v1.ConditionTrue, cond.Status)
+	assert.Equal(t, "VolumeUnavailable", cond.Reason)
+	assert.Contains(t, cond.Message, "db-data")
+
+	phaseCond, ok := findCondition(blocked.Status.Conditions, v1.ConditionTypePhase)
+	require.True(t, ok, "the Phase condition must survive the patch")
+	assert.Equal(t, "ContainersRunning", phaseCond.Reason)
+
+	// ── Unblock ─────────────────────────────────────────────────────────────
+
+	resp = doRequest(t, http.MethodDelete,
+		"/api/v1/projects/"+projectName+"/conditions/RecoveryBlocked", nil)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	drainBody(resp)
+
+	after := getProject(t, projectName)
+	assert.Equal(t, v1.ProjectPhaseRunning, after.Status.Phase)
+	_, stillThere := findCondition(after.Status.Conditions, v1.ConditionTypeRecoveryBlocked)
+	assert.False(t, stillThere, "RecoveryBlocked should be gone")
+}
