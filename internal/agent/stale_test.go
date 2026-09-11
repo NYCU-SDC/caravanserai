@@ -171,3 +171,70 @@ func TestOwnedRunningContainerIsStillHealthy(t *testing.T) {
 	assert.Len(t, h.server.writes("delete", v1.ConditionTypeRecoveryBlocked), 1)
 	assert.Empty(t, h.server.writes("patch", v1.ConditionTypeRecoveryBlocked))
 }
+
+// ── Scheduled: reconcileOne (CARA-93) ────────────────────────────────────────
+
+// scheduledIngressProject is ingressProject still in phase Scheduled — assigned
+// to this node, not yet reported Running.
+func scheduledIngressProject() *v1.Project {
+	p := ingressProject()
+	p.Status.Phase = v1.ProjectPhaseScheduled
+	return p
+}
+
+func (h *staleHarness) reconcile(t *testing.T, p *v1.Project) (reconciled int) {
+	h.runtime.reconcileFn = func(context.Context, *v1.Project) error {
+		reconciled++
+		return nil
+	}
+	reconcileOne(t.Context(), h.client, h.runtime, h.routes, nil, p, zap.NewNop())
+	return reconciled
+}
+
+// Generation 6's container is running when generation 7 is scheduled here. It
+// does not satisfy generation 7: no Running report, no routes, no reconcile —
+// which is where its failure path used to remove the container.
+func TestScheduledStaleRunningContainerIsNotAdopted(t *testing.T) {
+	p := scheduledIngressProject()
+	h := newStaleHarness(t, scheduledIngressProject(), staleGeneration("running"))
+
+	reconciled := h.reconcile(t, p)
+
+	assert.Empty(t, h.server.updates, "not reported Running — the phase is left as it is")
+	assert.Empty(t, h.routes.updated, "proxy routes must not be pointed at generation 6")
+	assert.Zero(t, reconciled, "ReconcileProject, and its rollback, must not run")
+
+	patches := h.server.writes("patch", v1.ConditionTypeRecoveryBlocked)
+	require.Len(t, patches, 1)
+	assert.Equal(t, "StaleContainer", patches[0].Reason)
+}
+
+// A stale container that exited with an error is not this Project's failure.
+func TestScheduledStaleCrashedContainerDoesNotFailTheProject(t *testing.T) {
+	p := scheduledIngressProject()
+	stale := staleGeneration("exited")
+	stale.ExitCode = 1
+	h := newStaleHarness(t, scheduledIngressProject(), stale)
+
+	reconciled := h.reconcile(t, p)
+
+	assert.Empty(t, h.server.updates, "not reported Failed/ContainerExited on generation 6's behalf")
+	assert.Zero(t, reconciled)
+	require.Len(t, h.server.writes("patch", v1.ConditionTypeRecoveryBlocked), 1)
+}
+
+// The regression the check must not cause: generation 7's own running
+// container still takes the Project to Running.
+func TestScheduledOwnedRunningContainerStillReportsRunning(t *testing.T) {
+	p := scheduledIngressProject()
+	owned := docker.ContainerState{ServiceName: "web", ContainerID: "id-web", Status: "running"}
+	h := newStaleHarness(t, scheduledIngressProject(), owned)
+
+	reconciled := h.reconcile(t, p)
+
+	require.Len(t, h.server.updates, 1)
+	assert.Equal(t, v1.ProjectPhaseRunning, h.server.updates[0].Phase)
+	assert.Equal(t, []string{"guestbook"}, h.routes.updated)
+	assert.Zero(t, reconciled, "nothing to create")
+	assert.Empty(t, h.server.conditionWrites)
+}

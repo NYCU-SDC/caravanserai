@@ -104,6 +104,17 @@ func (r *DockerRuntime) Close() error {
 func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Project) error {
 	log := r.logger.With(zap.String("project", project.Name))
 
+	// 0. Every existing service container must belong to this assignment
+	//    before anything is created, started or rolled back. ensureContainer
+	//    would refuse a stale one anyway, but only after the network and
+	//    volumes were made — and its refusal would then trigger the rollback
+	//    below, which is the wrong response to a container we do not own.
+	//    Refusing here returns before any mutation, so there is nothing to
+	//    roll back.
+	if err := r.checkExistingOwnership(ctx, project); err != nil {
+		return err
+	}
+
 	// 1. Ensure the bridge network exists.
 	if err := r.ensureNetwork(ctx, project.Namespace, project.Name, project.ObjectMeta.UID); err != nil {
 		return fmt.Errorf("ensure network: %w", err)
@@ -128,15 +139,43 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 	return nil
 }
 
-// rollback removes all Docker resources (containers, network, volumes) that
-// were partially created during a failed ReconcileProject. It uses
-// RemoveProject which is already idempotent and tolerates missing resources.
+// rollback removes the Docker resources a failed ReconcileProject may have
+// partially created. It tolerates missing resources.
+//
+// It is not RemoveProject. RemoveProject selects every container labelled for
+// the Project, whichever lifetime or grant created it — right for deleting a
+// Project, whose earlier generations' leftovers should go with it. A rollback
+// is narrower: it undoes this assignment's attempt, so it removes only
+// containers that belong to this assignment. A container left by an earlier
+// grant under a service name the spec no longer has is invisible to the
+// ownership check in step 0, and must survive a rollback it had no part in.
 func (r *DockerRuntime) rollback(ctx context.Context, project *v1.Project, log *zap.Logger) {
-	log.Warn("Reconcile failed, rolling back Docker resources")
-	if err := r.RemoveProject(ctx, project.Namespace, project.Name, project.Spec); err != nil {
+	log.Warn("Reconcile failed, rolling back Docker resources this assignment owns")
+	owner := ownerOf(project)
+	if err := r.removeProjectResources(ctx, project.Namespace, project.Name, project.Spec, &owner); err != nil {
 		log.Error("Rollback failed, resources may leak",
 			zap.Error(err))
 	}
+}
+
+// checkExistingOwnership reports, before any mutation, whether every service
+// container that already exists belongs to the project's current assignment.
+// A missing container is fine — it is what reconcile is about to create.
+func (r *DockerRuntime) checkExistingOwnership(ctx context.Context, project *v1.Project) error {
+	owner := ownerOf(project)
+	for _, svc := range project.Spec.Services {
+		name := ContainerName(project.Name, svc.Name)
+		info, err := r.client.ContainerInspect(ctx, name)
+		switch {
+		case err != nil && !isNotFound(err):
+			return fmt.Errorf("inspect %q: %w", name, err)
+		case err == nil:
+			if oErr := r.checkContainerOwnership(name, info, owner, svc.Name); oErr != nil {
+				return fmt.Errorf("refuse to reconcile: %w", oErr)
+			}
+		}
+	}
+	return nil
 }
 
 // volumeRemovalPlan describes what RemoveProject does with a project's volumes:
@@ -184,6 +223,14 @@ func planVolumeRemoval(dataRoot, namespace, projectName string, vols []v1.Volume
 
 // RemoveProject implements Runtime.
 func (r *DockerRuntime) RemoveProject(ctx context.Context, namespace, projectName string, spec v1.ProjectSpec) error {
+	return r.removeProjectResources(ctx, namespace, projectName, spec, nil)
+}
+
+// removeProjectResources is RemoveProject, optionally restricted to the
+// containers owner owns. A nil owner removes every container labelled for the
+// Project, which is what deleting it requires; rollback passes the current
+// assignment so it cannot remove a container another grant left behind.
+func (r *DockerRuntime) removeProjectResources(ctx context.Context, namespace, projectName string, spec v1.ProjectSpec, owner *containerOwner) error {
 	log := r.logger.With(zap.String("project", projectName))
 	var errs []error
 
@@ -198,6 +245,14 @@ func (r *DockerRuntime) RemoveProject(ctx context.Context, namespace, projectNam
 		return fmt.Errorf("list containers: %w", err)
 	}
 	for _, c := range containers {
+		if owner != nil {
+			name := strings.TrimPrefix(firstName(c.Names), "/")
+			if oErr := r.checkOwnershipLabels(name, c.Labels, *owner, c.Labels[labelService]); oErr != nil {
+				log.Info("Leaving container that belongs to another assignment",
+					zap.String("id", shortID(c.ID)), zap.Error(oErr))
+				continue
+			}
+		}
 		log.Info("Stopping container", zap.String("id", shortID(c.ID)))
 		timeout := stopTimeoutSeconds
 		if err := r.client.ContainerStop(ctx, c.ID, container.StopOptions{Timeout: &timeout}); err != nil {
@@ -989,6 +1044,12 @@ func (r *DockerRuntime) checkContainerOwnership(name string, info types.Containe
 	if info.Config != nil {
 		labels = info.Config.Labels
 	}
+	return r.checkOwnershipLabels(name, labels, owner, service)
+}
+
+// checkOwnershipLabels is checkContainerOwnership over a label set, for
+// callers that have a container list entry rather than an inspect result.
+func (r *DockerRuntime) checkOwnershipLabels(name string, labels map[string]string, owner containerOwner, service string) error {
 	mismatch := func(label, want string) error {
 		return &ContainerNotOwnedError{Container: name, Service: service, Label: label, Want: want, Got: labels[label]}
 	}
@@ -1192,4 +1253,12 @@ func (r *DockerRuntime) RecoverServices(ctx context.Context, project *v1.Project
 	}
 
 	return nil
+}
+
+// firstName returns the first of a container's names, or "" if it has none.
+func firstName(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
 }

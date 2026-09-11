@@ -27,6 +27,8 @@ set -Eeuo pipefail
 #   D. container that keeps exiting → three attempts, then LocalRestartExhausted
 #   E. running container left by an earlier generation → RecoveryBlocked/StaleContainer;
 #                               the container is neither adopted, started nor removed
+#   F. the same, while the Project is Scheduled → not reported Running, not
+#                               reconciled, and the container survives (CARA-93)
 
 log() { printf '[recovery-e2e] %s\n' "$*"; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -423,4 +425,24 @@ blocked_is "$project" StaleContainer || fail "E: the block was cleared while the
 container_running "$container" || fail "E: the stale container was stopped during the hold"
 log "E: PASS — stale running container blocked, left untouched, never counted as healthy"
 
-log "PASS: stop and remove recovered; missing data blocked visibly and recovered on restore; crash loop exhausted; stale container blocked"
+# ── F. The same stale container, seen by a Scheduled Project ─────────────────
+
+log "F: moving $project back to Scheduled while generation $label_generation's container still runs"
+# Scheduled is what a fresh assignment looks like before the agent reports it
+# Running; reconcileOne handles it, not the health check. Written straight to
+# the store like the generation bump above.
+reschedule="$(docker exec "$postgres_name" psql -U postgres -d caravanserai -Atc \
+	"UPDATE resources SET phase = 'Scheduled', status = jsonb_set(status, '{phase}', to_jsonb('Scheduled'::text), true), updated_at = now() WHERE kind = 'Project' AND name = '$project';")"
+[[ "$reschedule" == "UPDATE 1" ]] || fail "F: failed to move the Project to Scheduled: $reschedule"
+wait_until 10 "F: $project reads Scheduled" phase_is "$project" Scheduled
+
+log "F: holding for three polls; a stale running container must not satisfy the new assignment"
+sleep 30
+phase_is "$project" Scheduled ||
+	fail "F: the Project left Scheduled — generation $label_generation's container was taken as generation $new_generation's"
+[[ "$(container_id "$container")" == "$id_before" ]] || fail "F: the stale container was replaced or removed"
+container_running "$container" || fail "F: the stale container was stopped"
+blocked_is "$project" StaleContainer || fail "F: the StaleContainer block was cleared"
+log "F: PASS — Scheduled Project not adopted onto the stale container, which survived untouched"
+
+log "PASS: stop and remove recovered; missing data blocked visibly and recovered on restore; crash loop exhausted; stale container blocked on the Running and Scheduled paths"

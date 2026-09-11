@@ -428,6 +428,25 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 		return
 	}
 
+	// A container under a service's name that belongs to another assignment
+	// is checked before anything is counted. Counted as it is found, a stale
+	// container that is running would satisfy this assignment — the Project
+	// reported Running and proxy routes pointed at a workload from an earlier
+	// grant — and one that exited with an error would fail it. Nor may the
+	// reconcile below run: ensureContainer would refuse to adopt the stale
+	// container, and the failure path must not be what removes it. So the
+	// Project is reported blocked, its phase left as it is, and Docker left
+	// alone, exactly as healthCheckOne does for a Running Project.
+	for _, s := range states {
+		if s.NotOwned != nil {
+			log.Warn("A container under a service's name belongs to another assignment",
+				zap.String("reason", recoveryBlockedStaleContainer),
+				zap.String("service", s.ServiceName), zap.Error(s.NotOwned))
+			reportRecoveryBlocked(ctx, client, p, recoveryBlockedStaleContainer, staleContainerMessage(s.NotOwned), log)
+			return
+		}
+	}
+
 	// Check for containers that exited with a non-zero exit code.
 	var failedSvcs []string
 	for _, s := range states {
