@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -91,13 +90,18 @@ func main() {
 	// before.  This is expected to become mandatory once the Headscale epic
 	// (CARA-47) is complete.  A join failure is fatal — the agent must not
 	// silently fall back to the underlay when overlay was requested.
+	//
+	// Held beyond the block below so the agent API can also be served on the
+	// overlay; nil when overlay networking is disabled.
+	var overlayClient *overlay.TsnetClient
+
 	if cfg.HeadscaleURL != "" && cfg.PreauthKeyFile != "" {
 		overlayHostname := cfg.OverlayHostname
 		if overlayHostname == "" {
 			overlayHostname = cfg.NodeName
 		}
 
-		overlayClient, err := overlay.NewTsnetClient(overlay.TsnetConfig{
+		overlayClient, err = overlay.NewTsnetClient(overlay.TsnetConfig{
 			ControlURL:     cfg.HeadscaleURL,
 			PreauthKeyFile: cfg.PreauthKeyFile,
 			Hostname:       overlayHostname,
@@ -191,16 +195,32 @@ func main() {
 	apiSrv.Register(logshandler.NewHandler(logger, dockerRuntime, logsPW))
 
 	httpServer := &http.Server{
-		Addr:    net.JoinHostPort("0.0.0.0", cfg.ListenPort),
 		Handler: apiSrv.Handler(),
 	}
 
-	go func() {
-		logger.Info("Agent HTTP server listening", zap.String("addr", httpServer.Addr))
-		if srvErr := httpServer.ListenAndServe(); srvErr != nil && srvErr != http.ErrServerClosed {
-			logger.Fatal("Agent HTTP server failed", zap.Error(srvErr))
-		}
-	}()
+	// A nil interface value and a nil *TsnetClient inside a non-nil interface
+	// are different things; convert explicitly so agentListeners sees nil when
+	// overlay networking is disabled.
+	var overlayFor overlayListener
+	if overlayClient != nil {
+		overlayFor = overlayClient
+	}
+
+	listeners, err := agentListeners(cfg.ListenPort, overlayFor)
+	if err != nil {
+		logger.Fatal("Failed to open agent listeners", zap.Error(err))
+	}
+
+	// Every listener is served by the same http.Server so the handler set and
+	// the shutdown path stay single-sourced: Shutdown closes all of them.
+	for _, ln := range listeners {
+		logger.Info("Agent HTTP server listening", zap.String("addr", ln.Addr().String()))
+		go func() {
+			if srvErr := httpServer.Serve(ln); srvErr != nil && srvErr != http.ErrServerClosed {
+				logger.Fatal("Agent HTTP server failed", zap.Error(srvErr))
+			}
+		}()
+	}
 
 	logger.Info("Agent running, waiting for shutdown signal...")
 
