@@ -3,6 +3,15 @@
   "$id": "project.json",
   "$ref": "#/$defs/Project",
   "$defs": {
+    "AssignmentHistory": {
+      "type": "string",
+      "enum": [
+        "NeverAssigned",
+        "Known",
+        "Unknown"
+      ],
+      "description": "Whether a Project has ever held a Node assignment, and how confidently that is known."
+    },
     "Condition": {
       "properties": {
         "type": {
@@ -289,6 +298,14 @@
         "nodeRef": {
           "type": "string",
           "description": "NodeRef is the name of the Node the Scheduler chose. Empty while Pending."
+        },
+        "assignmentGeneration": {
+          "type": "integer",
+          "description": "AssignmentGeneration is a server-owned counter that increments by one on\nevery successful Pending-to-Scheduled assignment. Together with UID and\nnodeRef it forms the fence an Agent must present on every write: a report\ncarrying an older generation is rejected as stale, which defeats the ABA\nproblem that UID and nodeRef alone cannot — a Project reassigned A→B→A\nreuses the Node name but never a generation. Clearing nodeRef revokes the\ncurrent generation but does not reset the counter.\n\nThis is not a user manifest field; clients cannot set it."
+        },
+        "assignmentHistory": {
+          "$ref": "#/$defs/AssignmentHistory",
+          "description": "AssignmentHistory records whether this Project was ever assigned a Node,\ngating whether it may be hard-deleted directly or must enter the cleanup\nlifecycle first. Server-owned; not a user manifest field."
         },
         "conditions": {
           "items": {
