@@ -768,8 +768,10 @@ func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime,
 	// pointed at the stale container, and recovery never considered. Nothing
 	// here is this assignment's to judge or to act on, so it is reported as
 	// blocked and left exactly as it is — no route update, no condition
-	// cleared, no Docker call. Only the orphan sweep or an operator can
-	// resolve it.
+	// cleared, no Docker call. A container from a previous lifetime is
+	// reclaimed by the orphan sweep; one left by an earlier grant of this
+	// same lifetime is not reclaimed by anything yet, and an operator has to
+	// remove it.
 	if stale := firstNotOwned(bad); stale != nil {
 		clearTransient()
 		log.Warn("A container under a service's name belongs to another assignment",
@@ -963,9 +965,10 @@ func recoverLocally(
 			// A container under the service's name belongs to another
 			// assignment. Starting it would run a stale grant's workload as
 			// this one, and removing it would destroy something this
-			// assignment does not own. Like missing data, waiting does not
-			// change that — the orphan sweep or an operator has to — so it
-			// blocks rather than spending attempts.
+			// assignment does not own. Like missing data, retrying does not
+			// change that, so it blocks rather than spending attempts. What
+			// eventually removes the container is described on
+			// docker.ErrContainerNotOwned.
 			log.Warn("Recovery blocked: a container under the service's name belongs to another assignment",
 				zap.String("reason", recoveryBlockedStaleContainer),
 				zap.Strings("services", names), zap.Error(err))

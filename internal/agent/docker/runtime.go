@@ -64,8 +64,14 @@ func (e *VolumeUnavailableError) Unwrap() error { return ErrRecoveryVolumeUnavai
 // name generation 8 would use. Starting it would run a stale assignment's
 // container as the current one, and removing it would destroy something this
 // assignment does not own. Either bypasses the fence CARA-83 exists for, so
-// recovery refuses both and leaves the container to the orphan sweep or an
-// operator.
+// recovery refuses both and leaves the container where it is.
+//
+// What removes it depends on which label differs. A container from a previous
+// lifetime carries another UID, so under UID enforcement the orphan sweep sees
+// it as another Project's and reclaims it. One left by an earlier grant of the
+// same lifetime carries the same UID, so the sweep sees the Project it still
+// has assigned here and leaves it; nothing reclaims such a container yet, and
+// until that is decided an operator has to remove it.
 var ErrContainerNotOwned = errors.New("container not owned by the current assignment")
 
 // ContainerNotOwnedError is the concrete error behind ErrContainerNotOwned. It

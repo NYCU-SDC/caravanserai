@@ -759,10 +759,10 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 		// always, and with UID enforcement on the UID (CARA-82) and the
 		// assignment generation (CARA-83) too. A container from a previous
 		// lifetime, an earlier grant, or no cara labels at all would otherwise
-		// masquerade as the current Project. The orphan sweep is responsible
-		// for stopping and removing such containers; ensureContainer only
-		// refuses to reuse them. A container whose config cannot be read is
-		// refused rather than adopted.
+		// masquerade as the current Project. ensureContainer only refuses to
+		// reuse such a container; it never stops or removes it (see
+		// ErrContainerNotOwned for what does). A container whose config cannot
+		// be read is refused rather than adopted.
 		owner := containerOwner{Namespace: namespace, Project: projectName, UID: uid, Generation: generation}
 		if oErr := r.checkContainerOwnership(cName, info, owner, svc.Name); oErr != nil {
 			return fmt.Errorf("refuse to adopt: %w", oErr)
