@@ -456,7 +456,9 @@ func TestRecoveryGateReportsExhaustionAfterRealAttempts(t *testing.T) {
 
 	for i := 0; i < maxRecoveryAttempts; i++ {
 		run()
-		clk.advance(recoveryBackoff[i])
+		if i < len(recoveryBackoff) {
+			clk.advance(recoveryBackoff[i])
+		}
 	}
 	require.Equal(t, maxRecoveryAttempts, rt.recoveries)
 	require.Empty(t, gs.updates)

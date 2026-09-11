@@ -18,7 +18,8 @@ const (
 	// for the containers to come up before declaring exhaustion. Earlier
 	// attempts do not need it: an attempt that has not produced a healthy
 	// Project by the time its backoff expires has already failed, and the next
-	// attempt supersedes it.
+	// attempt supersedes it. Like the backoffs it is a minimum, evaluated on
+	// the next poll after it expires.
 	recoveryVerifyTimeout = 30 * time.Second
 
 	// recoveryStableWindow is how long a Project must stay healthy before its
@@ -36,14 +37,22 @@ const (
 	transientObservationTimeout = 30 * time.Second
 )
 
-// recoveryBackoff is the delay before attempt n+1, indexed by attempts already
-// made. Growing delays give a dependency that is itself restarting — a
-// database a service needs — time to come back, without waiting so long that a
-// transient fault keeps a Project down.
-var recoveryBackoff = [maxRecoveryAttempts]time.Duration{
+// recoveryBackoff is the minimum delay before attempts 2 and 3, indexed by
+// attempts already made minus one. There is no entry after the final attempt:
+// what follows it is recoveryVerifyTimeout, which is a wait for the result,
+// not a delay before another try.
+//
+// Growing delays give a dependency that is itself restarting — a database a
+// service needs — time to come back, without waiting so long that a transient
+// fault keeps a Project down.
+//
+// These are minimums, not a schedule. Recovery is evaluated only when the
+// agent polls, every defaultPollInterval, so an attempt runs on the first
+// poll after its backoff has expired: with the 10s poll, 5s and 10s both
+// take effect roughly 10s after the attempt before them.
+var recoveryBackoff = [maxRecoveryAttempts - 1]time.Duration{
 	5 * time.Second,
 	10 * time.Second,
-	20 * time.Second,
 }
 
 // recoveryKey identifies one assignment of one Project.

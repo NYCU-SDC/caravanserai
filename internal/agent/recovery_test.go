@@ -90,7 +90,9 @@ func TestRecoveryStaysExhausted(t *testing.T) {
 
 	for i := 0; i < maxRecoveryAttempts; i++ {
 		require.Equal(t, recoveryAttempt, tr.next(key))
-		clk.advance(recoveryBackoff[i])
+		if i < len(recoveryBackoff) {
+			clk.advance(recoveryBackoff[i])
+		}
 	}
 	clk.advance(recoveryVerifyTimeout)
 
@@ -209,4 +211,38 @@ func TestServiceNamesListsOnlyTheFaultyServices(t *testing.T) {
 	}
 
 	assert.Equal(t, []string{"web", "db"}, serviceNames(bad))
+}
+
+// The backoffs are minimums evaluated on the poll, so the timeline an operator
+// sees is set by the 10s poll interval, not by the backoff values alone:
+// attempts at 0s, 10s and 20s, exhaustion at 50s. The ticket documents this
+// timeline; this test is what keeps the two in step.
+func TestRecoveryTimelineOnTheTenSecondPoll(t *testing.T) {
+	tr, clk := newTestTracker()
+	key := testKey()
+
+	var attemptsAt []time.Duration
+	exhaustedAt := time.Duration(-1)
+	for elapsed := time.Duration(0); elapsed <= 2*time.Minute; elapsed += defaultPollInterval {
+		switch tr.next(key) {
+		case recoveryAttempt:
+			attemptsAt = append(attemptsAt, elapsed)
+		case recoveryExhausted:
+			if exhaustedAt < 0 {
+				exhaustedAt = elapsed
+			}
+		}
+		clk.advance(defaultPollInterval)
+	}
+
+	assert.Equal(t, []time.Duration{0, 10 * time.Second, 20 * time.Second}, attemptsAt)
+	assert.Equal(t, 50*time.Second, exhaustedAt)
+}
+
+// Two backoffs for three attempts: nothing is scheduled after the final one
+// except the verification wait.
+func TestRecoveryHasABackoffBetweenAttemptsOnly(t *testing.T) {
+	assert.Len(t, recoveryBackoff, maxRecoveryAttempts-1)
+	assert.Equal(t, 5*time.Second, recoveryBackoff[0])
+	assert.Equal(t, 10*time.Second, recoveryBackoff[1])
 }
