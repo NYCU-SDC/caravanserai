@@ -232,11 +232,15 @@ call.
 
 ### The `cara` shortcut
 
-`make install-cli` sets up a `cara` alias for `caractl` and a default
-`CARA_SERVER`, so the everyday command becomes `cara get nodes` instead of
-`./bin/caractl --server http://... get nodes`. It writes to the login shell's rc
-file (`.zshrc` / `.bashrc`), points the alias at the absolute binary path so it
-works from any directory, and is idempotent.
+`make install-cli` installs a `cara` wrapper for `caractl` into a PATH directory
+(`~/.local/bin` by default), so the everyday command becomes `cara get nodes`
+instead of `./bin/caractl --server http://... get nodes`. The wrapper bakes the
+control-plane address in as the default; exporting `CARA_SERVER` or passing
+`--server` still overrides it.
+
+A wrapper in PATH is used rather than a shell alias so no `source` step is
+needed — a new terminal picks it up automatically, and the current shell needs
+at most `rehash` (zsh) / `hash -r` (bash).
 
 ```bash
 # On the server box (defaults to localhost):
@@ -245,8 +249,10 @@ make install-cli
 # On an agent / remote machine (point it at the control plane):
 make install-cli CARA_SERVER=http://10.1.253.7:8080
 
-source ~/.zshrc          # or open a new terminal
-cara get nodes           # no --server needed
+# If ~/.local/bin is not on your PATH, target another dir that is:
+make install-cli CLI_BINDIR=/opt/homebrew/bin
+
+cara get nodes           # new terminal, or `rehash` in the current one
 ```
 
 Remove it again with `make uninstall-cli`.

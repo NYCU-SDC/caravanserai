@@ -28,53 +28,46 @@ run-agent:
 run-cli:
 	@$(MAKE) -C cmd/caractl run
 
-# install-cli wires up a `cara` shortcut for caractl and a default --server, so
-# the everyday command is `cara get nodes` instead of
+# install-cli installs a `cara` wrapper for caractl into a PATH directory, so the
+# everyday command is `cara get nodes` instead of
 # `./bin/caractl --server http://... get nodes`.
 #
-# It picks the rc file from the login shell ($SHELL: zsh vs bash), points the
-# alias at the absolute binary path so it works from any working directory, and
-# is idempotent — a managed block between markers is replaced on every run
-# rather than appended, so re-running never duplicates lines.
+# A wrapper in PATH is used rather than a shell alias so it needs no `source`:
+# `source` inside a make recipe runs in a child shell and cannot change the
+# interactive one. A new terminal picks the command up for free; the current
+# shell needs at most a `rehash` (zsh) / `hash -r` (bash).
 #
-# The control-plane address is overridable per machine:
+# The wrapper bakes the control-plane address in as the default, still lets a
+# caller override it by exporting CARA_SERVER, and the --server flag overrides
+# both. Per machine:
 #   make install-cli                                     # localhost (server box)
 #   make install-cli CARA_SERVER=http://10.1.253.7:8080  # remote (agent box)
+#
+# CLI_BINDIR must be on PATH; ~/.local/bin is the default because it usually is
+# and is writable without sudo.
 CARA_SERVER ?= http://127.0.0.1:8080
 CARACTL_BIN := $(abspath bin/caractl)
+CLI_BINDIR ?= $(HOME)/.local/bin
+CLI_LINK := $(CLI_BINDIR)/cara
 
 install-cli: build
 	@echo -e ":: $(GREEN)Installing cara shortcut...$(NC)"
-	@shell_name=$$(basename "$${SHELL:-/bin/bash}"); \
-	case "$$shell_name" in \
-	  zsh)  rc="$$HOME/.zshrc" ;; \
-	  bash) rc="$$HOME/.bashrc" ;; \
-	  *)    rc="$$HOME/.profile" ;; \
-	esac; \
-	tmp=$$(mktemp); \
-	[ -f "$$rc" ] && sed '/# cara-cli-BEGIN/,/# cara-cli-END/d' "$$rc" > "$$tmp" || true; \
-	{ \
-	  echo "# cara-cli-BEGIN (managed by make install-cli)"; \
-	  echo "alias cara='$(CARACTL_BIN)'"; \
-	  echo "export CARA_SERVER='$(CARA_SERVER)'"; \
-	  echo "# cara-cli-END"; \
-	} >> "$$tmp"; \
-	mv "$$tmp" "$$rc"; \
-	echo -e "==> $(BLUE)wrote 'cara' alias + CARA_SERVER=$(CARA_SERVER) to $$rc$(NC)"; \
-	echo -e "  -> run: $(GREEN)source $$rc$(NC)  (or open a new terminal)"
+	@mkdir -p "$(CLI_BINDIR)"
+	@printf '%s\n' \
+	  '#!/bin/sh' \
+	  '# cara — managed by make install-cli; edit via that target, not by hand' \
+	  'export CARA_SERVER="$${CARA_SERVER:-$(CARA_SERVER)}"' \
+	  'exec "$(CARACTL_BIN)" "$$@"' \
+	  > "$(CLI_LINK)"
+	@chmod +x "$(CLI_LINK)"
+	@echo -e "==> $(BLUE)wrote $(CLI_LINK) (default server $(CARA_SERVER))$(NC)"
+	@case ":$$PATH:" in \
+	  *":$(CLI_BINDIR):"*) echo -e "  -> run $(GREEN)cara get nodes$(NC) (new terminal, or 'rehash' in this one)" ;; \
+	  *) echo -e "  -> $(RED)WARNING:$(NC) $(CLI_BINDIR) is not on PATH; add it or set CLI_BINDIR=<a dir on PATH>" ;; \
+	esac
 
 uninstall-cli:
-	@shell_name=$$(basename "$${SHELL:-/bin/bash}"); \
-	case "$$shell_name" in \
-	  zsh)  rc="$$HOME/.zshrc" ;; \
-	  bash) rc="$$HOME/.bashrc" ;; \
-	  *)    rc="$$HOME/.profile" ;; \
-	esac; \
-	if [ -f "$$rc" ]; then \
-	  tmp=$$(mktemp); \
-	  sed '/# cara-cli-BEGIN/,/# cara-cli-END/d' "$$rc" > "$$tmp" && mv "$$tmp" "$$rc"; \
-	  echo -e "==> $(BLUE)removed cara shortcut from $$rc$(NC)"; \
-	fi
+	@rm -f "$(CLI_LINK)" && echo -e "==> $(BLUE)removed $(CLI_LINK)$(NC)"
 
 test:
 	@echo -e ":: $(GREEN)Running tests...$(NC)"
