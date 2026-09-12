@@ -720,8 +720,9 @@ func TestInspectProjectReportsOwnership(t *testing.T) {
 // copy of it used to live.
 func TestEnsureContainerUsesTheSharedOwnershipRule(t *testing.T) {
 	ensure := func(f *recoverFixture) error {
-		return f.runtime.ensureContainer(t.Context(), f.project.Namespace, f.project.Name,
+		_, err := f.runtime.ensureContainer(t.Context(), f.project.Namespace, f.project.Name,
 			f.project.UID, f.project.Status.AssignmentGeneration, f.project.Spec.Services[0], f.project.Spec.Volumes)
+		return err
 	}
 
 	t.Run("adopts and starts its own stopped container", func(t *testing.T) {

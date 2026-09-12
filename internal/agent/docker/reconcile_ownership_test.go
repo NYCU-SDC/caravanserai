@@ -2,6 +2,7 @@ package docker
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -156,4 +157,63 @@ func TestStaleContainersIgnoresOtherProjects(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Empty(t, stale)
+}
+
+// ── The refusal must not take shared resources with it ───────────────────────
+
+func mutated(f *recoverFixture, prefix string) []string {
+	var out []string
+	for _, m := range f.docker.mutations {
+		if strings.HasPrefix(m, prefix) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// The real TOCTOU: step 0 passes, and a container becomes another
+// assignment's before ensureContainer reaches it. The refusal must undo only
+// what this attempt created. The network and the volumes carry no generation
+// label, so they may be exactly what the container we just refused is using —
+// removing them would destroy another assignment's runtime, and an Ephemeral
+// volume outright.
+func TestReconcileRefusalLeavesSharedResources(t *testing.T) {
+	f := newStrictFixture(t)
+	f.project.Spec.Services = append(f.project.Spec.Services, v1.ServiceDef{Name: "cache", Image: "redis:7"})
+	f.docker.volumes[VolumeName("blog", "db-data")] = true
+
+	// "blog-cache" appears, owned by generation 6, only once step 0 is past:
+	// the first inspect of that name is ensureContainer's.
+	f.docker.onInspect = func(name string) {
+		if name == ContainerName("blog", "cache") && len(f.docker.containers) == 1 {
+			f.staleContainer("cache", "running", labelGeneration, "6")
+		}
+	}
+
+	err := f.runtime.ReconcileProject(t.Context(), f.project)
+
+	require.ErrorIs(t, err, ErrContainerNotOwned)
+	assert.True(t, removed(f, "blog-db"), "the container this attempt created is undone")
+	assert.Contains(t, f.docker.containers, ContainerName("blog", "cache"), "the stale container survives")
+	assert.False(t, removed(f, "blog-cache"), "and is never removed")
+	assert.Empty(t, mutated(f, "NetworkRemove"), "the network may be the stale container's too")
+	assert.Empty(t, mutated(f, "VolumeRemove"), "an Ephemeral volume removed here would be gone for good")
+	assert.True(t, f.docker.volumes[VolumeName("blog", "db-data")], "the volume still exists")
+}
+
+// A refusal on the first service creates nothing, so there is nothing to undo.
+func TestReconcileRefusalOnTheFirstServiceRemovesNothing(t *testing.T) {
+	f := newStrictFixture(t)
+	f.docker.onInspect = func(name string) {
+		if name == ContainerName("blog", "db") && len(f.docker.containers) == 0 {
+			f.staleContainer("db", "running", labelUID, "uid-previous-lifetime")
+		}
+	}
+
+	err := f.runtime.ReconcileProject(t.Context(), f.project)
+
+	require.ErrorIs(t, err, ErrContainerNotOwned)
+	assert.Empty(t, mutated(f, "ContainerRemove"))
+	assert.Empty(t, mutated(f, "NetworkRemove"))
+	assert.Empty(t, mutated(f, "VolumeRemove"))
 }

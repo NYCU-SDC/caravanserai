@@ -129,8 +129,24 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 	}
 
 	// 3. Ensure every service container exists and is running.
+	var created []string
 	for _, svc := range project.Spec.Services {
-		if err := r.ensureContainer(ctx, project.Namespace, project.Name, project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec.Volumes); err != nil {
+		madeOne, err := r.ensureContainer(ctx, project.Namespace, project.Name, project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec.Volumes)
+		if madeOne {
+			created = append(created, ContainerName(project.Name, svc.Name))
+		}
+		if err != nil {
+			// A container that became another assignment's between step 0 and
+			// here is not a failed creation, and the full rollback is the
+			// wrong response to it. That rollback removes the network and the
+			// Ephemeral volumes, and neither carries a generation label: they
+			// may be exactly what the container we just refused is using. So
+			// only what this call created is undone — the Project is left
+			// otherwise as it was found, for whoever owns that container.
+			if errors.Is(err, ErrContainerNotOwned) {
+				r.removeCreated(ctx, created, project, log)
+				return fmt.Errorf("ensure container %q: %w", svc.Name, err)
+			}
 			r.rollback(ctx, project, log)
 			return fmt.Errorf("ensure container %q: %w", svc.Name, err)
 		}
@@ -156,6 +172,36 @@ func (r *DockerRuntime) rollback(ctx context.Context, project *v1.Project, log *
 	if err := r.removeProjectResources(ctx, project.Namespace, project.Name, project.Spec, &owner); err != nil {
 		log.Error("Rollback failed, resources may leak",
 			zap.Error(err))
+	}
+}
+
+// removeCreated undoes just the containers this reconcile created, leaving
+// every shared resource — the network, the volumes — alone. Each is checked
+// against the assignment before it is removed, so a container that changed
+// hands while this call ran is left where it is.
+func (r *DockerRuntime) removeCreated(ctx context.Context, names []string, project *v1.Project, log *zap.Logger) {
+	if len(names) == 0 {
+		return
+	}
+	log.Warn("Refusing to reconcile alongside another assignment's container; removing only what this attempt created",
+		zap.Strings("containers", names))
+
+	owner := ownerOf(project)
+	for _, name := range names {
+		info, err := r.client.ContainerInspect(ctx, name)
+		if err != nil {
+			if !isNotFound(err) {
+				log.Warn("Could not inspect a container this attempt created", zap.String("container", name), zap.Error(err))
+			}
+			continue
+		}
+		if oErr := r.checkContainerOwnership(name, info, owner, info.Config.Labels[labelService]); oErr != nil {
+			log.Warn("Leaving a container that is no longer this assignment's", zap.String("container", name), zap.Error(oErr))
+			continue
+		}
+		if rmErr := r.client.ContainerRemove(ctx, info.ID, container.RemoveOptions{Force: true}); rmErr != nil {
+			log.Error("Failed to remove a container this attempt created", zap.String("container", name), zap.Error(rmErr))
+		}
 	}
 }
 
@@ -768,7 +814,7 @@ func (r *DockerRuntime) buildBinds(namespace, projectName string, svc v1.Service
 // ensureContainer creates and starts the container for a single service if it
 // is not already running. vols is the project's volume list, used to resolve
 // each mount's bind source by volume type.
-func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectName, uid string, generation int64, svc v1.ServiceDef, vols []v1.VolumeDef) error {
+func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectName, uid string, generation int64, svc v1.ServiceDef, vols []v1.VolumeDef) (created bool, err error) {
 	cName := ContainerName(projectName, svc.Name)
 	log := r.logger.With(
 		zap.String("container", cName),
@@ -777,7 +823,7 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 
 	info, err := r.client.ContainerInspect(ctx, cName)
 	if err != nil && !dockerclient.IsErrNotFound(err) {
-		return fmt.Errorf("inspect: %w", err)
+		return false, fmt.Errorf("inspect: %w", err)
 	}
 
 	if err == nil {
@@ -793,18 +839,18 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 		// be read is refused rather than adopted.
 		owner := containerOwner{Namespace: namespace, Project: projectName, UID: uid, Generation: generation}
 		if oErr := r.checkContainerOwnership(cName, info, owner, svc.Name); oErr != nil {
-			return fmt.Errorf("refuse to adopt: %w", oErr)
+			return false, fmt.Errorf("refuse to adopt: %w", oErr)
 		}
 		if info.State.Running {
 			log.Debug("Container already running")
-			return nil
+			return false, nil
 		}
 		// Stopped or exited — try to start it.
 		log.Info("Container stopped, restarting", zap.String("status", info.State.Status))
 		if startErr := r.client.ContainerStart(ctx, info.ID, container.StartOptions{}); startErr != nil {
-			return fmt.Errorf("start existing container: %w", startErr)
+			return false, fmt.Errorf("start existing container: %w", startErr)
 		}
-		return nil
+		return false, nil
 	}
 
 	// Container does not exist — pull image if needed, then create + start.
@@ -814,7 +860,7 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 	log.Info("Pulling image")
 	rc, pullErr := r.client.ImagePull(ctx, svc.Image, pullOptions())
 	if pullErr != nil {
-		return fmt.Errorf("pull image %q: %w", svc.Image, pullErr)
+		return false, fmt.Errorf("pull image %q: %w", svc.Image, pullErr)
 	}
 	// Drain and discard the pull progress stream; errors are reflected in the
 	// close of the reader.
@@ -829,7 +875,7 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 
 	binds, managedNames, err := r.buildBinds(namespace, projectName, svc, vols)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	labels := map[string]string{
@@ -869,17 +915,17 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 		cName,
 	)
 	if err != nil {
-		return fmt.Errorf("create container: %w", err)
+		return false, fmt.Errorf("create container: %w", err)
 	}
 
 	log.Info("Container created", zap.String("id", resp.ID[:12]))
 
 	if err := r.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		return fmt.Errorf("start container: %w", err)
+		return false, fmt.Errorf("start container: %w", err)
 	}
 
 	log.Info("Container started")
-	return nil
+	return true, nil
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -1240,7 +1286,7 @@ func (r *DockerRuntime) RecoverServices(ctx context.Context, project *v1.Project
 			// the image, so a registry failure surfaces here rather than as a
 			// confusing "no such image" from the create call.
 			log.Info("Recreating missing container", zap.String("service", svc.Name))
-			if cErr := r.ensureContainer(ctx, project.Namespace, project.Name,
+			if _, cErr := r.ensureContainer(ctx, project.Namespace, project.Name,
 				project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec.Volumes); cErr != nil {
 				return fmt.Errorf("recreate %q: %w", name, cErr)
 			}
@@ -1261,7 +1307,7 @@ func (r *DockerRuntime) RecoverServices(ctx context.Context, project *v1.Project
 			if rErr := r.client.ContainerRemove(ctx, info.ID, container.RemoveOptions{Force: true}); rErr != nil {
 				return fmt.Errorf("remove dead %q: %w", name, rErr)
 			}
-			if cErr := r.ensureContainer(ctx, project.Namespace, project.Name,
+			if _, cErr := r.ensureContainer(ctx, project.Namespace, project.Name,
 				project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec.Volumes); cErr != nil {
 				return fmt.Errorf("recreate dead %q: %w", name, cErr)
 			}

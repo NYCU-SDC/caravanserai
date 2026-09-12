@@ -420,8 +420,9 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	// Same first question as the health check, and for the same reason: a
 	// container from another assignment is not this one's to adopt, and a
 	// service the spec has since dropped leaves one that walking the spec
-	// cannot find.
-	if blockedByStaleContainer(ctx, client, runtime, p, log) {
+	// cannot find. An unanswerable question stops the tick too — this is the
+	// path that would otherwise start a second generation's containers.
+	if checkStaleContainers(ctx, client, runtime, p, log) != staleNone {
 		return
 	}
 
@@ -772,8 +773,10 @@ func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime,
 	}
 
 	// Before anything is inspected or judged: a container from another
-	// assignment blocks the Project, whatever the current spec declares.
-	if blockedByStaleContainer(ctx, client, runtime, p, log) {
+	// assignment blocks the Project, whatever the current spec declares, and
+	// an unanswerable question stops the tick just as firmly. Either way the
+	// restart timer ends, because no judgement is being made this tick.
+	if checkStaleContainers(ctx, client, runtime, p, log) != staleNone {
 		clearTransient()
 		return
 	}
@@ -1274,8 +1277,28 @@ func needsHuman(bad []serviceState) bool {
 	return false
 }
 
-// blockedByStaleContainer reports whether the Project has any container on this
-// node that belongs to another assignment, and reports it as blocked if so.
+// staleCheck is what the ownership sweep found before anything else is judged.
+type staleCheck int
+
+const (
+	// staleNone means every container labelled for the Project belongs to the
+	// current assignment. Judging may proceed.
+	staleNone staleCheck = iota
+
+	// staleBlocked means at least one does not. It has been reported;
+	// the caller stops.
+	staleBlocked
+
+	// staleUnknown means Docker could not be asked. The caller stops without
+	// reporting anything: the question "is another assignment's workload
+	// running here" is unanswered, and every action below it — starting a
+	// container, pointing routes, calling a Project healthy — assumes the
+	// answer is no.
+	staleUnknown
+)
+
+// checkStaleContainers asks whether any container on this node labelled for
+// the Project belongs to another assignment, and reports it as blocked if so.
 //
 // It asks Docker for every container carrying the Project's labels, not just
 // the ones the current spec names. A generation that declared a service the
@@ -1284,17 +1307,19 @@ func needsHuman(bad []serviceState) bool {
 // it either, because the Project is still assigned to this node. Two
 // generations of the same Project would be running at once.
 //
-// A listing failure is not treated as a block. It means Docker is unreachable,
-// which the caller's own inspect is about to report; refusing here would
-// replace that with a less specific message.
-func blockedByStaleContainer(ctx context.Context, client *Client, runtime docker.Runtime, p *v1.Project, log *zap.Logger) bool {
+// A listing failure fails closed. Inspecting by name can succeed while the
+// list call fails — they are separate Docker API calls — and that combination
+// is exactly the one that hides a container whose service the spec no longer
+// declares. Proceeding on an unanswered question is how two generations end up
+// running; waiting one poll is not.
+func checkStaleContainers(ctx context.Context, client *Client, runtime docker.Runtime, p *v1.Project, log *zap.Logger) staleCheck {
 	stale, err := runtime.StaleContainers(ctx, p)
 	if err != nil {
-		log.Warn("Could not list the Project's containers", zap.Error(err))
-		return false
+		log.Warn("Could not list the Project's containers, skipping this tick", zap.Error(err))
+		return staleUnknown
 	}
 	if len(stale) == 0 {
-		return false
+		return staleNone
 	}
 
 	names := make([]string, 0, len(stale))
@@ -1305,7 +1330,7 @@ func blockedByStaleContainer(ctx context.Context, client *Client, runtime docker
 		zap.String("reason", recoveryBlockedStaleContainer),
 		zap.Strings("containers", names), zap.Error(stale[0].Reason))
 	reportRecoveryBlocked(ctx, client, p, recoveryBlockedStaleContainer, staleContainerMessage(stale[0].Reason), log)
-	return true
+	return staleBlocked
 }
 
 // firstNotOwned returns the first service whose container belongs to another

@@ -299,20 +299,76 @@ func TestRunningBlocksOnAContainerOfADroppedService(t *testing.T) {
 	assert.Zero(t, h.runtime.recoveries)
 }
 
-// A Docker listing failure is not a block: the inspect that follows reports
-// the real problem.
-func TestStaleListingFailureDoesNotBlock(t *testing.T) {
+// A Docker listing failure fails closed. Inspecting by name can succeed while
+// the list call fails, and that combination is exactly the one that hides a
+// container whose service the spec no longer declares — so nothing is judged,
+// nothing is started, and no route is pointed anywhere until the question can
+// be answered again.
+func TestStaleListingFailureStopsTheTick(t *testing.T) {
+	listErr := func(h *staleHarness) *int {
+		inspected := 0
+		h.runtime.staleFn = func(context.Context, *v1.Project) ([]docker.StaleContainer, error) {
+			return nil, errors.New("docker daemon unreachable")
+		}
+		h.runtime.inspectFn = func(context.Context, *v1.Project) ([]docker.ContainerState, error) {
+			inspected++
+			return []docker.ContainerState{{ServiceName: "web", ContainerID: "id-web", Status: "running"}}, nil
+		}
+		return &inspected
+	}
+
+	t.Run("running", func(t *testing.T) {
+		p := ingressProject()
+		h := newStaleHarness(t, ingressProject(),
+			docker.ContainerState{ServiceName: "web", ContainerID: "id-web", Status: "running"})
+		inspected := listErr(h)
+
+		h.check(t, p)
+
+		assert.Zero(t, *inspected, "nothing is inspected while the question is unanswered")
+		assert.Empty(t, h.routes.updated, "routes must not be pointed at containers of unknown ownership")
+		assert.Empty(t, h.server.updates, "the phase is untouched — this is not a failure")
+		assert.Empty(t, h.server.conditionWrites, "an unreachable daemon is not a stale container")
+		assert.Zero(t, h.runtime.recoveries)
+	})
+
+	t.Run("scheduled", func(t *testing.T) {
+		p := scheduledIngressProject()
+		h := newStaleHarness(t, scheduledIngressProject(),
+			docker.ContainerState{ServiceName: "web", ContainerID: "id-web", Status: "running"})
+		inspected := listErr(h)
+
+		reconciled := h.reconcile(t, p)
+
+		assert.Zero(t, *inspected)
+		assert.Zero(t, reconciled, "a second generation must not be started on an unanswered question")
+		assert.Empty(t, h.routes.updated)
+		assert.Empty(t, h.server.updates)
+		assert.Empty(t, h.server.conditionWrites)
+	})
+}
+
+// The tick resumes on its own once Docker answers again.
+func TestStaleListingRecoversOnTheNextTick(t *testing.T) {
 	p := ingressProject()
 	h := newStaleHarness(t, ingressProject(),
 		docker.ContainerState{ServiceName: "web", ContainerID: "id-web", Status: "running"})
+
+	failing := true
 	h.runtime.staleFn = func(context.Context, *v1.Project) ([]docker.StaleContainer, error) {
-		return nil, errors.New("docker daemon unreachable")
+		if failing {
+			return nil, errors.New("docker daemon unreachable")
+		}
+		return nil, nil
 	}
 
 	h.check(t, p)
+	require.Empty(t, h.routes.updated)
 
-	assert.Empty(t, h.server.conditionWrites, "an unreachable daemon is not a stale container")
-	assert.Equal(t, []string{"guestbook"}, h.routes.updated)
+	failing = false
+	h.check(t, p)
+
+	assert.Equal(t, []string{"guestbook"}, h.routes.updated, "a healthy Project is judged again once Docker answers")
 }
 
 // A stale container that appears between the check and the reconcile is
