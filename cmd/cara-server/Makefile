@@ -6,20 +6,23 @@ NC = \033[0m
 ROOT_DIR = $(abspath ../..)
 BIN_DIR = $(ROOT_DIR)/bin
 BINARY = $(BIN_DIR)/cara-server
-MAIN = cmd/cara-server/main.go
+# The package directory, not a single source file. Naming one file compiles
+# exactly that file, so a second file in the same package is invisible to the
+# build and it fails on symbols the package itself defines.
+PKG = ./cmd/cara-server
 
 all: build
 
 build:
 	@echo -e ":: $(GREEN)Building cara-server...$(NC)"
 	@mkdir -p $(BIN_DIR)
-	@cd $(ROOT_DIR) && go build -o $(BINARY) $(MAIN) \
+	@cd $(ROOT_DIR) && go build -o $(BINARY) $(PKG) \
 		&& echo -e "==> $(BLUE)Build completed successfully$(NC)" \
 		|| (echo -e "==> $(RED)Build failed$(NC)" && exit 1)
 
 run:
 	@echo -e ":: $(GREEN)Starting cara-server...$(NC)"
-	@cd $(ROOT_DIR) && go build -o $(BINARY) $(MAIN) && \
+	@cd $(ROOT_DIR) && go build -o $(BINARY) $(PKG) && \
 		$(BINARY) \
 		&& echo -e "==> $(BLUE)cara-server shut down$(NC)" \
 		|| (echo -e "==> $(RED)cara-server failed to start$(NC)" && exit 1)
