@@ -307,3 +307,100 @@ func TestValidateNetworkOwnership_UID(t *testing.T) {
 		})
 	}
 }
+
+// The preflight is the only thing standing between a recovery and Docker's
+// habit of creating whatever a container mounts and cannot find. Every case
+// here is one where the container would otherwise have come up healthy and
+// empty.
+func TestPreflightVolumesManaged(t *testing.T) {
+	root := t.TempDir()
+	r := &DockerRuntime{logger: zap.NewNop(), dataRoot: root}
+
+	project := &v1.Project{}
+	project.Namespace = "default"
+	project.Name = "blog"
+	project.Spec.Volumes = []v1.VolumeDef{{Name: "db-data", Type: v1.VolumeTypeManaged}}
+
+	svc := v1.ServiceDef{
+		Name:         "db",
+		VolumeMounts: []v1.VolumeMount{{Name: "db-data", MountPath: "/var/lib/postgresql/data"}},
+	}
+
+	path := filepath.Join(root, "volumes", "default", "blog", "db-data", "data")
+
+	t.Run("passes when the host directory is in place", func(t *testing.T) {
+		require.NoError(t, os.MkdirAll(path, 0o700))
+		assert.NoError(t, r.preflightVolumes(t.Context(), project, svc))
+	})
+
+	t.Run("fails when the host directory is gone", func(t *testing.T) {
+		require.NoError(t, os.RemoveAll(path))
+
+		err := r.preflightVolumes(t.Context(), project, svc)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "db-data")
+		assert.ErrorContains(t, err, "missing")
+	})
+
+	t.Run("fails when the path is not a directory", func(t *testing.T) {
+		require.NoError(t, os.RemoveAll(path))
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		require.NoError(t, os.WriteFile(path, []byte("not a directory"), 0o600))
+		t.Cleanup(func() { _ = os.RemoveAll(path) })
+
+		err := r.preflightVolumes(t.Context(), project, svc)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "not a directory")
+	})
+
+	t.Run("fails when the directory cannot be accessed", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses permission bits")
+		}
+		require.NoError(t, os.RemoveAll(path))
+		require.NoError(t, os.MkdirAll(path, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(path, 0o700) })
+
+		err := r.preflightVolumes(t.Context(), project, svc)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "not accessible")
+	})
+}
+
+// A service with no mounts must not be blocked, and an undeclared mount must
+// not fall through to Docker — the same guard buildBinds applies at create
+// time, applied one step earlier.
+func TestPreflightVolumesEdgeCases(t *testing.T) {
+	r := &DockerRuntime{logger: zap.NewNop(), dataRoot: t.TempDir()}
+
+	project := &v1.Project{}
+	project.Namespace = "default"
+	project.Name = "blog"
+
+	t.Run("a service with no mounts needs no volumes", func(t *testing.T) {
+		assert.NoError(t, r.preflightVolumes(t.Context(), project, v1.ServiceDef{Name: "web"}))
+	})
+
+	t.Run("an undeclared volume is an error", func(t *testing.T) {
+		svc := v1.ServiceDef{
+			Name:         "web",
+			VolumeMounts: []v1.VolumeMount{{Name: "nowhere", MountPath: "/data"}},
+		}
+
+		err := r.preflightVolumes(t.Context(), project, svc)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "undeclared volume")
+	})
+
+	t.Run("an unsupported volume type is an error", func(t *testing.T) {
+		project.Spec.Volumes = []v1.VolumeDef{{Name: "weird", Type: v1.VolumeType("HostPath")}}
+		svc := v1.ServiceDef{
+			Name:         "web",
+			VolumeMounts: []v1.VolumeMount{{Name: "weird", MountPath: "/data"}},
+		}
+
+		err := r.preflightVolumes(t.Context(), project, svc)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "unsupported type")
+	})
+}

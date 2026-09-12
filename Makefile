@@ -46,6 +46,12 @@ test-orphan-e2e:
 		&& echo -e "==> $(BLUE)Orphan-cleanup rehearsal passed$(NC)" \
 		|| (echo -e "==> $(RED)Orphan-cleanup rehearsal failed$(NC)" && exit 1)
 
+test-recovery-e2e:
+	@echo -e ":: $(GREEN)Running isolated local-recovery rehearsal (about 5 minutes)...$(NC)"
+	@./scripts/e2e/local-recovery.sh \
+		&& echo -e "==> $(BLUE)Local-recovery rehearsal passed$(NC)" \
+		|| (echo -e "==> $(RED)Local-recovery rehearsal failed$(NC)" && exit 1)
+
 schemas:
 	@echo -e ":: $(GREEN)Generating JSON Schemas...$(NC)"
 	@go run ./cmd/schemagen \
@@ -116,6 +122,6 @@ install-hooks:
 		&& echo -e "==> $(BLUE)Git hooks installed (using .githooks/)$(NC)" \
 		|| (echo -e "==> $(RED)Failed to configure git hooks$(NC)" && exit 1)
 
-.PHONY: all prepare build run-server run-agent run-cli test test-integration test-orphan-e2e schemas
+.PHONY: all prepare build run-server run-agent run-cli test test-integration test-orphan-e2e test-recovery-e2e schemas
 .PHONY: dev-up dev-down dev-reset dev-server dev-logs install-hooks
 .PHONY: walg-backup walg-restore walg-verify

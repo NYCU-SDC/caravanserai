@@ -28,6 +28,13 @@ const (
 	OpFinalBackup   Operation = "FinalBackup"
 	OpGC            Operation = "GC"
 	OpOrphanCleanup Operation = "OrphanCleanup"
+
+	// OpRecovery is the agent restarting a Project's own containers after they
+	// failed (CARA-86). It is exclusive for the same reason the others are: a
+	// backup stops containers on purpose, and a recovery that ran alongside
+	// one would start them again underneath it — archiving a volume that is
+	// being written to, and reporting a repair that was really an interference.
+	OpRecovery Operation = "Recovery"
 )
 
 // Coordinator serialises operations per Project and lets unrelated parts of
