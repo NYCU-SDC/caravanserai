@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -236,5 +238,117 @@ func TestScheduledOwnedRunningContainerStillReportsRunning(t *testing.T) {
 	assert.Equal(t, v1.ProjectPhaseRunning, h.server.updates[0].Phase)
 	assert.Equal(t, []string{"guestbook"}, h.routes.updated)
 	assert.Zero(t, reconciled, "nothing to create")
+	assert.Empty(t, h.server.conditionWrites)
+}
+
+// ── A service the spec no longer declares (CARA-93 review) ───────────────────
+
+// droppedWorker is what generation 6 left behind: a container for a service
+// the current spec does not declare at all, so no per-service check sees it.
+func droppedWorker() docker.StaleContainer {
+	return docker.StaleContainer{
+		Name: "guestbook-worker", Service: "worker", ID: "id-worker",
+		Reason: &docker.ContainerNotOwnedError{
+			Container: "guestbook-worker", Service: "worker",
+			Label: "cara.generation", Want: "7", Got: "6",
+		},
+	}
+}
+
+// withDroppedWorker makes the runtime report that leftover, while every
+// service the spec does declare looks perfectly healthy.
+func (h *staleHarness) withDroppedWorker() {
+	h.runtime.staleFn = func(context.Context, *v1.Project) ([]docker.StaleContainer, error) {
+		return []docker.StaleContainer{droppedWorker()}, nil
+	}
+}
+
+// Scheduled: generation 7's spec dropped "worker", generation 6's worker is
+// still running, and every service generation 7 declares is absent. Without
+// the whole-Project listing the Project would start and run beside it.
+func TestScheduledBlocksOnAContainerOfADroppedService(t *testing.T) {
+	p := scheduledIngressProject()
+	h := newStaleHarness(t, scheduledIngressProject(),
+		docker.ContainerState{ServiceName: "web", ContainerID: "id-web", Status: "running"})
+	h.withDroppedWorker()
+
+	reconciled := h.reconcile(t, p)
+
+	assert.Zero(t, reconciled, "generation 7 must not start beside generation 6's worker")
+	assert.Empty(t, h.server.updates, "not reported Running")
+	assert.Empty(t, h.routes.updated)
+	patches := h.server.writes("patch", v1.ConditionTypeRecoveryBlocked)
+	require.Len(t, patches, 1)
+	assert.Equal(t, "StaleContainer", patches[0].Reason)
+	assert.Contains(t, patches[0].Message, `"worker"`, "the condition names the dropped service")
+}
+
+// Running: the same leftover blocks the health check, even though every
+// service in the spec is running and would otherwise read as healthy.
+func TestRunningBlocksOnAContainerOfADroppedService(t *testing.T) {
+	p := ingressProject()
+	h := newStaleHarness(t, ingressProject(),
+		docker.ContainerState{ServiceName: "web", ContainerID: "id-web", Status: "running"})
+	h.withDroppedWorker()
+
+	h.check(t, p)
+
+	require.Len(t, h.server.writes("patch", v1.ConditionTypeRecoveryBlocked), 1)
+	assert.Empty(t, h.routes.updated, "a Project running beside another generation is not healthy")
+	assert.Empty(t, h.server.writes("delete", v1.ConditionTypeRecoveryBlocked))
+	assert.Zero(t, h.runtime.recoveries)
+}
+
+// A Docker listing failure is not a block: the inspect that follows reports
+// the real problem.
+func TestStaleListingFailureDoesNotBlock(t *testing.T) {
+	p := ingressProject()
+	h := newStaleHarness(t, ingressProject(),
+		docker.ContainerState{ServiceName: "web", ContainerID: "id-web", Status: "running"})
+	h.runtime.staleFn = func(context.Context, *v1.Project) ([]docker.StaleContainer, error) {
+		return nil, errors.New("docker daemon unreachable")
+	}
+
+	h.check(t, p)
+
+	assert.Empty(t, h.server.conditionWrites, "an unreachable daemon is not a stale container")
+	assert.Equal(t, []string{"guestbook"}, h.routes.updated)
+}
+
+// A stale container that appears between the check and the reconcile is
+// blocked, not Failed. Failed is terminal for the poll loop, so the Project
+// would never be reconciled again even after the container is removed.
+func TestReconcileRefusalIsBlockedNotFailed(t *testing.T) {
+	p := scheduledIngressProject()
+	h := newStaleHarness(t, scheduledIngressProject(),
+		docker.ContainerState{ServiceName: "web", ContainerID: "id-web", Status: "exited"})
+	h.runtime.reconcileFn = func(context.Context, *v1.Project) error {
+		return fmt.Errorf("refuse to reconcile: %w", &docker.ContainerNotOwnedError{
+			Container: "guestbook-web", Service: "web", Label: "cara.generation", Want: "7", Got: "6",
+		})
+	}
+
+	reconcileOne(t.Context(), h.client, h.runtime, h.routes, nil, p, zap.NewNop())
+
+	assert.Empty(t, h.server.updates, "no Failed/ReconcileError — the Project must stay reconcilable")
+	patches := h.server.writes("patch", v1.ConditionTypeRecoveryBlocked)
+	require.Len(t, patches, 1)
+	assert.Equal(t, "StaleContainer", patches[0].Reason)
+}
+
+// Any other reconcile failure is still a Failed/ReconcileError.
+func TestReconcileErrorIsStillFailed(t *testing.T) {
+	p := scheduledIngressProject()
+	h := newStaleHarness(t, scheduledIngressProject(),
+		docker.ContainerState{ServiceName: "web", ContainerID: "id-web", Status: "exited"})
+	h.runtime.reconcileFn = func(context.Context, *v1.Project) error {
+		return errors.New("pull image: manifest unknown")
+	}
+
+	reconcileOne(t.Context(), h.client, h.runtime, h.routes, nil, p, zap.NewNop())
+
+	require.Len(t, h.server.updates, 1)
+	assert.Equal(t, v1.ProjectPhaseFailed, h.server.updates[0].Phase)
+	assert.Equal(t, "ReconcileError", h.server.updates[0].Reason)
 	assert.Empty(t, h.server.conditionWrites)
 }

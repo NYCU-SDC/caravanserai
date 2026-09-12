@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -156,6 +157,33 @@ func (r *DockerRuntime) rollback(ctx context.Context, project *v1.Project, log *
 		log.Error("Rollback failed, resources may leak",
 			zap.Error(err))
 	}
+}
+
+// StaleContainers implements Runtime.
+func (r *DockerRuntime) StaleContainers(ctx context.Context, project *v1.Project) ([]StaleContainer, error) {
+	// Deliberately filtered without the UID: a container from a previous
+	// lifetime is as much this Project's leftover as one from an earlier
+	// generation, and the ownership check below classifies both.
+	f := containerOwnershipFilters(ProjectIdentity{Namespace: project.Namespace, Name: project.Name})
+	containers, err := r.client.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
+	if err != nil {
+		return nil, fmt.Errorf("list project containers: %w", err)
+	}
+
+	owner := ownerOf(project)
+	var stale []StaleContainer
+	for _, c := range containers {
+		name := strings.TrimPrefix(firstName(c.Names), "/")
+		service := c.Labels[labelService]
+		// The service label is compared against itself: what is being asked
+		// here is whether the container belongs to this assignment, not
+		// whether it belongs to a particular service of it.
+		if oErr := r.checkOwnershipLabels(name, c.Labels, owner, service); oErr != nil {
+			stale = append(stale, StaleContainer{Name: name, Service: service, ID: c.ID, Reason: oErr})
+		}
+	}
+	sort.Slice(stale, func(i, j int) bool { return stale[i].Name < stale[j].Name })
+	return stale, nil
 }
 
 // checkExistingOwnership reports, before any mutation, whether every service

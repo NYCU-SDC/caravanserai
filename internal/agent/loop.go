@@ -417,6 +417,14 @@ func projectsForReconcile(projects []*v1.Project) []*v1.Project {
 func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, p *v1.Project, logger *zap.Logger) {
 	log := logger.With(zap.String("project", p.Name))
 
+	// Same first question as the health check, and for the same reason: a
+	// container from another assignment is not this one's to adopt, and a
+	// service the spec has since dropped leaves one that walking the spec
+	// cannot find.
+	if blockedByStaleContainer(ctx, client, runtime, p, log) {
+		return
+	}
+
 	states, err := runtime.InspectProject(ctx, p)
 	if err != nil {
 		log.Warn("Failed to inspect project containers", zap.Error(err))
@@ -525,6 +533,17 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	}
 
 	if err := runtime.ReconcileProject(ctx, resolved); err != nil {
+		// A container from another assignment appeared between the check above
+		// and the reconcile. Nothing was mutated — ReconcileProject refuses
+		// before its first Docker call — and this must not become Failed:
+		// Failed is terminal for the poll loop, so the Project would never be
+		// reconciled again even after the stale container is removed.
+		if errors.Is(err, docker.ErrContainerNotOwned) {
+			log.Warn("A container from another assignment appeared during reconcile",
+				zap.String("reason", recoveryBlockedStaleContainer), zap.Error(err))
+			reportRecoveryBlocked(ctx, client, p, recoveryBlockedStaleContainer, staleContainerMessage(err), log)
+			return
+		}
 		log.Error("Failed to reconcile project", zap.Error(err))
 		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "ReconcileError", err.Error())
 		return
@@ -749,6 +768,13 @@ func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime,
 	if v1.IsMaintenanceActive(p.Status.Conditions, time.Now()) {
 		clearTransient()
 		log.Info("Project is under maintenance, not health-checking")
+		return
+	}
+
+	// Before anything is inspected or judged: a container from another
+	// assignment blocks the Project, whatever the current spec declares.
+	if blockedByStaleContainer(ctx, client, runtime, p, log) {
+		clearTransient()
 		return
 	}
 
@@ -1246,6 +1272,40 @@ func needsHuman(bad []serviceState) bool {
 		}
 	}
 	return false
+}
+
+// blockedByStaleContainer reports whether the Project has any container on this
+// node that belongs to another assignment, and reports it as blocked if so.
+//
+// It asks Docker for every container carrying the Project's labels, not just
+// the ones the current spec names. A generation that declared a service the
+// spec has since dropped leaves a container no per-service check can see: the
+// new assignment would start beside it, and the orphan sweep would not reclaim
+// it either, because the Project is still assigned to this node. Two
+// generations of the same Project would be running at once.
+//
+// A listing failure is not treated as a block. It means Docker is unreachable,
+// which the caller's own inspect is about to report; refusing here would
+// replace that with a less specific message.
+func blockedByStaleContainer(ctx context.Context, client *Client, runtime docker.Runtime, p *v1.Project, log *zap.Logger) bool {
+	stale, err := runtime.StaleContainers(ctx, p)
+	if err != nil {
+		log.Warn("Could not list the Project's containers", zap.Error(err))
+		return false
+	}
+	if len(stale) == 0 {
+		return false
+	}
+
+	names := make([]string, 0, len(stale))
+	for _, c := range stale {
+		names = append(names, c.Name)
+	}
+	log.Warn("Containers on this node belong to another assignment",
+		zap.String("reason", recoveryBlockedStaleContainer),
+		zap.Strings("containers", names), zap.Error(stale[0].Reason))
+	reportRecoveryBlocked(ctx, client, p, recoveryBlockedStaleContainer, staleContainerMessage(stale[0].Reason), log)
+	return true
 }
 
 // firstNotOwned returns the first service whose container belongs to another

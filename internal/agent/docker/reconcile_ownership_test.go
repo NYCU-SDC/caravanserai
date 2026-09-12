@@ -88,3 +88,72 @@ func TestReconcileProjectCompatibilityModeAdoptsALegacyContainer(t *testing.T) {
 	require.NoError(t, f.runtime.ReconcileProject(t.Context(), f.project))
 	assert.Contains(t, f.docker.mutations, "ContainerStart:"+fakeID("blog-db"))
 }
+
+// ── Containers of services the spec no longer declares ───────────────────────
+
+// The case a per-service walk cannot see: generation 6 declared "worker",
+// generation 7's spec does not, and the worker container is still on the node.
+// Asking Docker for everything labelled for the Project is what finds it.
+func TestStaleContainersFindsAServiceTheSpecNoLongerDeclares(t *testing.T) {
+	f := newStrictFixture(t)
+	f.container("db", "running")                                // generation 7's own
+	f.staleContainer("worker", "running", labelGeneration, "6") // dropped from the spec
+
+	stale, err := f.runtime.StaleContainers(t.Context(), f.project)
+
+	require.NoError(t, err)
+	require.Len(t, stale, 1, "the dropped service's container must be found")
+	assert.Equal(t, "blog-worker", stale[0].Name)
+	assert.Equal(t, "worker", stale[0].Service)
+	assert.ErrorIs(t, stale[0].Reason, ErrContainerNotOwned)
+	assert.Empty(t, f.docker.mutations, "listing is read-only")
+}
+
+// A container from a previous lifetime counts too, whatever its generation.
+func TestStaleContainersFindsAPreviousLifetime(t *testing.T) {
+	f := newStrictFixture(t)
+	f.staleContainer("db", "exited", labelUID, "uid-previous-lifetime")
+
+	stale, err := f.runtime.StaleContainers(t.Context(), f.project)
+
+	require.NoError(t, err)
+	require.Len(t, stale, 1)
+	assert.Equal(t, "blog-db", stale[0].Name)
+}
+
+func TestStaleContainersIsEmptyWhenEveryContainerIsOurs(t *testing.T) {
+	f := newStrictFixture(t)
+	f.container("db", "running")
+
+	stale, err := f.runtime.StaleContainers(t.Context(), f.project)
+
+	require.NoError(t, err)
+	assert.Empty(t, stale)
+}
+
+// Compatibility mode does not compare UID or generation, so an earlier
+// generation's container is not stale there — the same contract the rest of
+// the ownership rule keeps.
+func TestStaleContainersIgnoresGenerationInCompatibilityMode(t *testing.T) {
+	f := newRecoverFixture(t, v1.VolumeTypeManaged)
+	f.staleContainer("worker", "running", labelGeneration, "6")
+
+	stale, err := f.runtime.StaleContainers(t.Context(), f.project)
+
+	require.NoError(t, err)
+	assert.Empty(t, stale)
+}
+
+// Another Project's containers are never this Project's problem.
+func TestStaleContainersIgnoresOtherProjects(t *testing.T) {
+	f := newStrictFixture(t)
+	f.docker.withContainer("other-web", "running", map[string]string{
+		labelProject: "other", labelService: "web", labelNamespace: "default",
+		labelUID: "uid-9", labelGeneration: "1",
+	})
+
+	stale, err := f.runtime.StaleContainers(t.Context(), f.project)
+
+	require.NoError(t, err)
+	assert.Empty(t, stale)
+}
