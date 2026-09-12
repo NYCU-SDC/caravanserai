@@ -213,16 +213,17 @@ Configuration is read in order: `config.yaml` → `.env` → environment variabl
 
 ### caractrl flags
 
-Flags must appear **before** the subcommand:
+These flags are global, so they work on either side of the subcommand:
 
 ```bash
 ./bin/caractrl [--server <url>] [--output <format>] <command>
+./bin/caractrl <command> [--server <url>] [--output <format>]
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--server` | `http://localhost:8080` | cara-server URL |
-| `--output` | `table` | Output format: `table` \| `json` \| `yaml` |
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--server` | | `http://localhost:8080` | cara-server URL |
+| `--output` | `-o` | `table` | Output format: `table` \| `json` \| `yaml` |
 
 ---
 
