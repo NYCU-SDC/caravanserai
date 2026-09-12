@@ -81,17 +81,28 @@ services:
       timeout: 5s
       retries: 10
 
-  # Deliberately unpinned, unlike the WAL-G tarball in the Postgres image. This
-  # is development-only, bound to localhost, and the S3 surface WAL-G uses
-  # (v4-signed PUT/GET/LIST) is stable; a pin here would only freeze known
-  # vulnerabilities in place, since nothing in this repo bumps dependencies.
+  # Pulled from Quay, and pinned, because MinIO's Docker Hub repositories are
+  # gone: `minio/minio` and `minio/mc` now answer an anonymous pull with 401,
+  # which Docker reports as "repository does not exist or may require docker
+  # login". MinIO stopped publishing free images in October 2025 and archived
+  # the community repository in February 2026.
+  #
+  # The pin is no longer the tradeoff the earlier comment here described. What
+  # Quay still serves is a frozen archive that will not be updated, so leaving
+  # this floating would point a moving name at something that stopped moving —
+  # and would break again the day those tags are retagged or removed. The
+  # digest is pinned too, so a retag cannot change what is pulled.
+  #
+  # Server and client are separate products with separate release trains, so
+  # they carry different dates. Where MinIO goes from here — stay on this
+  # archive, move to a maintained rebuild, or replace it — is an open decision.
   #
   # The healthcheck below is the part that does depend on image internals: it
   # assumes `mc` ships inside this image with a preconfigured `local` alias. If
   # `up --wait` ever reports minio unhealthy right after an image pull, check
   # that before suspecting the service itself.
   minio:
-    image: minio/minio
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?missing; copy .env.example to .env}
@@ -111,7 +122,7 @@ services:
   # archive_command firing against a missing bucket just accumulates failures
   # in pg_stat_archiver until someone notices.
   minio-init:
-    image: minio/mc
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     depends_on:
       minio:
         condition: service_healthy
