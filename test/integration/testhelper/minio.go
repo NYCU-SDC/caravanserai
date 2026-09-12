@@ -34,9 +34,20 @@ func StartMinio() (endpoint string, cleanup func(), err error) {
 	}
 	dtPool.MaxWait = 60 * time.Second
 
+	// Quay, and pinned, because MinIO's Docker Hub repositories are gone: an
+	// anonymous pull of minio/minio now returns 401, which Docker reports as
+	// "repository does not exist or may require docker login". What Quay still
+	// serves is a frozen archive, so "latest" would name something that no
+	// longer moves.
+	//
+	// The digest for this tag is
+	// sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e,
+	// recorded here rather than used: dockertest builds the image reference as
+	// "repository:tag", which has no room for one. docker-compose.yaml pins
+	// both.
 	resource, runErr := dtPool.RunWithOptions(&dockertest.RunOptions{
-		Repository: "minio/minio",
-		Tag:        "latest",
+		Repository: "quay.io/minio/minio",
+		Tag:        "RELEASE.2025-09-07T16-13-09Z",
 		Cmd:        []string{"server", "/data"},
 		Env: []string{
 			"MINIO_ROOT_USER=" + MinioAccessKey,
