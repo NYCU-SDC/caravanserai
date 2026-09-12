@@ -28,6 +28,54 @@ run-agent:
 run-cli:
 	@$(MAKE) -C cmd/caractl run
 
+# install-cli wires up a `cara` shortcut for caractl and a default --server, so
+# the everyday command is `cara get nodes` instead of
+# `./bin/caractl --server http://... get nodes`.
+#
+# It picks the rc file from the login shell ($SHELL: zsh vs bash), points the
+# alias at the absolute binary path so it works from any working directory, and
+# is idempotent — a managed block between markers is replaced on every run
+# rather than appended, so re-running never duplicates lines.
+#
+# The control-plane address is overridable per machine:
+#   make install-cli                                     # localhost (server box)
+#   make install-cli CARA_SERVER=http://10.1.253.7:8080  # remote (agent box)
+CARA_SERVER ?= http://127.0.0.1:8080
+CARACTL_BIN := $(abspath bin/caractl)
+
+install-cli: build
+	@echo -e ":: $(GREEN)Installing cara shortcut...$(NC)"
+	@shell_name=$$(basename "$${SHELL:-/bin/bash}"); \
+	case "$$shell_name" in \
+	  zsh)  rc="$$HOME/.zshrc" ;; \
+	  bash) rc="$$HOME/.bashrc" ;; \
+	  *)    rc="$$HOME/.profile" ;; \
+	esac; \
+	tmp=$$(mktemp); \
+	[ -f "$$rc" ] && sed '/# cara-cli-BEGIN/,/# cara-cli-END/d' "$$rc" > "$$tmp" || true; \
+	{ \
+	  echo "# cara-cli-BEGIN (managed by make install-cli)"; \
+	  echo "alias cara='$(CARACTL_BIN)'"; \
+	  echo "export CARA_SERVER='$(CARA_SERVER)'"; \
+	  echo "# cara-cli-END"; \
+	} >> "$$tmp"; \
+	mv "$$tmp" "$$rc"; \
+	echo -e "==> $(BLUE)wrote 'cara' alias + CARA_SERVER=$(CARA_SERVER) to $$rc$(NC)"; \
+	echo -e "  -> run: $(GREEN)source $$rc$(NC)  (or open a new terminal)"
+
+uninstall-cli:
+	@shell_name=$$(basename "$${SHELL:-/bin/bash}"); \
+	case "$$shell_name" in \
+	  zsh)  rc="$$HOME/.zshrc" ;; \
+	  bash) rc="$$HOME/.bashrc" ;; \
+	  *)    rc="$$HOME/.profile" ;; \
+	esac; \
+	if [ -f "$$rc" ]; then \
+	  tmp=$$(mktemp); \
+	  sed '/# cara-cli-BEGIN/,/# cara-cli-END/d' "$$rc" > "$$tmp" && mv "$$tmp" "$$rc"; \
+	  echo -e "==> $(BLUE)removed cara shortcut from $$rc$(NC)"; \
+	fi
+
 test:
 	@echo -e ":: $(GREEN)Running tests...$(NC)"
 	@go test -cover ./... \

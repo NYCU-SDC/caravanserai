@@ -220,10 +220,36 @@ These flags are global, so they work on either side of the subcommand:
 ./bin/caractrl <command> [--server <url>] [--output <format>]
 ```
 
-| Flag | Short | Default | Description |
-|------|-------|---------|-------------|
-| `--server` | | `http://localhost:8080` | cara-server URL |
-| `--output` | `-o` | `table` | Output format: `table` \| `json` \| `yaml` |
+| Flag | Short | Env var | Default | Description |
+|------|-------|---------|---------|-------------|
+| `--server` | | `CARA_SERVER` | `http://localhost:8080` | cara-server URL |
+| `--output` | `-o` | | `table` | Output format: `table` \| `json` \| `yaml` |
+
+`--server` resolves in this order: the explicit flag, then `$CARA_SERVER`, then
+the localhost default. So on the server box it needs no configuration; from a
+remote machine, set `CARA_SERVER` once instead of repeating `--server` on every
+call.
+
+### The `cara` shortcut
+
+`make install-cli` sets up a `cara` alias for `caractl` and a default
+`CARA_SERVER`, so the everyday command becomes `cara get nodes` instead of
+`./bin/caractl --server http://... get nodes`. It writes to the login shell's rc
+file (`.zshrc` / `.bashrc`), points the alias at the absolute binary path so it
+works from any directory, and is idempotent.
+
+```bash
+# On the server box (defaults to localhost):
+make install-cli
+
+# On an agent / remote machine (point it at the control plane):
+make install-cli CARA_SERVER=http://10.1.253.7:8080
+
+source ~/.zshrc          # or open a new terminal
+cara get nodes           # no --server needed
+```
+
+Remove it again with `make uninstall-cli`.
 
 ---
 
