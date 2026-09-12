@@ -29,6 +29,7 @@ type mockRuntime struct {
 	startFn         func(ctx context.Context, project *v1.Project) error
 	recoverFn       func(ctx context.Context, project *v1.Project, services []string) error
 	preflightFn     func(ctx context.Context, project *v1.Project, services []string) error
+	staleFn         func(ctx context.Context, project *v1.Project) ([]docker.StaleContainer, error)
 	listLocalFn     func(ctx context.Context) ([]docker.ProjectIdentity, error)
 	stopOrphanFn    func(ctx context.Context, project docker.ProjectIdentity) error
 	removeOrphanFn  func(ctx context.Context, project docker.ProjectIdentity) error
@@ -88,6 +89,13 @@ func (m *mockRuntime) PreflightRecovery(ctx context.Context, project *v1.Project
 		return m.preflightFn(ctx, project, services)
 	}
 	return nil
+}
+
+func (m *mockRuntime) StaleContainers(ctx context.Context, project *v1.Project) ([]docker.StaleContainer, error) {
+	if m.staleFn != nil {
+		return m.staleFn(ctx, project)
+	}
+	return nil, nil
 }
 
 func (m *mockRuntime) ListLocalProjects(ctx context.Context) ([]docker.ProjectIdentity, error) {

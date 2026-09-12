@@ -27,6 +27,10 @@ set -Eeuo pipefail
 #   D. container that keeps exiting → three attempts, then LocalRestartExhausted
 #   E. running container left by an earlier generation → RecoveryBlocked/StaleContainer;
 #                               the container is neither adopted, started nor removed
+#   F. the same, while the Project is Scheduled → not reported Running, not
+#                               reconciled, and the container survives (CARA-93)
+#   G. a container for a service the spec no longer declares → still blocks the
+#                               new assignment, which no per-service check can see (CARA-93)
 
 log() { printf '[recovery-e2e] %s\n' "$*"; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -423,4 +427,66 @@ blocked_is "$project" StaleContainer || fail "E: the block was cleared while the
 container_running "$container" || fail "E: the stale container was stopped during the hold"
 log "E: PASS — stale running container blocked, left untouched, never counted as healthy"
 
-log "PASS: stop and remove recovered; missing data blocked visibly and recovered on restore; crash loop exhausted; stale container blocked"
+# ── F. The same stale container, seen by a Scheduled Project ─────────────────
+
+log "F: moving $project back to Scheduled while generation $label_generation's container still runs"
+# Scheduled is what a fresh assignment looks like before the agent reports it
+# Running; reconcileOne handles it, not the health check. Written straight to
+# the store like the generation bump above.
+reschedule="$(docker exec "$postgres_name" psql -U postgres -d caravanserai -Atc \
+	"UPDATE resources SET phase = 'Scheduled', status = jsonb_set(status, '{phase}', to_jsonb('Scheduled'::text), true), updated_at = now() WHERE kind = 'Project' AND name = '$project';")"
+[[ "$reschedule" == "UPDATE 1" ]] || fail "F: failed to move the Project to Scheduled: $reschedule"
+wait_until 10 "F: $project reads Scheduled" phase_is "$project" Scheduled
+
+log "F: holding for three polls; a stale running container must not satisfy the new assignment"
+sleep 30
+phase_is "$project" Scheduled ||
+	fail "F: the Project left Scheduled — generation $label_generation's container was taken as generation $new_generation's"
+[[ "$(container_id "$container")" == "$id_before" ]] || fail "F: the stale container was replaced or removed"
+container_running "$container" || fail "F: the stale container was stopped"
+blocked_is "$project" StaleContainer || fail "F: the StaleContainer block was cleared"
+log "F: PASS — Scheduled Project not adopted onto the stale container, which survived untouched"
+
+# ── G. A container for a service the spec no longer declares ────────────────
+
+dropped=recover-dropped
+dropped_container="$dropped-worker"
+
+log "G: creating $dropped with a single service, worker"
+create_project '{
+	"apiVersion":"caravanserai/v1",
+	"kind":"Project",
+	"metadata":{"name":"'"$dropped"'","namespace":"default"},
+	"spec":{"services":[{"name":"worker","image":"nginx:alpine"}]}
+}'
+wait_until 90 "G: $dropped Running" phase_is "$dropped" Running
+wait_until 30 "G: $dropped_container running" container_running "$dropped_container"
+dropped_id="$(container_id "$dropped_container")"
+
+# The next assignment declares a different service and carries a new
+# generation. worker is gone from the spec, so nothing that walks the spec can
+# see the container it left behind.
+log "G: replacing the spec's worker with web and bumping the generation"
+respec="$(docker exec "$postgres_name" psql -U postgres -d caravanserai -Atc \
+	"UPDATE resources SET spec = jsonb_set(spec, '{services}', '[{\"name\": \"web\", \"image\": \"nginx:alpine\"}]'::jsonb, true), status = jsonb_set(status, '{assignmentGeneration}', to_jsonb((status->>'assignmentGeneration')::bigint + 1), true), updated_at = now() WHERE kind = 'Project' AND name = '$dropped';")"
+[[ "$respec" == "UPDATE 1" ]] || fail "G: failed to replace the spec: $respec"
+
+wait_until 45 "G: RecoveryBlocked/StaleContainer" blocked_is "$dropped" StaleContainer
+
+container_running "$dropped_container" || fail "G: the dropped service's container was stopped"
+[[ "$(container_id "$dropped_container")" == "$dropped_id" ]] || fail "G: it was replaced or removed"
+if dind inspect "$dropped-web" >/dev/null 2>&1; then
+	fail "G: the new assignment started beside generation 1's worker"
+fi
+message="$(blocked_message "$dropped")"
+[[ "$message" == *'"worker"'* ]] || fail "G: the condition should name the dropped service: $message"
+
+log "G: holding for two polls to confirm the block holds"
+sleep 20
+blocked_is "$dropped" StaleContainer || fail "G: the block was cleared"
+if dind inspect "$dropped-web" >/dev/null 2>&1; then
+	fail "G: the new assignment started during the hold"
+fi
+log "G: PASS — a container for a dropped service still blocks the new assignment"
+
+log "PASS: stop and remove recovered; missing data blocked visibly and recovered on restore; crash loop exhausted; stale containers blocked on the Running and Scheduled paths, including one whose service the spec no longer declares"

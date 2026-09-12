@@ -64,8 +64,14 @@ func (e *VolumeUnavailableError) Unwrap() error { return ErrRecoveryVolumeUnavai
 // name generation 8 would use. Starting it would run a stale assignment's
 // container as the current one, and removing it would destroy something this
 // assignment does not own. Either bypasses the fence CARA-83 exists for, so
-// recovery refuses both and leaves the container to the orphan sweep or an
-// operator.
+// recovery refuses both and leaves the container where it is.
+//
+// What removes it depends on which label differs. A container from a previous
+// lifetime carries another UID, so under UID enforcement the orphan sweep sees
+// it as another Project's and reclaims it. One left by an earlier grant of the
+// same lifetime carries the same UID, so the sweep sees the Project it still
+// has assigned here and leaves it; nothing reclaims such a container yet, and
+// until that is decided an operator has to remove it.
 var ErrContainerNotOwned = errors.New("container not owned by the current assignment")
 
 // ContainerNotOwnedError is the concrete error behind ErrContainerNotOwned. It
@@ -84,6 +90,21 @@ func (e *ContainerNotOwnedError) Error() string {
 }
 
 func (e *ContainerNotOwnedError) Unwrap() error { return ErrContainerNotOwned }
+
+// StaleContainer is a container labelled for a Project that does not belong to
+// the Project's current assignment.
+type StaleContainer struct {
+	// Name is the Docker container name.
+	Name string
+	// Service is the cara.service label. It may name a service the current
+	// spec no longer declares — which is exactly the case a per-service check
+	// cannot find.
+	Service string
+	// ID is the full Docker container ID.
+	ID string
+	// Reason is the *ContainerNotOwnedError explaining which label differs.
+	Reason error
+}
 
 // ProjectIdentity identifies one Project's Docker resources. Namespace is
 // included even while the API still treats names as globally unique so a
@@ -224,6 +245,21 @@ type Runtime interface {
 	// ErrRecoveryVolumeUnavailable, which the caller should treat as "blocked,
 	// waiting for a human or a restore" rather than as a failed attempt.
 	PreflightRecovery(ctx context.Context, project *v1.Project, services []string) error
+
+	// StaleContainers returns every container labelled for this Project that
+	// does not belong to its current assignment, whether or not the current
+	// spec still declares the service it was created for.
+	//
+	// InspectProject cannot answer this. It walks the spec, so a container
+	// left by an earlier generation for a service the spec has since dropped
+	// is invisible to it: the new assignment would start alongside a workload
+	// from the old one, and the orphan sweep would not reclaim it either
+	// because the Project is still assigned to this node. Finding these means
+	// asking Docker for everything carrying the Project's labels and checking
+	// each against the current assignment.
+	//
+	// An empty result means every container found is this assignment's.
+	StaleContainers(ctx context.Context, project *v1.Project) ([]StaleContainer, error)
 
 	// GetContainerIPs returns a map of serviceName → IP address for each
 	// service container in the project. The IP is read from the container's

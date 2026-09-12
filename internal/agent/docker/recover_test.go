@@ -46,6 +46,10 @@ type fakeDocker struct {
 	// onInspect, when set, runs at the start of every ContainerInspect, so a
 	// test can change what Docker holds between two reads of it.
 	onInspect func(name string)
+
+	// pullErr makes ImagePull fail for the named images, to drive a
+	// ReconcileProject into its rollback part-way through.
+	pullErr map[string]error
 }
 
 func newFakeDocker() *fakeDocker {
@@ -93,14 +97,24 @@ func (f *fakeDocker) ContainerInspect(_ context.Context, containerID string) (ty
 	return c, nil
 }
 
-func (f *fakeDocker) ContainerCreate(_ context.Context, _ *container.Config, _ *container.HostConfig,
+func (f *fakeDocker) ContainerCreate(_ context.Context, cfg *container.Config, _ *container.HostConfig,
 	_ *network.NetworkingConfig, _ *ocispec.Platform, containerName string) (container.CreateResponse, error) {
 	f.record("ContainerCreate:" + containerName)
+	var labels map[string]string
+	if cfg != nil {
+		labels = cfg.Labels
+	}
+	f.withContainer(containerName, "created", labels)
 	return container.CreateResponse{ID: fakeID(containerName)}, nil
 }
 
 func (f *fakeDocker) ContainerStart(_ context.Context, containerID string, _ container.StartOptions) error {
 	f.record("ContainerStart:" + containerID)
+	for _, c := range f.containers {
+		if c.ID == containerID {
+			c.State.Status, c.State.Running = "running", true
+		}
+	}
 	return nil
 }
 
@@ -161,11 +175,38 @@ func (f *fakeDocker) NetworkRemove(_ context.Context, networkID string) error {
 
 func (f *fakeDocker) ImagePull(_ context.Context, refStr string, _ image.PullOptions) (io.ReadCloser, error) {
 	f.record("ImagePull:" + refStr)
+	if err := f.pullErr[refStr]; err != nil {
+		return nil, err
+	}
 	return io.NopCloser(strings.NewReader("")), nil
 }
 
-func (f *fakeDocker) ContainerList(context.Context, container.ListOptions) ([]types.Container, error) {
-	return nil, nil
+// ContainerList honours label filters, "key=value" and bare "key", which is
+// all the runtime uses.
+func (f *fakeDocker) ContainerList(_ context.Context, opts container.ListOptions) ([]types.Container, error) {
+	var out []types.Container
+	for name, c := range f.containers {
+		var labels map[string]string
+		if c.Config != nil {
+			labels = c.Config.Labels
+		}
+		if !matchesLabelFilters(labels, opts.Filters.Get("label")) {
+			continue
+		}
+		out = append(out, types.Container{ID: c.ID, Names: []string{"/" + name}, Labels: labels})
+	}
+	return out, nil
+}
+
+func matchesLabelFilters(labels map[string]string, filters []string) bool {
+	for _, f := range filters {
+		key, want, hasValue := strings.Cut(f, "=")
+		got, ok := labels[key]
+		if !ok || (hasValue && got != want) {
+			return false
+		}
+	}
+	return true
 }
 
 func (f *fakeDocker) ContainerLogs(context.Context, string, container.LogsOptions) (io.ReadCloser, error) {
@@ -679,8 +720,9 @@ func TestInspectProjectReportsOwnership(t *testing.T) {
 // copy of it used to live.
 func TestEnsureContainerUsesTheSharedOwnershipRule(t *testing.T) {
 	ensure := func(f *recoverFixture) error {
-		return f.runtime.ensureContainer(t.Context(), f.project.Namespace, f.project.Name,
+		_, err := f.runtime.ensureContainer(t.Context(), f.project.Namespace, f.project.Name,
 			f.project.UID, f.project.Status.AssignmentGeneration, f.project.Spec.Services[0], f.project.Spec.Volumes)
+		return err
 	}
 
 	t.Run("adopts and starts its own stopped container", func(t *testing.T) {
