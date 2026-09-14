@@ -368,3 +368,91 @@ func TestProjectReschedulerGracePeriodIsPerIncident(t *testing.T) {
 		assert.Len(t, ps.SetProjectPendingCalls, 1, "the grace period still expires")
 	})
 }
+
+// The force-termination timeout is per-outage for the same reason the grace
+// period is, and with more at stake: exceeding it declares the Project
+// Terminated without the agent confirming teardown, which can strand Docker
+// resources on the node.
+func TestProjectReschedulerTerminationTimeoutIsPerIncident(t *testing.T) {
+	notReadyAfter := func(lastBeat time.Time) NodeStatusSnapshot {
+		return NodeStatusSnapshot{State: v1.NodeStateNotReady, LastHeartbeat: lastBeat}
+	}
+
+	t.Run("a second outage does not force-terminate against the first one's clock", func(t *testing.T) {
+		// The sequence this guards: the node comes back, the agent begins a
+		// slow teardown, and the node fails again part-way through. Judged
+		// against the previous outage's clock the Project would be
+		// force-terminated on sight.
+		clk := newFakeClock()
+		ns := newFakeReschedulerNodeStore()
+		ps := newFakeReschedulerProjectStore()
+		ps.projects["app-1"] = &ProjectSnapshot{
+			Name: "app-1", Phase: v1.ProjectPhaseTerminating, NodeRef: "node-1",
+		}
+		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil, WithClock(clk))
+		ctx := context.Background()
+
+		// --- Outage 1: the clock starts. ---
+		ns.nodes["node-1"] = notReadyAfter(clk.Time.Add(-NodeHeartbeatTimeout))
+		res, err := ctrl.Reconcile(ctx, "node-1")
+		require.NoError(t, err)
+		require.Len(t, ps.SetTerminatingAtCalls, 1)
+		assert.True(t, res.Requeue)
+		assert.Empty(t, ps.ForceTerminatedCalls)
+
+		// --- The node recovers and beats again. ---
+		clk.Time = clk.Time.Add(2 * time.Minute)
+		recoveredBeat := clk.Time
+
+		// --- Outage 2, well past the first clock's timeout. ---
+		clk.Time = clk.Time.Add(3 * time.Hour)
+		ns.nodes["node-1"] = notReadyAfter(recoveredBeat)
+
+		res, err = ctrl.Reconcile(ctx, "node-1")
+		require.NoError(t, err)
+		require.Len(t, ps.SetTerminatingAtCalls, 2, "the stale clock is restarted")
+		assert.Equal(t, clk.Time.UTC(), ps.SetTerminatingAtCalls[1].At)
+		assert.True(t, res.Requeue)
+		assert.Empty(t, ps.ForceTerminatedCalls,
+			"force-termination is destructive; it must not ride an earlier outage's clock")
+
+		// --- The new timeout still expires on its own schedule. ---
+		clk.Time = clk.Time.Add(terminatingTimeout - time.Second)
+		_, err = ctrl.Reconcile(ctx, "node-1")
+		require.NoError(t, err)
+		require.Empty(t, ps.ForceTerminatedCalls)
+
+		clk.Time = clk.Time.Add(2 * time.Second)
+		_, err = ctrl.Reconcile(ctx, "node-1")
+		require.NoError(t, err)
+		require.Len(t, ps.ForceTerminatedCalls, 1)
+	})
+
+	t.Run("one continuous outage keeps its clock and still times out", func(t *testing.T) {
+		// The node never recovers, so its last heartbeat does not move.
+		// Restarting the clock here would mean a Project stuck Terminating on a
+		// dead node is never cleaned up.
+		clk := newFakeClock()
+		ns := newFakeReschedulerNodeStore()
+		ps := newFakeReschedulerProjectStore()
+		ps.projects["app-1"] = &ProjectSnapshot{
+			Name: "app-1", Phase: v1.ProjectPhaseTerminating, NodeRef: "node-1",
+		}
+		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil, WithClock(clk))
+		ctx := context.Background()
+
+		ns.nodes["node-1"] = notReadyAfter(clk.Time.Add(-NodeHeartbeatTimeout))
+		_, err := ctrl.Reconcile(ctx, "node-1")
+		require.NoError(t, err)
+		require.Len(t, ps.SetTerminatingAtCalls, 1)
+
+		for waited := time.Duration(0); waited < terminatingTimeout; waited += time.Minute {
+			clk.Time = clk.Time.Add(time.Minute)
+			_, err = ctrl.Reconcile(ctx, "node-1")
+			require.NoError(t, err)
+			require.Len(t, ps.SetTerminatingAtCalls, 1, "the clock must not restart mid-outage")
+		}
+
+		require.Len(t, ps.ForceTerminatedCalls, 1, "the timeout still expires")
+	})
+}

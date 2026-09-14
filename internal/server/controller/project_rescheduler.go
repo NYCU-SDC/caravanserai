@@ -199,7 +199,7 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 			}
 
 		case v1.ProjectPhaseTerminating:
-			requeue, err := c.handleTerminating(ctx, log, p)
+			requeue, err := c.handleTerminating(ctx, log, p, snap.LastHeartbeat)
 			if err != nil {
 				return Result{}, err
 			}
@@ -218,31 +218,65 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 	return Result{}, nil
 }
 
+// incidentClock finds the clock condition of type t and reports whether it is
+// running for the node's current unhealthy period.
+//
+// startedAt is whatever timestamp was found, zero when there is no such
+// condition. running is false in both the absent case and the stale case, so a
+// caller that gets false starts the clock; startedAt tells it which of the two
+// happened, for the log.
+//
+// A clock started before the node's most recent successful heartbeat was
+// started during an earlier failure that the node has since recovered from.
+// Reading it would measure this failure from that one — however many hours or
+// days old — so the wait it governs would be skipped entirely, and would
+// protect each Project exactly once before silently stopping.
+//
+// Deciding this from the node's own heartbeat rather than from a cleanup step
+// is deliberate: it holds even when nothing removed the stale condition.
+// Removing it is worth doing so that status stops reporting a failure that is
+// over, but it must not be what correctness rests on.
+func incidentClock(
+	conds []ConditionSnapshot,
+	t v1.ConditionType,
+	lastHeartbeat time.Time,
+) (startedAt time.Time, running bool) {
+	for _, cond := range conds {
+		if cond.Type != t {
+			continue
+		}
+		return cond.LastTransitionTime, !cond.LastTransitionTime.Before(lastHeartbeat)
+	}
+	return time.Time{}, false
+}
+
 // handleTerminating processes a single Terminating project on a NotReady node.
 // Returns (true, nil) if the project still needs to be checked again later.
+// The timeout it governs ends in force-termination, which declares the Project
+// Terminated without the agent confirming teardown and may strand Docker
+// resources on the node. That is the reason the clock must belong to this
+// outage: a node that recovers, starts a slow teardown and fails again part-way
+// would otherwise be force-terminated against the previous outage's clock,
+// reaching the destructive outcome without the wait that exists to avoid it.
 func (c *ProjectReschedulerController) handleTerminating(
 	ctx context.Context,
 	log *zap.Logger,
 	p *ProjectSnapshot,
+	lastHeartbeat time.Time,
 ) (requeue bool, err error) {
 	log = log.With(zap.String("project", p.Name))
 
-	// Find the TerminatingAt condition, if any.
-	var terminatingAt time.Time
-	var found bool
-	for _, cond := range p.Conditions {
-		if cond.Type == v1.ConditionTypeTerminatingAt {
-			terminatingAt = cond.LastTransitionTime
-			found = true
-			break
-		}
-	}
+	terminatingAt, running := incidentClock(p.Conditions, v1.ConditionTypeTerminatingAt, lastHeartbeat)
 
-	if !found {
-		// First time we see this Terminating project on a NotReady node.
-		// Record the current time as the start of the timeout clock.
+	if !running {
+		if terminatingAt.IsZero() {
+			log.Info("Recording TerminatingAt timestamp for stranded project")
+		} else {
+			log.Info("Ignoring a TerminatingAt from an earlier outage, restarting the timeout",
+				zap.Time("staleClock", terminatingAt), zap.Time("lastHeartbeat", lastHeartbeat))
+		}
+
 		now := c.clock.Now().UTC()
-		log.Info("Recording TerminatingAt timestamp for stranded project", zap.Time("at", now))
 		if err := c.projects.SetTerminatingAt(ctx, p.Name, now); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				log.Debug("Project disappeared before TerminatingAt write, skipping")
@@ -286,7 +320,7 @@ func (c *ProjectReschedulerController) handleTerminating(
 // lastHeartbeat is the node's most recent heartbeat. It is what separates a
 // clock started during this failure from one left over by an earlier one, and
 // so what makes the grace period repeatable rather than a once-per-Project
-// protection.
+// protection. See incidentClock.
 func (c *ProjectReschedulerController) handleRunning(
 	ctx context.Context,
 	log *zap.Logger,
@@ -295,36 +329,14 @@ func (c *ProjectReschedulerController) handleRunning(
 ) (requeue bool, err error) {
 	log = log.With(zap.String("project", p.Name))
 
-	// Find the NotReadyAt condition, if any.
-	var notReadyAt time.Time
-	var found bool
-	for _, cond := range p.Conditions {
-		if cond.Type == v1.ConditionTypeNotReadyAt {
-			notReadyAt = cond.LastTransitionTime
-			found = true
-			break
-		}
-	}
+	notReadyAt, running := incidentClock(p.Conditions, v1.ConditionTypeNotReadyAt, lastHeartbeat)
 
-	// A clock is only this incident's if it was started after the node's last
-	// successful heartbeat. One started before it belongs to an earlier
-	// incident that the node has since recovered from, and reading it would
-	// measure this failure from that one — which, being however many hours or
-	// days old, is always past the grace period. The Project would be moved
-	// the instant the node was marked NotReady, so the wait that exists to
-	// absorb a brief blip would protect each Project exactly once and then
-	// silently stop.
-	//
-	// Deciding this from the node's own heartbeat rather than from a cleanup
-	// step is deliberate: it holds even when nothing removed the stale
-	// condition. Removing it is worth doing so that status stops reporting a
-	// failure that is over, but it must not be what correctness rests on.
-	if !found || notReadyAt.Before(lastHeartbeat) {
-		if found {
+	if !running {
+		if notReadyAt.IsZero() {
+			log.Info("Recording NotReadyAt timestamp for stranded running project")
+		} else {
 			log.Info("Ignoring a NotReadyAt from an earlier incident, restarting the grace period",
 				zap.Time("staleClock", notReadyAt), zap.Time("lastHeartbeat", lastHeartbeat))
-		} else {
-			log.Info("Recording NotReadyAt timestamp for stranded running project")
 		}
 
 		now := c.clock.Now().UTC()
