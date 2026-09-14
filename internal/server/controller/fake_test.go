@@ -324,10 +324,17 @@ type fakeReschedulerProjectStore struct {
 	projects map[string]*ProjectSnapshot
 	errs     map[string]error
 
-	SetProjectPendingCalls []setProjectPendingCall
-	SetTerminatingAtCalls  []setTerminatingAtCall
-	SetNotReadyAtCalls     []setNotReadyAtCall
-	ForceTerminatedCalls   []forceTerminatedCall
+	SetProjectPendingCalls    []setProjectPendingCall
+	SetTerminatingAtCalls     []setTerminatingAtCall
+	SetNotReadyAtCalls        []setNotReadyAtCall
+	ForceTerminatedCalls      []forceTerminatedCall
+	ClearRescheduleClockCalls []clearRescheduleClocksCall
+
+	// onList runs after ListProjectsByNodeRef has built its result and
+	// released the lock, so a test can change the store in the window between
+	// a controller listing Projects and acting on what it listed. It is how
+	// the cleanup-versus-next-outage race is reproduced rather than assumed.
+	onList func()
 }
 
 var _ ReschedulerProjectStore = (*fakeReschedulerProjectStore)(nil)
@@ -345,7 +352,6 @@ func (f *fakeReschedulerProjectStore) ListProjectsByNodeRef(
 	phases []v1.ProjectPhase,
 ) ([]*ProjectSnapshot, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 
 	phaseSet := make(map[v1.ProjectPhase]bool, len(phases))
 	for _, ph := range phases {
@@ -362,7 +368,58 @@ func (f *fakeReschedulerProjectStore) ListProjectsByNodeRef(
 			result = append(result, &cp)
 		}
 	}
+
+	hook := f.onList
+	f.mu.Unlock()
+
+	// Run outside the lock so the hook may use the store's own methods.
+	if hook != nil {
+		hook()
+	}
 	return result, nil
+}
+
+// clearRescheduleClocksCall records a single invocation of
+// ClearRescheduleClocks.
+type clearRescheduleClocksCall struct {
+	Name     string
+	NodeRef  string
+	NotAfter time.Time
+}
+
+// ClearRescheduleClocks mirrors the adapter, guards included: a Project that
+// has moved on, and a clock stamped after the heartbeat the cleanup was
+// decided on, are both left alone.
+func (f *fakeReschedulerProjectStore) ClearRescheduleClocks(
+	_ context.Context,
+	name, nodeRef string,
+	notAfter time.Time,
+) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err, ok := f.errs[name]; ok {
+		return err
+	}
+
+	f.ClearRescheduleClockCalls = append(f.ClearRescheduleClockCalls,
+		clearRescheduleClocksCall{Name: name, NodeRef: nodeRef, NotAfter: notAfter})
+
+	p, ok := f.projects[name]
+	if !ok || p.NodeRef != nodeRef {
+		return nil
+	}
+
+	kept := make([]ConditionSnapshot, 0, len(p.Conditions))
+	for _, c := range p.Conditions {
+		isClock := c.Type == v1.ConditionTypeNotReadyAt || c.Type == v1.ConditionTypeTerminatingAt
+		if isClock && !c.LastTransitionTime.After(notAfter) {
+			continue
+		}
+		kept = append(kept, c)
+	}
+	p.Conditions = kept
+	return nil
 }
 
 func (f *fakeReschedulerProjectStore) SetProjectPending(_ context.Context, name string) error {
