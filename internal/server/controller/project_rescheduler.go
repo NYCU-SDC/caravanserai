@@ -261,10 +261,18 @@ func (c *ProjectReschedulerController) clearRescheduleClocks(
 	nodeName string,
 	notAfter time.Time,
 ) error {
+	// Failed is in this list and not in the one the NotReady path uses. The
+	// rescheduler never acts on a Failed Project — it is terminal for this
+	// controller — but a Project can carry a clock from when it was Running
+	// and be reported Failed by its agent before the node recovers. Nothing
+	// else would ever take the clock off it: node.updated fires on a phase
+	// change, not on every heartbeat, and the periodic resync only re-enqueues
+	// NotReady nodes, so this cleanup is the last thing that will look at it.
 	projects, err := c.projects.ListProjectsByNodeRef(ctx, nodeName, []v1.ProjectPhase{
 		v1.ProjectPhaseScheduled,
 		v1.ProjectPhaseRunning,
 		v1.ProjectPhaseTerminating,
+		v1.ProjectPhaseFailed,
 	})
 	if err != nil {
 		return err

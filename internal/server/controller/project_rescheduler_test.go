@@ -539,7 +539,10 @@ func TestProjectReschedulerClearsClocksWhenTheNodeRecovers(t *testing.T) {
 		assert.Equal(t, newClock, ps.projects["app-1"].Conditions[0].LastTransitionTime)
 	})
 
-	t.Run("a Project that moved on is not written by the old node's cleanup", func(t *testing.T) {
+	t.Run("a Project reassigned mid-cleanup is not written by the old node", func(t *testing.T) {
+		// The reassignment has to land *between* the list and the write, or
+		// the Project is simply never listed and the store's nodeRef guard is
+		// never reached. onList is what puts it in that window.
 		clk := newFakeClock()
 		ns := newFakeReschedulerNodeStore()
 		ns.nodes["node-1"] = ready(clk.Time)
@@ -550,14 +553,47 @@ func TestProjectReschedulerClearsClocksWhenTheNodeRecovers(t *testing.T) {
 				{Type: v1.ConditionTypeNotReadyAt, LastTransitionTime: clk.Time.Add(-time.Minute)},
 			},
 		}
+		ps.onList = func() {
+			ps.mu.Lock()
+			defer ps.mu.Unlock()
+			ps.projects["app-1"].NodeRef = "node-2"
+		}
 		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil, WithClock(clk))
-
-		// Reassigned between the list and the write.
-		ps.projects["app-1"].NodeRef = "node-2"
 
 		_, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
+
+		require.Len(t, ps.ClearRescheduleClockCalls, 1,
+			"the Project was listed, so the write is attempted and the guard is what stops it")
+		assert.Equal(t, "node-1", ps.ClearRescheduleClockCalls[0].NodeRef)
 		assert.Len(t, ps.projects["app-1"].Conditions, 1,
 			"node-1's cleanup must not touch a Project now on node-2")
+	})
+
+	t.Run("a Failed Project's clock is cleared too", func(t *testing.T) {
+		// A Project can carry a clock from when it was Running and be reported
+		// Failed by its agent before the node recovers. The rescheduler never
+		// acts on a Failed Project, so this cleanup is the last thing that will
+		// ever look at it: leave Failed out of the phase list and the clock is
+		// permanent.
+		clk := newFakeClock()
+		ns := newFakeReschedulerNodeStore()
+		ns.nodes["node-1"] = ready(clk.Time)
+		ps := newFakeReschedulerProjectStore()
+		ps.projects["app-1"] = &ProjectSnapshot{
+			Name: "app-1", Phase: v1.ProjectPhaseFailed, NodeRef: "node-1",
+			Conditions: []ConditionSnapshot{
+				{Type: v1.ConditionTypePhase, LastTransitionTime: clk.Time},
+				{Type: v1.ConditionTypeNotReadyAt, LastTransitionTime: clk.Time.Add(-time.Minute)},
+			},
+		}
+		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil, WithClock(clk))
+
+		_, err := ctrl.Reconcile(context.Background(), "node-1")
+		require.NoError(t, err)
+
+		require.Len(t, ps.ClearRescheduleClockCalls, 1)
+		require.Len(t, ps.projects["app-1"].Conditions, 1)
+		assert.Equal(t, v1.ConditionTypePhase, ps.projects["app-1"].Conditions[0].Type)
 	})
 }

@@ -329,6 +329,12 @@ type fakeReschedulerProjectStore struct {
 	SetNotReadyAtCalls        []setNotReadyAtCall
 	ForceTerminatedCalls      []forceTerminatedCall
 	ClearRescheduleClockCalls []clearRescheduleClocksCall
+
+	// onList runs after ListProjectsByNodeRef has built its result and
+	// released the lock, so a test can change the store in the window between
+	// a controller listing Projects and acting on what it listed. It is how
+	// the cleanup-versus-next-outage race is reproduced rather than assumed.
+	onList func()
 }
 
 var _ ReschedulerProjectStore = (*fakeReschedulerProjectStore)(nil)
@@ -346,7 +352,6 @@ func (f *fakeReschedulerProjectStore) ListProjectsByNodeRef(
 	phases []v1.ProjectPhase,
 ) ([]*ProjectSnapshot, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 
 	phaseSet := make(map[v1.ProjectPhase]bool, len(phases))
 	for _, ph := range phases {
@@ -362,6 +367,14 @@ func (f *fakeReschedulerProjectStore) ListProjectsByNodeRef(
 			copy(cp.Conditions, p.Conditions)
 			result = append(result, &cp)
 		}
+	}
+
+	hook := f.onList
+	f.mu.Unlock()
+
+	// Run outside the lock so the hook may use the store's own methods.
+	if hook != nil {
+		hook()
 	}
 	return result, nil
 }
