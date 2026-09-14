@@ -20,10 +20,11 @@
 //	  the machine-readable Reason and human-readable Message.  Status is always
 //	  True; the field acts as a structured changelog, not a health signal.
 //
-//	  ConditionTypeTerminatingAt — written once by ProjectReschedulerController
-//	  when it first observes a Terminating project on a NotReady node.
-//	  LastTransitionTime is the start of the force-termination timeout clock.
-//	  The condition is never updated after it is set; only read.
+//	  ConditionTypeTerminatingAt — written by ProjectReschedulerController when
+//	  it observes a Terminating project on a NotReady node without a clock for
+//	  the current outage. LastTransitionTime is the start of the
+//	  force-termination timeout clock, and carries the same per-incident rule
+//	  as ConditionTypeNotReadyAt below.
 //
 //	  ConditionTypeNotReadyAt — written by ProjectReschedulerController when it
 //	  observes a Running project on a NotReady node without a clock for the
@@ -210,4 +211,34 @@ type Condition struct {
 
 	// Message is a human-readable explanation.
 	Message string `json:"message,omitempty" yaml:"message,omitempty"`
+}
+
+// RemoveConditions returns conditions with every entry whose Type appears in
+// types dropped.
+//
+// Dropped, not set to False: these conditions are records that an incident is
+// in progress, and a finished incident has no record to report. A False entry
+// would also still be found by a reader that matches on Type alone, which is
+// how the rescheduler's clocks are read — it would go on being treated as a
+// start time.
+//
+// The input is never mutated. The result is always a fresh slice, so a caller
+// may keep or discard either independently.
+func RemoveConditions(conditions []Condition, types ...ConditionType) []Condition {
+	if len(conditions) == 0 {
+		return nil
+	}
+
+	drop := make(map[ConditionType]bool, len(types))
+	for _, t := range types {
+		drop[t] = true
+	}
+
+	out := make([]Condition, 0, len(conditions))
+	for _, c := range conditions {
+		if !drop[c.Type] {
+			out = append(out, c)
+		}
+	}
+	return out
 }

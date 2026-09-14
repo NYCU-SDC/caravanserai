@@ -222,3 +222,44 @@ func TestUpsertConditionRestartsAClockOnlyWhenTransitioned(t *testing.T) {
 		}
 	})
 }
+
+func TestRemoveConditions(t *testing.T) {
+	base := []Condition{
+		{Type: ConditionTypePhase, Reason: "ContainersRunning"},
+		{Type: ConditionTypeNotReadyAt, Reason: "NodeNotReady"},
+		{Type: ConditionTypeMaintenance, Reason: "BackingUp"},
+	}
+
+	t.Run("removes the named types and keeps the order of the rest", func(t *testing.T) {
+		got := RemoveConditions(base, ConditionTypeNotReadyAt, ConditionTypeTerminatingAt)
+		require.Len(t, got, 2)
+		assert.Equal(t, ConditionTypePhase, got[0].Type)
+		assert.Equal(t, ConditionTypeMaintenance, got[1].Type)
+	})
+
+	t.Run("does not mutate the caller's slice", func(t *testing.T) {
+		input := make([]Condition, len(base))
+		copy(input, base)
+		_ = RemoveConditions(input, ConditionTypeNotReadyAt)
+		require.Len(t, input, 3)
+		assert.Equal(t, ConditionTypeNotReadyAt, input[1].Type)
+	})
+
+	t.Run("removing an absent type keeps everything", func(t *testing.T) {
+		assert.Len(t, RemoveConditions(base, ConditionTypeRecoveryBlocked), 3)
+	})
+
+	t.Run("empty inputs are safe", func(t *testing.T) {
+		assert.Empty(t, RemoveConditions(nil, ConditionTypeNotReadyAt))
+		assert.Len(t, RemoveConditions(base), 3, "removing no types keeps the set")
+	})
+
+	t.Run("a removed clock cannot be found by a Type-only reader", func(t *testing.T) {
+		// How the rescheduler reads these: scan for the Type, take the
+		// timestamp. A tombstone left with Status=False would still be found,
+		// which is why the entry is dropped rather than negated.
+		for _, c := range RemoveConditions(base, ConditionTypeNotReadyAt) {
+			assert.NotEqual(t, ConditionTypeNotReadyAt, c.Type)
+		}
+	})
+}
