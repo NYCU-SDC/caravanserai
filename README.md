@@ -220,10 +220,42 @@ These flags are global, so they work on either side of the subcommand:
 ./bin/caractrl <command> [--server <url>] [--output <format>]
 ```
 
-| Flag | Short | Default | Description |
-|------|-------|---------|-------------|
-| `--server` | | `http://localhost:8080` | cara-server URL |
-| `--output` | `-o` | `table` | Output format: `table` \| `json` \| `yaml` |
+| Flag | Short | Env var | Default | Description |
+|------|-------|---------|---------|-------------|
+| `--server` | | `CARA_SERVER` | `http://localhost:8080` | cara-server URL |
+| `--output` | `-o` | | `table` | Output format: `table` \| `json` \| `yaml` |
+
+`--server` resolves in this order: the explicit flag, then `$CARA_SERVER`, then
+the localhost default. So on the server box it needs no configuration; from a
+remote machine, set `CARA_SERVER` once instead of repeating `--server` on every
+call.
+
+### The `cara` shortcut
+
+`make install-cli` installs a `cara` wrapper for `caractl` into a PATH directory
+(`~/.local/bin` by default), so the everyday command becomes `cara get nodes`
+instead of `./bin/caractl --server http://... get nodes`. The wrapper bakes the
+control-plane address in as the default; exporting `CARA_SERVER` or passing
+`--server` still overrides it.
+
+A wrapper in PATH is used rather than a shell alias so no `source` step is
+needed — a new terminal picks it up automatically, and the current shell needs
+at most `rehash` (zsh) / `hash -r` (bash).
+
+```bash
+# On the server box (defaults to localhost):
+make install-cli
+
+# On an agent / remote machine (point it at the control plane):
+make install-cli CARA_SERVER=http://10.1.253.7:8080
+
+# If ~/.local/bin is not on your PATH, target another dir that is:
+make install-cli CLI_BINDIR=/opt/homebrew/bin
+
+cara get nodes           # new terminal, or `rehash` in the current one
+```
+
+Remove it again with `make uninstall-cli`.
 
 ---
 
