@@ -160,15 +160,21 @@ func (a *ProjectStoreAdapter) SetTerminatingAt(ctx context.Context, name string,
 			Reason:             "NodeNotReady",
 			Message:            "Node went NotReady while project was Terminating; force-termination timeout clock started",
 			LastTransitionTime: at,
-		}, false)
+			// true, not false: every field but the timestamp is a fixed
+			// string, so an unchanged-content check would keep the previous
+			// incident's start time and the clock would never restart.
+		}, true)
 		return nil
 	})
 }
 
 // SetNotReadyAt satisfies controller.ReschedulerProjectStore.
-// Writes (or replaces) the NotReadyAt condition to record the time at which
-// the rescheduler first observed this Running project as stranded on a NotReady
-// node.  The grace period clock starts from this timestamp.
+// Starts, or restarts, the running grace-period clock at the given time.
+//
+// Restarting matters as much as starting: a node can go NotReady, recover, and
+// fail again, and the second failure is owed its own full grace period. The
+// caller only reaches here when it has decided a clock should begin, so this
+// always writes the timestamp it was given.
 func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at time.Time) error {
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
@@ -177,7 +183,8 @@ func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at
 			Reason:             "NodeNotReady",
 			Message:            "Node went NotReady while project was Running; running grace period clock started",
 			LastTransitionTime: at,
-		}, false)
+			// true, for the same reason as SetTerminatingAt above.
+		}, true)
 		return nil
 	})
 }

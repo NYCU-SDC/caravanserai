@@ -176,3 +176,49 @@ func TestUpsertConditionHonoursTransitionedFlag(t *testing.T) {
 	assert.Equal(t, began, got[0].LastTransitionTime,
 		"nothing changed inside or outside the condition; the timestamp must not move")
 }
+
+// The rescheduler's clocks carry their whole meaning in LastTransitionTime:
+// Status, Reason and Message are fixed strings, identical on every incident.
+// Upserting one without transitioned=true therefore keeps the previous
+// incident's start time, and a clock that cannot be restarted is not a clock.
+func TestUpsertConditionRestartsAClockOnlyWhenTransitioned(t *testing.T) {
+	first := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+	second := first.Add(4 * time.Hour)
+
+	// A clock condition as the rescheduler writes it: the timestamp is the
+	// only field that ever differs between two writes.
+	clock := func(at time.Time) Condition {
+		return Condition{
+			Type:               ConditionTypeNotReadyAt,
+			Status:             ConditionTrue,
+			Reason:             "NodeNotReady",
+			Message:            "Node went NotReady while project was Running; running grace period clock started",
+			LastTransitionTime: at,
+		}
+	}
+
+	t.Run("transitioned=false keeps the old start time", func(t *testing.T) {
+		// Pinned as the reason the clocks must not use this form, not as
+		// desired behaviour: it is correct for a condition re-asserted every
+		// tick and wrong for one that marks the start of an incident.
+		got := UpsertCondition([]Condition{clock(first)}, clock(second), false)
+		require.Len(t, got, 1)
+		assert.Equal(t, first, got[0].LastTransitionTime,
+			"identical Status/Reason/Message means the write is treated as a re-assertion")
+	})
+
+	t.Run("transitioned=true restarts the clock", func(t *testing.T) {
+		got := UpsertCondition([]Condition{clock(first)}, clock(second), true)
+		require.Len(t, got, 1)
+		assert.Equal(t, second, got[0].LastTransitionTime,
+			"a new incident must start its own clock")
+	})
+
+	t.Run("the first write lands either way", func(t *testing.T) {
+		for _, transitioned := range []bool{false, true} {
+			got := UpsertCondition(nil, clock(first), transitioned)
+			require.Len(t, got, 1)
+			assert.Equal(t, first, got[0].LastTransitionTime)
+		}
+	})
+}
