@@ -190,7 +190,7 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 			log.Info("Scheduled project reset to Pending", zap.String("project", p.Name))
 
 		case v1.ProjectPhaseRunning:
-			requeue, err := c.handleRunning(ctx, log, p)
+			requeue, err := c.handleRunning(ctx, log, p, snap.LastHeartbeat)
 			if err != nil {
 				return Result{}, err
 			}
@@ -282,10 +282,16 @@ func (c *ProjectReschedulerController) handleTerminating(
 
 // handleRunning processes a single Running project on a NotReady node.
 // Returns (true, nil) if the project still needs to be checked again later.
+//
+// lastHeartbeat is the node's most recent heartbeat. It is what separates a
+// clock started during this failure from one left over by an earlier one, and
+// so what makes the grace period repeatable rather than a once-per-Project
+// protection.
 func (c *ProjectReschedulerController) handleRunning(
 	ctx context.Context,
 	log *zap.Logger,
 	p *ProjectSnapshot,
+	lastHeartbeat time.Time,
 ) (requeue bool, err error) {
 	log = log.With(zap.String("project", p.Name))
 
@@ -300,11 +306,28 @@ func (c *ProjectReschedulerController) handleRunning(
 		}
 	}
 
-	if !found {
-		// First time we see this Running project on a NotReady node.
-		// Record the current time as the start of the grace period clock.
+	// A clock is only this incident's if it was started after the node's last
+	// successful heartbeat. One started before it belongs to an earlier
+	// incident that the node has since recovered from, and reading it would
+	// measure this failure from that one — which, being however many hours or
+	// days old, is always past the grace period. The Project would be moved
+	// the instant the node was marked NotReady, so the wait that exists to
+	// absorb a brief blip would protect each Project exactly once and then
+	// silently stop.
+	//
+	// Deciding this from the node's own heartbeat rather than from a cleanup
+	// step is deliberate: it holds even when nothing removed the stale
+	// condition. Removing it is worth doing so that status stops reporting a
+	// failure that is over, but it must not be what correctness rests on.
+	if !found || notReadyAt.Before(lastHeartbeat) {
+		if found {
+			log.Info("Ignoring a NotReadyAt from an earlier incident, restarting the grace period",
+				zap.Time("staleClock", notReadyAt), zap.Time("lastHeartbeat", lastHeartbeat))
+		} else {
+			log.Info("Recording NotReadyAt timestamp for stranded running project")
+		}
+
 		now := c.clock.Now().UTC()
-		log.Info("Recording NotReadyAt timestamp for stranded running project", zap.Time("at", now))
 		if err := c.projects.SetNotReadyAt(ctx, p.Name, now); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				log.Debug("Project disappeared before NotReadyAt write, skipping")

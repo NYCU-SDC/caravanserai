@@ -262,3 +262,109 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		assert.False(t, res.Requeue)
 	})
 }
+
+// The grace period must protect a Project every time its node fails, not only
+// the first time.
+//
+// NotReadyAt is a clock, and nothing in the system removed it once the
+// incident was over. On the second failure the elapsed time was therefore
+// measured from the first one — hours old by then, always past the grace
+// period — so the Project was reset to Pending the instant the node was
+// marked NotReady. The wait that exists to absorb a brief blip worked once per
+// Project and then silently stopped.
+func TestProjectReschedulerGracePeriodIsPerIncident(t *testing.T) {
+	// notReadyAfter returns the node state the health controller would have
+	// written: NotReady, with the last heartbeat one timeout ago.
+	notReadyAfter := func(lastBeat time.Time) NodeStatusSnapshot {
+		return NodeStatusSnapshot{State: v1.NodeStateNotReady, LastHeartbeat: lastBeat}
+	}
+
+	t.Run("a second failure serves the full grace period", func(t *testing.T) {
+		clk := newFakeClock()
+		ns := newFakeReschedulerNodeStore()
+		ps := newFakeReschedulerProjectStore()
+		ps.projects["app-1"] = &ProjectSnapshot{
+			Name: "app-1", Phase: v1.ProjectPhaseRunning, NodeRef: "node-1",
+		}
+		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil, WithClock(clk))
+		ctx := context.Background()
+
+		// --- Incident 1. The node stopped beating 90s ago. ---
+		firstBeat := clk.Time.Add(-NodeHeartbeatTimeout)
+		ns.nodes["node-1"] = notReadyAfter(firstBeat)
+		res, err := ctrl.Reconcile(ctx, "node-1")
+		require.NoError(t, err)
+		require.Len(t, ps.SetNotReadyAtCalls, 1, "the first failure starts a clock")
+		assert.True(t, res.Requeue)
+		assert.Empty(t, ps.SetProjectPendingCalls, "the grace period has barely begun")
+
+		// --- The node recovers inside the grace period and beats again. ---
+		clk.Time = clk.Time.Add(time.Minute)
+		recoveredBeat := clk.Time
+
+		// --- Hours of health, then incident 2. ---
+		clk.Time = clk.Time.Add(4 * time.Hour)
+		ns.nodes["node-1"] = notReadyAfter(recoveredBeat)
+
+		// The stale clock is still on the Project: nothing removed it, which
+		// is exactly the situation this rule has to survive.
+		require.Len(t, ps.projects["app-1"].Conditions, 1)
+		require.Equal(t, v1.ConditionTypeNotReadyAt, ps.projects["app-1"].Conditions[0].Type)
+
+		res, err = ctrl.Reconcile(ctx, "node-1")
+		require.NoError(t, err)
+		require.Len(t, ps.SetNotReadyAtCalls, 2, "a clock predating the last heartbeat is restarted")
+		assert.Equal(t, clk.Time.UTC(), ps.SetNotReadyAtCalls[1].At)
+		assert.True(t, res.Requeue)
+		assert.Empty(t, ps.SetProjectPendingCalls,
+			"the second failure must wait, not inherit the first failure's elapsed time")
+
+		// --- One second short of the new grace period: still holding. ---
+		clk.Time = clk.Time.Add(runningGracePeriod - time.Second)
+		_, err = ctrl.Reconcile(ctx, "node-1")
+		require.NoError(t, err)
+		assert.Empty(t, ps.SetProjectPendingCalls)
+		assert.Len(t, ps.SetNotReadyAtCalls, 2, "the clock is not restarted within one incident")
+
+		// --- Past it: now, and only now, reschedule. ---
+		clk.Time = clk.Time.Add(2 * time.Second)
+		_, err = ctrl.Reconcile(ctx, "node-1")
+		require.NoError(t, err)
+		require.Len(t, ps.SetProjectPendingCalls, 1)
+		assert.Equal(t, "app-1", ps.SetProjectPendingCalls[0].Name)
+	})
+
+	t.Run("a clock from the current failure is trusted across reconciles", func(t *testing.T) {
+		// The node stays down, so its last heartbeat does not move and the
+		// clock keeps accumulating. Restarting it here would mean the grace
+		// period never expires and the Project is never moved off a dead node.
+		clk := newFakeClock()
+		ns := newFakeReschedulerNodeStore()
+		ps := newFakeReschedulerProjectStore()
+		ps.projects["app-1"] = &ProjectSnapshot{
+			Name: "app-1", Phase: v1.ProjectPhaseRunning, NodeRef: "node-1",
+		}
+		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil, WithClock(clk))
+		ctx := context.Background()
+
+		lastBeat := clk.Time.Add(-NodeHeartbeatTimeout)
+		ns.nodes["node-1"] = notReadyAfter(lastBeat)
+
+		_, err := ctrl.Reconcile(ctx, "node-1")
+		require.NoError(t, err)
+		require.Len(t, ps.SetNotReadyAtCalls, 1)
+
+		for elapsed := 30 * time.Second; elapsed < runningGracePeriod; elapsed += 30 * time.Second {
+			clk.Time = clk.Time.Add(30 * time.Second)
+			_, err = ctrl.Reconcile(ctx, "node-1")
+			require.NoError(t, err)
+			require.Len(t, ps.SetNotReadyAtCalls, 1, "the clock must not restart mid-incident")
+			require.Empty(t, ps.SetProjectPendingCalls)
+		}
+
+		clk.Time = clk.Time.Add(runningGracePeriod)
+		_, err = ctrl.Reconcile(ctx, "node-1")
+		require.NoError(t, err)
+		assert.Len(t, ps.SetProjectPendingCalls, 1, "the grace period still expires")
+	})
+}

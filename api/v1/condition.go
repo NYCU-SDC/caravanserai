@@ -25,10 +25,17 @@
 //	  LastTransitionTime is the start of the force-termination timeout clock.
 //	  The condition is never updated after it is set; only read.
 //
-//	  ConditionTypeNotReadyAt — written once by ProjectReschedulerController
-//	  when it first observes a Running project on a NotReady node.
-//	  LastTransitionTime is the start of the running grace-period clock.
-//	  The condition is never updated after it is set; only read.
+//	  ConditionTypeNotReadyAt — written by ProjectReschedulerController when it
+//	  observes a Running project on a NotReady node without a clock for the
+//	  current failure. LastTransitionTime is the start of the running
+//	  grace-period clock.
+//
+//	  It measures one incident, not the Project's lifetime. A node can go
+//	  NotReady, recover, and fail again; the second failure gets its own full
+//	  grace period, decided by comparing the clock against the node's last
+//	  heartbeat rather than by trusting that something removed the old one.
+//	  Anything reading this condition must make the same comparison — a
+//	  timestamp alone cannot say which failure it belongs to.
 //
 //	  ConditionTypeMaintenance — set and cleared by the agent around an
 //	  operation that stops containers on purpose, such as a backup.
