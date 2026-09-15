@@ -76,6 +76,22 @@ proposing changes.
 | `.github/PULL_REQUEST_TEMPLATE.md` | PR format — types: Feature / Fix / Docs / Refactor / CI / Test / Chore |
 | `.opencode/skills/dev-environment/` | Step-by-step guide to start the full dev stack (PostgreSQL + cara-server + cara-agent), including background-process mode for LLM agents |
 | `.opencode/skills/e2e-testing/` | How to run integration tests and manual full-stack E2E verification with real Docker containers |
+| `.opencode/skills/audit-ownership-fencing/` | Required before merging a change to ownership or data authority — see below |
+
+### Required before merge: ownership and data authority
+
+A change that alters **who owns a resource, or who may write it** must run
+`.opencode/skills/audit-ownership-fencing/SKILL.md` before merge, and record its findings on
+the ticket. This covers changes to Project UID, assignment generation, `nodeRef`, volume
+provenance, backup authority and condition writability; making a resource movable between
+Nodes; adding a writer to state another component already reads; and allowing a resource to
+be deleted and recreated under the same name.
+
+The audit is about code the change does not touch. Project UID and assignment generation were
+added to the container layer and not to the data layer, and the restore marker went on
+deciding from `(namespace, project)` alone — which silently served a Project's stale data
+after it moved away and came back, then backed that up over the good copy. Nothing in the
+repository asked anyone to check.
 
 ### Key Source Files
 
