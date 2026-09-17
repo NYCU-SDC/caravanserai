@@ -178,10 +178,17 @@ type Outcome struct {
 // history already reads Known and NeverAssigned is not an observable state.
 // Deciding on it would refuse every new Project with a Managed volume.
 //
-// Generation 1 is the first grant of ownership that has ever existed for this
-// Project, so nothing can have run before it. Unknown history overrides that:
-// a row whose past could not be established is not one whose counter can be
-// trusted either.
+// Generation 1 is the first grant of ownership for a Project created through
+// the API, so nothing can have run before it. That is not unconditional: the
+// CARA-83 migration backfills an already-assigned row to generation 1 with
+// Known history, because generation 0 is reserved for NeverAssigned and an
+// assigned row at 0 would let a stale report read as current. A Project
+// migrated in that way has run before and would be misread here.
+//
+// It cannot arise in a deployment built from scratch, which is every
+// deployment cara has. Upgrading one in place would need the migration to
+// start backfilled rows at generation 2 first, and this comment is the reason
+// why. Unknown history is refused for the same class of doubt.
 func Decide(state PlacementState, want Provenance, history v1.AssignmentHistory) Outcome {
 	switch {
 	case state.StagingPresent:
@@ -396,5 +403,9 @@ func firstPlacement(want Provenance, history v1.AssignmentHistory) bool {
 	if history == v1.AssignmentHistoryUnknown {
 		return false
 	}
-	return want.AssignmentGeneration <= 1
+	// Exactly one, not "at most one". Generation 0 means no assignment has
+	// been granted, so an Agent holding one has been handed a state the
+	// server does not produce; creating volumes on the strength of it would
+	// be failing open on an anomaly.
+	return want.AssignmentGeneration == 1
 }

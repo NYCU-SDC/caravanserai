@@ -307,3 +307,18 @@ func TestDecideStartsEmptyOnTheStateAnAgentActuallySees(t *testing.T) {
 	got = Decide(PlacementState{}, later, v1.AssignmentHistoryKnown)
 	assert.Equal(t, DecisionRestore, got.Decision)
 }
+
+// Generation 0 means no assignment has ever been granted, so an Agent holding
+// one has been handed a state the server does not produce. Creating volumes on
+// the strength of it would be failing open on an anomaly.
+func TestDecideRefusesToStartEmptyAtGenerationZero(t *testing.T) {
+	anomalous := Provenance{
+		Namespace: "default", Project: "blog",
+		ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 0,
+	}
+
+	got := Decide(PlacementState{}, anomalous, v1.AssignmentHistoryKnown)
+
+	assert.NotEqual(t, DecisionInitializeEmpty, got.Decision)
+	assert.Equal(t, DecisionRestore, got.Decision)
+}
