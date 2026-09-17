@@ -87,11 +87,6 @@ type BackupSupport struct {
 	// NodeName is this agent's Node name, recorded in and checked against the
 	// provenance marker.
 	NodeName string
-	// StrictProvenance enforces the provenance rules instead of only
-	// reporting them. While it is off the agent behaves as it did before
-	// CARA-87 and logs, at Warn, every placement the rules would have
-	// refused — so a deployment can be observed before it starts blocking.
-	StrictProvenance bool
 }
 
 // RouteUpdater is the narrow interface consumed by the agent loop to maintain
@@ -499,7 +494,7 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	// is the last moment the volumes can be populated without a service seeing
 	// an empty directory.
 	if backups != nil {
-		err := ensureVolumeData(ctx, backups.Restorer, backups.Coordinator, backups.DataRoot, backups.NodeName, backups.StrictProvenance, p, logger)
+		err := ensureVolumeData(ctx, backups.Restorer, backups.Coordinator, backups.DataRoot, backups.NodeName, p, logger)
 		switch {
 		case err == nil:
 		case errors.Is(err, errDeferred):

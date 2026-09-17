@@ -76,7 +76,7 @@ func newSupport(t *testing.T, store restore.Store) (*restore.Restorer, *backup.C
 func TestEnsureVolumeDataNoRestorerIsNotAnError(t *testing.T) {
 	// An agent with no object store still runs Managed volumes; they simply
 	// live and die on local disk.
-	err := ensureVolumeData(context.Background(), nil, backup.NewCoordinator(), t.TempDir(), testNode, true,
+	err := ensureVolumeData(context.Background(), nil, backup.NewCoordinator(), t.TempDir(), testNode,
 		testProject(managedVolume("db-data")), zap.NewNop())
 	assert.NoError(t, err)
 }
@@ -85,7 +85,7 @@ func TestEnsureVolumeDataIgnoresProjectsWithoutManagedVolumes(t *testing.T) {
 	restorer, coordinator, dataRoot := newSupport(t, refusingStore{t})
 
 	p := testProject(v1.VolumeDef{Name: "cache", Type: v1.VolumeTypeEphemeral})
-	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 		p, zap.NewNop()))
 
 	// No marker either: a Project with nothing to restore should leave no
@@ -114,7 +114,7 @@ func TestEnsureVolumeDataSkipsWhenProvenanceMatches(t *testing.T) {
 	writeLive(t, dataRoot, p, "db-data", "mine")
 	require.NoError(t, restore.WriteMarker(dataRoot, currentProvenance(p, "20260801T000000Z"), nowUTC()))
 
-	assert.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+	assert.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 		p, zap.NewNop()))
 }
 
@@ -127,7 +127,7 @@ func TestEnsureVolumeDataBlocksDataWithNoProvenance(t *testing.T) {
 	p := testProject(managedVolume("db-data"))
 	live := writeLive(t, dataRoot, p, "db-data", "someone else's")
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 		p, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
@@ -154,37 +154,13 @@ func TestEnsureVolumeDataBlocksAnotherAssignmentsData(t *testing.T) {
 	older.AssignmentGeneration = 5
 	require.NoError(t, restore.WriteMarker(dataRoot, older, nowUTC()))
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 		p, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
 	require.ErrorAs(t, err, &blocked)
 	assert.Equal(t, restore.BlockForeignProvenance, blocked.Reason)
 	assert.Contains(t, blocked.Detail, "assignmentGeneration")
-}
-
-func TestEnsureVolumeDataShadowModeReportsButDoesNotBlock(t *testing.T) {
-	// Shadow mode is how a deployment full of v1 markers is observed before
-	// the rules start refusing placements. It must not change the outcome.
-	restorer, coordinator, dataRoot := newSupport(t, refusingStore{t})
-	p := testProject(managedVolume("db-data"))
-	writeLive(t, dataRoot, p, "db-data", "unproven")
-
-	logs, logger := recordedLogger()
-
-	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, false,
-		p, logger), "shadow mode must not block")
-
-	entry := logs.FilterMessageSnippet("would block this placement").All()
-	require.Len(t, entry, 1)
-	assert.Equal(t, zapcore.WarnLevel, entry[0].Level,
-		"a judgement nobody can see is the defect this replaces")
-
-	fields := entry[0].ContextMap()
-	assert.Equal(t, string(restore.BlockUnprovenData), fields["reason"])
-	assert.Equal(t, "uid-1", fields["projectUID"])
-	assert.Equal(t, testNode, fields["nodeName"])
-	assert.EqualValues(t, 7, fields["assignmentGeneration"])
 }
 
 func TestEnsureVolumeDataInitialisesEmptyOnlyForANeverAssignedProject(t *testing.T) {
@@ -196,7 +172,7 @@ func TestEnsureVolumeDataInitialisesEmptyOnlyForANeverAssignedProject(t *testing
 	p := testProject(managedVolume("db-data"))
 	p.Status.AssignmentHistory = v1.AssignmentHistoryNeverAssigned
 
-	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 		p, zap.NewNop()))
 
 	live := filepath.Join(dataRoot, "volumes", p.Namespace, p.Name, "db-data", "data")
@@ -230,7 +206,7 @@ func TestEnsureVolumeDataBlocksWhenAPlacedProjectHasNoBackup(t *testing.T) {
 			p := testProject(managedVolume("db-data"))
 			p.Status.AssignmentHistory = history
 
-			err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+			err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 				p, zap.NewNop())
 
 			var blocked *restore.PlacementBlockedError
@@ -257,7 +233,7 @@ func TestPlacementBlockDetailsNameNoHostPaths(t *testing.T) {
 	p := testProject(managedVolume("db-data"))
 	writeLive(t, dataRoot, p, "db-data", "unproven")
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 		p, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
@@ -276,7 +252,7 @@ func TestEnsureVolumeDataDefersWhenProjectIsBusy(t *testing.T) {
 	require.True(t, ok)
 	defer release()
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 		p, zap.NewNop())
 	assert.ErrorIs(t, err, errDeferred, "a lost race is a retry, not a failure")
 }
@@ -292,7 +268,7 @@ func TestEnsureVolumeDataReleasesClaimOnReturn(t *testing.T) {
 		p := testProject(managedVolume("db-data"))
 		p.Status.AssignmentHistory = v1.AssignmentHistoryNeverAssigned
 
-		require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+		require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 			p, zap.NewNop()))
 
 		assert.False(t, coordinator.IsBusy(key))
@@ -302,7 +278,7 @@ func TestEnsureVolumeDataReleasesClaimOnReturn(t *testing.T) {
 		restorer, coordinator, dataRoot := newSupport(t, missingStore{})
 		p := testProject(managedVolume("db-data"))
 
-		require.Error(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+		require.Error(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 			p, zap.NewNop()))
 
 		assert.False(t, coordinator.IsBusy(key))
@@ -360,7 +336,7 @@ func TestEnsureVolumeDataCorruptMarkerBlocksEvenInShadowMode(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
 
 	for _, strict := range []bool{false, true} {
-		err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, strict,
+		err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 			p, zap.NewNop())
 
 		var blocked *restore.PlacementBlockedError
@@ -380,7 +356,7 @@ func TestEnsureVolumeDataBlocksWhenOneVolumeIsMissing(t *testing.T) {
 
 	require.NoError(t, restore.WriteMarker(dataRoot, currentProvenance(p, "20260801T000000Z"), nowUTC()))
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 		p, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError

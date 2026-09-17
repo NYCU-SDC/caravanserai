@@ -30,7 +30,6 @@ func ensureVolumeData(
 	coordinator *backup.Coordinator,
 	dataRoot string,
 	nodeName string,
-	strict bool,
 	p *v1.Project,
 	logger *zap.Logger,
 ) error {
@@ -66,22 +65,7 @@ func ensureVolumeData(
 	}
 
 	if outcome.Decision == restore.DecisionBlock {
-		if strict || !shadowFallbackAllowed(outcome.Reason) {
-			return &restore.PlacementBlockedError{Reason: outcome.Reason, Detail: outcome.Detail}
-		}
-		// Shadow mode reports the judgement and then does what the previous
-		// release would have done. It exists so an operator can see how the
-		// rule lands on real deployments before it starts refusing to place
-		// Projects — and it is at Warn precisely because the defect it
-		// replaces spent a week invisible at Debug.
-		log.Warn("Provenance check would block this placement (shadow mode)",
-			zap.String("reason", string(outcome.Reason)),
-			zap.String("detail", outcome.Detail),
-			zap.String("projectUID", want.ProjectUID),
-			zap.String("nodeName", want.NodeName),
-			zap.Int64("assignmentGeneration", want.AssignmentGeneration),
-			zap.Int("markerVersion", markerVersionOf(dataRoot, p)))
-		outcome = restore.Outcome{Decision: restore.DecisionSkip}
+		return &restore.PlacementBlockedError{Reason: outcome.Reason, Detail: outcome.Detail}
 	}
 
 	switch outcome.Decision {
@@ -99,34 +83,6 @@ func ensureVolumeData(
 	default:
 		return fmt.Errorf("agent: unhandled restore decision %v", outcome.Decision)
 	}
-}
-
-// shadowFallbackAllowed reports whether a block may be downgraded to the
-// pre-provenance behaviour while strict mode is off.
-//
-// Shadow mode exists to keep behaviour unchanged, and for most reasons that is
-// what it does: a marker naming another assignment, or one from an older
-// schema, used to be enough to skip the restore, so reporting and skipping is
-// exactly what the previous release did.
-//
-// A marker that cannot be read is the exception, because there the previous
-// release was already strict — ReadMarker returned an error and the placement
-// stopped. Downgrading it would make this change *weaken* an existing
-// protection under its own default, which is the one thing a compatibility
-// mode must never do.
-func shadowFallbackAllowed(reason restore.BlockReason) bool {
-	return reason != restore.BlockCorruptProvenance
-}
-
-// markerVersionOf reports the on-disk marker schema version for the shadow
-// log, or zero when there is none to read. Failures are not surfaced: this
-// only annotates a line whose decision has already been made.
-func markerVersionOf(dataRoot string, p *v1.Project) int {
-	m, err := restore.ReadMarker(dataRoot, p.Namespace, p.Name)
-	if err != nil || m == nil {
-		return 0
-	}
-	return m.Version
 }
 
 // runRestore resolves the newest generation and puts it on disk.

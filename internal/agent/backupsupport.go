@@ -122,10 +122,9 @@ func NewBackupSupport(
 
 	return &BackupSupport{
 		Supervisor:  backup.NewSupervisor(runner, logger),
-		Coordinator:      coordinator,
-		Restorer:         restorer,
-		DataRoot:         cfg.DataRoot,
-		NodeName:         cfg.NodeName,
-		StrictProvenance: cfg.StrictProvenance,
+		Coordinator: coordinator,
+		Restorer:    restorer,
+		DataRoot:    cfg.DataRoot,
+		NodeName:    cfg.NodeName,
 	}, nil
 }
