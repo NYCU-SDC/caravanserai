@@ -65,6 +65,10 @@ func TestDecide(t *testing.T) {
 		history  v1.AssignmentHistory
 		decision Decision
 		reason   BlockReason
+
+		// firstGen places the assignment at generation 1, which is what an
+		// Agent sees on a Project's very first placement.
+		firstGen bool
 	}{
 		{
 			name:     "leftover staging invalidates whatever is on disk",
@@ -134,10 +138,21 @@ func TestDecide(t *testing.T) {
 			reason:   BlockCorruptProvenance,
 		},
 		{
-			name:     "a Project that has never been placed starts empty",
+			// The realistic first-placement state: the server grants the first
+			// assignment and marks history Known in the same write, so this is
+			// what an Agent actually sees for a brand-new Project.
+			name:     "the first grant of ownership starts empty",
 			state:    PlacementState{},
-			history:  v1.AssignmentHistoryNeverAssigned,
+			history:  v1.AssignmentHistoryKnown,
 			decision: DecisionInitializeEmpty,
+			firstGen: true,
+		},
+		{
+			name:     "unprovable history never starts empty, even at generation 1",
+			state:    PlacementState{},
+			history:  v1.AssignmentHistoryUnknown,
+			decision: DecisionRestore,
+			firstGen: true,
 		},
 		{
 			name:     "a clean node for a Project that has run before restores",
@@ -155,7 +170,11 @@ func TestDecide(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Decide(tt.state, want, tt.history)
+			assignment := want
+			if tt.firstGen {
+				assignment.AssignmentGeneration = 1
+			}
+			got := Decide(tt.state, assignment, tt.history)
 			assert.Equal(t, tt.decision, got.Decision)
 			assert.Equal(t, tt.reason, got.Reason)
 			if tt.decision == DecisionBlock {
@@ -263,4 +282,28 @@ func TestDecideAllowsEmptyVolumesWhenNoGenerationWasRestored(t *testing.T) {
 	}, want, v1.AssignmentHistoryKnown)
 
 	assert.Equal(t, DecisionSkip, got.Decision)
+}
+
+// AssignmentHistory cannot be the signal for "first placement". The server
+// sets it to Known in the same write that grants the first assignment, so an
+// Agent never observes NeverAssigned for a Project it is being asked to place.
+// Deciding on it refused every new Project with a Managed volume — a
+// regression the unit tests missed because their fixtures hand-built a state
+// the system does not produce.
+func TestDecideStartsEmptyOnTheStateAnAgentActuallySees(t *testing.T) {
+	firstPlacement := Provenance{
+		Namespace: "default", Project: "blog",
+		ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 1,
+	}
+
+	got := Decide(PlacementState{}, firstPlacement, v1.AssignmentHistoryKnown)
+	assert.Equal(t, DecisionInitializeEmpty, got.Decision,
+		"a brand-new Project must be placeable")
+
+	// Second placement of the same Project: it ran somewhere, so its data is
+	// in the object store or nowhere.
+	later := firstPlacement
+	later.AssignmentGeneration = 2
+	got = Decide(PlacementState{}, later, v1.AssignmentHistoryKnown)
+	assert.Equal(t, DecisionRestore, got.Decision)
 }

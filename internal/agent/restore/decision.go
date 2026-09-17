@@ -167,9 +167,21 @@ type Outcome struct {
 //   - Data with no marker is the same class of problem arriving by a different
 //     route, and used to be adopted silently.
 //
-// history distinguishes the one case where having nothing is not a problem: a
-// Project that has provably never been assigned anywhere has no data to
-// recover, so starting empty is correct rather than a guess.
+// history and the generation in want distinguish the one case where having
+// nothing is not a problem: a Project being placed for the very first time has
+// never run anywhere, so it has no data to recover and starting empty is
+// correct rather than a guess.
+//
+// The generation is what says "first placement", not AssignmentHistory. The
+// server sets history to Known in the same write that grants the first
+// assignment, so by the time an Agent is ever asked to place a Project the
+// history already reads Known and NeverAssigned is not an observable state.
+// Deciding on it would refuse every new Project with a Managed volume.
+//
+// Generation 1 is the first grant of ownership that has ever existed for this
+// Project, so nothing can have run before it. Unknown history overrides that:
+// a row whose past could not be established is not one whose counter can be
+// trusted either.
 func Decide(state PlacementState, want Provenance, history v1.AssignmentHistory) Outcome {
 	switch {
 	case state.StagingPresent:
@@ -224,7 +236,7 @@ func Decide(state PlacementState, want Provenance, history v1.AssignmentHistory)
 			Detail:   "the volumes hold data that no provenance marker accounts for",
 		}
 
-	case history == v1.AssignmentHistoryNeverAssigned:
+	case firstPlacement(want, history):
 		return Outcome{Decision: DecisionInitializeEmpty}
 
 	default:
@@ -368,4 +380,21 @@ func plural(n int, one, many string) string {
 		return one
 	}
 	return many
+}
+
+// firstPlacement reports whether this is the first grant of ownership this
+// Project has ever held, and therefore whether "no data anywhere" is its
+// correct starting state rather than a fault.
+//
+// A same-name Project recreated after a delete also arrives at generation 1,
+// and a backup may still exist under that name from the lifetime before it.
+// Starting empty is right there too: the earlier lifetime's data belongs to a
+// different Project UID, and adopting it because the names match is the class
+// of mistake this package exists to prevent. Recovering it is a deliberate
+// cross-lifetime restore, named by the operator.
+func firstPlacement(want Provenance, history v1.AssignmentHistory) bool {
+	if history == v1.AssignmentHistoryUnknown {
+		return false
+	}
+	return want.AssignmentGeneration <= 1
 }

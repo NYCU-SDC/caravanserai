@@ -142,7 +142,7 @@ func TestBlockedPlacementConvergesOnceTheCauseIsCleared(t *testing.T) {
 
 	// The Project has never been assigned anywhere else, so with the stale
 	// bytes gone an empty start is now the correct answer.
-	fresh.Status.AssignmentHistory = v1.AssignmentHistoryNeverAssigned
+	fresh.Status.AssignmentGeneration = 1 // as if this were its first placement
 	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, fresh, zap.NewNop())
 
 	assert.Equal(t, 1, reconciles, "the next tick must place the Project without intervention")

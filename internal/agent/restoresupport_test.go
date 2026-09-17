@@ -163,14 +163,14 @@ func TestEnsureVolumeDataBlocksAnotherAssignmentsData(t *testing.T) {
 	assert.Contains(t, blocked.Detail, "assignmentGeneration")
 }
 
-func TestEnsureVolumeDataInitialisesEmptyOnlyForANeverAssignedProject(t *testing.T) {
-	// A Project that has provably never been placed anywhere has no data to
-	// recover, so starting empty is the correct state rather than a guess.
-	// AssignmentHistory is what proves it; "the object store has no pointer"
-	// does not, and that conflation is the defect below.
+func TestEnsureVolumeDataInitialisesEmptyOnlyOnTheFirstPlacement(t *testing.T) {
+	// A Project being placed for the first time has never run anywhere, so it
+	// has no data to recover and starting empty is correct rather than a
+	// guess. The first grant of ownership is what proves that; "the object
+	// store has no pointer" does not, and that conflation is the defect below.
 	restorer, coordinator, dataRoot := newSupport(t, missingStore{})
 	p := testProject(managedVolume("db-data"))
-	p.Status.AssignmentHistory = v1.AssignmentHistoryNeverAssigned
+	p.Status.AssignmentGeneration = 1 // an Agent only ever sees history Known
 
 	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 		p, zap.NewNop()))
@@ -186,7 +186,7 @@ func TestEnsureVolumeDataInitialisesEmptyOnlyForANeverAssignedProject(t *testing
 	assert.Equal(t, restore.MarkerVersion, marker.Version)
 	assert.Equal(t, "uid-1", marker.ProjectUID)
 	assert.Equal(t, testNode, marker.NodeName)
-	assert.EqualValues(t, 7, marker.AssignmentGeneration)
+	assert.EqualValues(t, 1, marker.AssignmentGeneration)
 	assert.Empty(t, marker.InitializedFromBackupID, "nothing was restored")
 }
 
@@ -203,7 +203,7 @@ func TestEnsureVolumeDataBlocksWhenAPlacedProjectHasNoBackup(t *testing.T) {
 	} {
 		t.Run(string(history), func(t *testing.T) {
 			restorer, coordinator, dataRoot := newSupport(t, missingStore{})
-			p := testProject(managedVolume("db-data"))
+			p := testProject(managedVolume("db-data")) // generation 7: placed before
 			p.Status.AssignmentHistory = history
 
 			err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
@@ -266,7 +266,7 @@ func TestEnsureVolumeDataReleasesClaimOnReturn(t *testing.T) {
 	t.Run("after a successful empty initialisation", func(t *testing.T) {
 		restorer, coordinator, dataRoot := newSupport(t, missingStore{})
 		p := testProject(managedVolume("db-data"))
-		p.Status.AssignmentHistory = v1.AssignmentHistoryNeverAssigned
+		p.Status.AssignmentGeneration = 1 // an Agent only ever sees history Known
 
 		require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
 			p, zap.NewNop()))
