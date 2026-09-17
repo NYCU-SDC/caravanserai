@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -96,9 +97,8 @@ type PlacementState struct {
 	// unreadable means it may have and we cannot tell.
 	MarkerErr error
 
-	// VolumesHaveData reports whether any Managed volume directory holds
-	// content.
-	VolumesHaveData bool
+	// Volumes is the per-volume state of the Project's Managed volumes.
+	Volumes VolumeSurvey
 }
 
 // Outcome is a decision and, when it is Block, why.
@@ -158,14 +158,21 @@ func Decide(state PlacementState, want Provenance, history v1.AssignmentHistory)
 		}
 
 	case state.Marker.Matches(want):
-		// Proven ours. One contradiction is still possible: the marker says it
-		// restored a generation, and the directories it describes are gone.
-		if state.Marker.InitializedFromBackupID != "" && !state.VolumesHaveData {
+		// Proven ours. One contradiction is still possible: the marker says a
+		// generation was restored here, and some of what that generation
+		// contained is gone.
+		//
+		// Every declared volume must be intact, not merely one of them. A
+		// Project with a healthy database volume and a deleted uploads volume
+		// would otherwise skip the restore and have uploads recreated empty
+		// under a service that believes its files are there.
+		if state.Marker.InitializedFromBackupID != "" && !state.Volumes.Complete() {
 			return Outcome{
 				Decision: DecisionBlock,
 				Reason:   BlockMissingData,
-				Detail: fmt.Sprintf("provenance records a restore from generation %q but the volumes are empty",
-					state.Marker.InitializedFromBackupID),
+				Detail: fmt.Sprintf("provenance records a restore from generation %q, but %s %s no data",
+					state.Marker.InitializedFromBackupID,
+					volumeList(state.Volumes.Empty), plural(len(state.Volumes.Empty), "holds", "hold")),
 			}
 		}
 		return Outcome{Decision: DecisionSkip}
@@ -185,7 +192,7 @@ func Decide(state PlacementState, want Provenance, history v1.AssignmentHistory)
 				strings.Join(state.Marker.Mismatches(want), "; ") + ")",
 		}
 
-	case state.VolumesHaveData:
+	case state.Volumes.AnyData():
 		return Outcome{
 			Decision: DecisionBlock,
 			Reason:   BlockUnprovenData,
@@ -225,14 +232,35 @@ func StagingPresent(dataRoot, namespace, project string) (bool, error) {
 	return true, nil
 }
 
-// VolumesHaveData reports whether any of the Project's Managed volume
-// directories currently holds content.
+// VolumeSurvey is the per-volume state of a Project's Managed volumes.
 //
-// A volume directory that exists but is empty does not count: the agent
-// provisions empty directories for Managed volumes (CARA-66), so mere
-// existence proves nothing about whether this node has ever served the
-// Project.
-func VolumesHaveData(dataRoot, namespace, project string, volumes []v1.VolumeDef) (bool, error) {
+// It is per-volume and not a single boolean because the two facts a decision
+// needs are about different volumes: "something here is worth protecting" is
+// true if any volume has content, while "the data this marker describes is
+// intact" is false if any single one is gone. Collapsing them let a Project
+// with one healthy volume and one deleted volume read as complete, skip the
+// restore, and have the missing one recreated empty underneath it.
+type VolumeSurvey struct {
+	// WithData names the Managed volumes that hold content.
+	WithData []string
+
+	// Empty names the Managed volumes whose directory is absent or holds
+	// nothing. The two are deliberately one category: a Managed volume
+	// directory is provisioned empty at create time (CARA-66), so its mere
+	// existence proves nothing about whether data was ever written.
+	Empty []string
+}
+
+// AnyData reports whether any Managed volume holds content.
+func (s VolumeSurvey) AnyData() bool { return len(s.WithData) > 0 }
+
+// Complete reports whether every declared Managed volume holds content.
+func (s VolumeSurvey) Complete() bool { return len(s.Empty) == 0 }
+
+// SurveyVolumes inspects every Managed volume the Project declares.
+func SurveyVolumes(dataRoot, namespace, project string, volumes []v1.VolumeDef) (VolumeSurvey, error) {
+	var survey VolumeSurvey
+
 	for _, vol := range volumes {
 		if vol.Type != v1.VolumeTypeManaged {
 			continue
@@ -240,21 +268,24 @@ func VolumesHaveData(dataRoot, namespace, project string, volumes []v1.VolumeDef
 
 		path, err := caravolume.HostPath(dataRoot, namespace, project, vol.Name)
 		if err != nil {
-			return false, err
+			return VolumeSurvey{}, err
 		}
 
 		entries, err := os.ReadDir(path)
 		if err != nil {
 			if os.IsNotExist(err) {
+				survey.Empty = append(survey.Empty, vol.Name)
 				continue
 			}
-			return false, fmt.Errorf("restore: inspect volume dir %q: %w", path, err)
+			return VolumeSurvey{}, fmt.Errorf("restore: inspect volume dir %q: %w", path, err)
 		}
-		if len(entries) > 0 {
-			return true, nil
+		if len(entries) == 0 {
+			survey.Empty = append(survey.Empty, vol.Name)
+			continue
 		}
+		survey.WithData = append(survey.WithData, vol.Name)
 	}
-	return false, nil
+	return survey, nil
 }
 
 // StagingDir returns where a restore stages downloaded archives before
@@ -288,4 +319,28 @@ type PlacementBlockedError struct {
 
 func (e *PlacementBlockedError) Error() string {
 	return fmt.Sprintf("restore: placement blocked (%s): %s", e.Reason, e.Detail)
+}
+
+// volumeList renders volume names for an operator-facing message. Names come
+// from the Project's own spec, so they are safe to publish; host paths are not
+// and never appear here.
+func volumeList(names []string) string {
+	switch len(names) {
+	case 0:
+		return "no volume"
+	case 1:
+		return "volume " + strconv.Quote(names[0])
+	}
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = strconv.Quote(n)
+	}
+	return "volumes " + strings.Join(quoted, ", ")
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }

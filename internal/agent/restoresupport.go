@@ -66,7 +66,7 @@ func ensureVolumeData(
 	}
 
 	if outcome.Decision == restore.DecisionBlock {
-		if strict {
+		if strict || !shadowFallbackAllowed(outcome.Reason) {
 			return &restore.PlacementBlockedError{Reason: outcome.Reason, Detail: outcome.Detail}
 		}
 		// Shadow mode reports the judgement and then does what the previous
@@ -99,6 +99,23 @@ func ensureVolumeData(
 	default:
 		return fmt.Errorf("agent: unhandled restore decision %v", outcome.Decision)
 	}
+}
+
+// shadowFallbackAllowed reports whether a block may be downgraded to the
+// pre-provenance behaviour while strict mode is off.
+//
+// Shadow mode exists to keep behaviour unchanged, and for most reasons that is
+// what it does: a marker naming another assignment, or one from an older
+// schema, used to be enough to skip the restore, so reporting and skipping is
+// exactly what the previous release did.
+//
+// A marker that cannot be read is the exception, because there the previous
+// release was already strict — ReadMarker returned an error and the placement
+// stopped. Downgrading it would make this change *weaken* an existing
+// protection under its own default, which is the one thing a compatibility
+// mode must never do.
+func shadowFallbackAllowed(reason restore.BlockReason) bool {
+	return reason != restore.BlockCorruptProvenance
 }
 
 // markerVersionOf reports the on-disk marker schema version for the shadow
@@ -154,7 +171,7 @@ func decideRestore(dataRoot string, want restore.Provenance, p *v1.Project) (res
 	// answer for, and that answer is to block rather than to fail the Project.
 	state.Marker, state.MarkerErr = restore.ReadMarker(dataRoot, p.Namespace, p.Name)
 
-	if state.VolumesHaveData, err = restore.VolumesHaveData(dataRoot, p.Namespace, p.Name, p.Spec.Volumes); err != nil {
+	if state.Volumes, err = restore.SurveyVolumes(dataRoot, p.Namespace, p.Name, p.Spec.Volumes); err != nil {
 		return restore.Outcome{}, err
 	}
 

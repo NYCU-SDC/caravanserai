@@ -266,3 +266,48 @@ func TestHasManagedVolume(t *testing.T) {
 		managedVolume("db-data"),
 	}))
 }
+
+// Shadow mode must not be weaker than what it replaces. Every other block
+// reason downgrades to what the previous release did, but an unreadable marker
+// already stopped the placement there — ReadMarker returned an error and
+// nothing started. Letting the compatibility default turn that into "start on
+// data of unknown origin" would make this change reduce an existing
+// protection under its own default.
+func TestEnsureVolumeDataCorruptMarkerBlocksEvenInShadowMode(t *testing.T) {
+	restorer, coordinator, dataRoot := newSupport(t, refusingStore{t})
+	p := testProject(managedVolume("db-data"))
+	writeLive(t, dataRoot, p, "db-data", "unknown origin")
+
+	path, err := restore.MarkerPath(dataRoot, p.Namespace, p.Name)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
+
+	for _, strict := range []bool{false, true} {
+		err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, strict,
+			p, zap.NewNop())
+
+		var blocked *restore.PlacementBlockedError
+		require.ErrorAs(t, err, &blocked, "strict=%v", strict)
+		assert.Equal(t, restore.BlockCorruptProvenance, blocked.Reason)
+	}
+}
+
+// The partial-loss case at the agent level: one volume healthy, one gone. The
+// marker matches this assignment, so the old single-boolean check said the
+// data was present and skipped the restore.
+func TestEnsureVolumeDataBlocksWhenOneVolumeIsMissing(t *testing.T) {
+	restorer, coordinator, dataRoot := newSupport(t, refusingStore{t})
+	p := testProject(managedVolume("db-data"), managedVolume("uploads"))
+	writeLive(t, dataRoot, p, "db-data", "still here")
+	// uploads is never created: the directory is gone.
+
+	require.NoError(t, restore.WriteMarker(dataRoot, currentProvenance(p, "20260801T000000Z"), nowUTC()))
+
+	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+		p, zap.NewNop())
+
+	var blocked *restore.PlacementBlockedError
+	require.ErrorAs(t, err, &blocked)
+	assert.Equal(t, restore.BlockMissingData, blocked.Reason)
+	assert.Contains(t, blocked.Detail, "uploads")
+}

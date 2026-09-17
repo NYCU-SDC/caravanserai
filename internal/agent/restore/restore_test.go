@@ -335,7 +335,7 @@ func TestRestoreGenerationKeepsStagingAfterFailure(t *testing.T) {
 	assert.True(t, present, "a failed restore must leave the signal in place")
 
 	// And that signal must drive the next decision back to Restore.
-	assert.Equal(t, DecisionRestore, Decide(PlacementState{StagingPresent: present, VolumesHaveData: true}, Provenance{}, v1.AssignmentHistoryKnown).Decision)
+	assert.Equal(t, DecisionRestore, Decide(PlacementState{StagingPresent: present, Volumes: VolumeSurvey{WithData: []string{"db-data"}}}, Provenance{}, v1.AssignmentHistoryKnown).Decision)
 }
 
 // ── InitializeEmpty ──────────────────────────────────────────────────────────

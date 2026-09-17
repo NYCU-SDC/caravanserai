@@ -68,67 +68,67 @@ func TestDecide(t *testing.T) {
 	}{
 		{
 			name:     "leftover staging invalidates whatever is on disk",
-			state:    PlacementState{StagingPresent: true, Marker: mine("gen-1"), VolumesHaveData: true},
+			state:    PlacementState{StagingPresent: true, Marker: mine("gen-1"), Volumes: VolumeSurvey{WithData: []string{"db-data"}}},
 			history:  v1.AssignmentHistoryKnown,
 			decision: DecisionRestore,
 		},
 		{
 			name:     "provenance for this exact assignment reuses local data",
-			state:    PlacementState{Marker: mine("gen-1"), VolumesHaveData: true},
+			state:    PlacementState{Marker: mine("gen-1"), Volumes: VolumeSurvey{WithData: []string{"db-data"}}},
 			history:  v1.AssignmentHistoryKnown,
 			decision: DecisionSkip,
 		},
 		{
 			name:     "initialised empty with nothing written yet is still ours",
-			state:    PlacementState{Marker: mine(""), VolumesHaveData: false},
+			state:    PlacementState{Marker: mine(""), Volumes: VolumeSurvey{Empty: []string{"db-data"}}},
 			history:  v1.AssignmentHistoryKnown,
 			decision: DecisionSkip,
 		},
 		{
 			name:     "restored from a generation but the volumes are gone",
-			state:    PlacementState{Marker: mine("gen-1"), VolumesHaveData: false},
+			state:    PlacementState{Marker: mine("gen-1"), Volumes: VolumeSurvey{Empty: []string{"db-data"}}},
 			history:  v1.AssignmentHistoryKnown,
 			decision: DecisionBlock,
 			reason:   BlockMissingData,
 		},
 		{
 			name:     "an earlier generation on this node predates a move away",
-			state:    PlacementState{Marker: otherGeneration(), VolumesHaveData: true},
+			state:    PlacementState{Marker: otherGeneration(), Volumes: VolumeSurvey{WithData: []string{"db-data"}}},
 			history:  v1.AssignmentHistoryKnown,
 			decision: DecisionBlock,
 			reason:   BlockForeignProvenance,
 		},
 		{
 			name:     "another lifetime of the same name",
-			state:    PlacementState{Marker: otherLifetime(), VolumesHaveData: true},
+			state:    PlacementState{Marker: otherLifetime(), Volumes: VolumeSurvey{WithData: []string{"db-data"}}},
 			history:  v1.AssignmentHistoryKnown,
 			decision: DecisionBlock,
 			reason:   BlockForeignProvenance,
 		},
 		{
 			name:     "a copy that names another node",
-			state:    PlacementState{Marker: otherNode(), VolumesHaveData: true},
+			state:    PlacementState{Marker: otherNode(), Volumes: VolumeSurvey{WithData: []string{"db-data"}}},
 			history:  v1.AssignmentHistoryKnown,
 			decision: DecisionBlock,
 			reason:   BlockForeignProvenance,
 		},
 		{
 			name:     "a marker from before provenance existed",
-			state:    PlacementState{Marker: legacy(), VolumesHaveData: true},
+			state:    PlacementState{Marker: legacy(), Volumes: VolumeSurvey{WithData: []string{"db-data"}}},
 			history:  v1.AssignmentHistoryKnown,
 			decision: DecisionBlock,
 			reason:   BlockLegacyProvenance,
 		},
 		{
 			name:     "data nothing accounts for is not adopted",
-			state:    PlacementState{VolumesHaveData: true},
+			state:    PlacementState{Volumes: VolumeSurvey{WithData: []string{"db-data"}}},
 			history:  v1.AssignmentHistoryKnown,
 			decision: DecisionBlock,
 			reason:   BlockUnprovenData,
 		},
 		{
 			name:     "an unreadable marker is not an absent one",
-			state:    PlacementState{MarkerErr: errors.New("invalid character"), VolumesHaveData: true},
+			state:    PlacementState{MarkerErr: errors.New("invalid character"), Volumes: VolumeSurvey{WithData: []string{"db-data"}}},
 			history:  v1.AssignmentHistoryKnown,
 			decision: DecisionBlock,
 			reason:   BlockCorruptProvenance,
@@ -185,10 +185,14 @@ func TestDecideNeverSkipsOnForeignProvenance(t *testing.T) {
 
 	for _, f := range foreign {
 		t.Run(f.name, func(t *testing.T) {
-			for _, hasData := range []bool{true, false} {
-				got := Decide(PlacementState{Marker: f.marker, VolumesHaveData: hasData}, want,
+			surveys := map[string]VolumeSurvey{
+				"with data": {WithData: []string{"db-data"}},
+				"empty":     {Empty: []string{"db-data"}},
+			}
+			for name, survey := range surveys {
+				got := Decide(PlacementState{Marker: f.marker, Volumes: survey}, want,
 					v1.AssignmentHistoryKnown)
-				require.Equal(t, DecisionBlock, got.Decision, "volumesHaveData=%v", hasData)
+				require.Equal(t, DecisionBlock, got.Decision, "volumes %s", name)
 			}
 		})
 	}
@@ -201,7 +205,7 @@ func TestBlockDetailNamesIdentityNotPaths(t *testing.T) {
 	other := want
 	other.NodeName = "node-b"
 
-	got := Decide(PlacementState{Marker: markerFor(other), VolumesHaveData: true}, want,
+	got := Decide(PlacementState{Marker: markerFor(other), Volumes: VolumeSurvey{WithData: []string{"db-data"}}}, want,
 		v1.AssignmentHistoryKnown)
 
 	require.Equal(t, DecisionBlock, got.Decision)
@@ -211,3 +215,52 @@ func TestBlockDetailNamesIdentityNotPaths(t *testing.T) {
 }
 
 const dataDirForTest = "/volumes/"
+
+// A Project with several Managed volumes is complete or it is not. One healthy
+// volume used to be enough to answer "does this Project have its data", so a
+// Project whose uploads directory had been deleted skipped the restore and had
+// it recreated empty under a service that believed the files were there.
+func TestDecideBlocksWhenOnlySomeVolumesSurvive(t *testing.T) {
+	want := currentAssignment()
+	restored := want
+	restored.BackupID = "gen-1"
+
+	got := Decide(PlacementState{
+		Marker:  markerFor(restored),
+		Volumes: VolumeSurvey{WithData: []string{"db-data"}, Empty: []string{"uploads"}},
+	}, want, v1.AssignmentHistoryKnown)
+
+	require.Equal(t, DecisionBlock, got.Decision)
+	assert.Equal(t, BlockMissingData, got.Reason)
+	assert.Contains(t, got.Detail, "uploads", "the operator has to be told which volume is gone")
+	assert.NotContains(t, got.Detail, "db-data", "naming the healthy volume would mislead")
+}
+
+// The mirror of the case above: every volume intact is the ordinary path and
+// must stay cheap.
+func TestDecideSkipsWhenEveryVolumeSurvives(t *testing.T) {
+	want := currentAssignment()
+	restored := want
+	restored.BackupID = "gen-1"
+
+	got := Decide(PlacementState{
+		Marker:  markerFor(restored),
+		Volumes: VolumeSurvey{WithData: []string{"db-data", "uploads"}},
+	}, want, v1.AssignmentHistoryKnown)
+
+	assert.Equal(t, DecisionSkip, got.Decision)
+}
+
+// A Project initialised empty legitimately has empty volumes, so emptiness
+// alone is not a contradiction — only emptiness against a marker that claims a
+// generation was restored.
+func TestDecideAllowsEmptyVolumesWhenNoGenerationWasRestored(t *testing.T) {
+	want := currentAssignment()
+
+	got := Decide(PlacementState{
+		Marker:  markerFor(want), // BackupID empty: initialised, never restored
+		Volumes: VolumeSurvey{Empty: []string{"db-data", "uploads"}},
+	}, want, v1.AssignmentHistoryKnown)
+
+	assert.Equal(t, DecisionSkip, got.Decision)
+}
