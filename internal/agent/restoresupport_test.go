@@ -233,29 +233,30 @@ func TestEnsureVolumeDataReleasesClaimOnReturn(t *testing.T) {
 	assert.False(t, coordinator.IsBusy(backup.ResourceKey{Namespace: p.Namespace, Name: p.Name}))
 }
 
-func TestEnsureVolumeDataRestoresWhenStagingSurvives(t *testing.T) {
-	// Staging left on disk means the previous restore died mid-flight, so the
-	// volumes may be split across generations. That must restore even though
-	// data is present and a marker says this node owns it.
-	restorer, coordinator, dataRoot := newSupport(t, missingStore{})
+func TestStagingOutranksAMatchingMarkerByPolicy(t *testing.T) {
+	// Leftover staging beats a marker that names this exact assignment. That
+	// is a deliberate fail-closed choice, not a claim that staging proves the
+	// restore was interrupted — the swap may have completed and only the
+	// cleanup failed, in which case restoring again costs recent writes.
+	//
+	// It is preferred anyway because the case it guards is the one no marker
+	// can warn about: a swap that failed and whose rollback also failed leaves
+	// volumes split across two generations, with the *previous* marker still
+	// on disk reading as authoritative. Serving that is worse than redoing a
+	// restore.
+	_, _, dataRoot := newSupport(t, refusingStore{t})
 	p := testProject(managedVolume("db-data"))
-
+	writeLive(t, dataRoot, p, "db-data", "looks complete")
 	require.NoError(t, restore.WriteMarker(dataRoot, currentProvenance(p, "20260801T000000Z"), nowUTC()))
+
 	staging, err := restore.StagingDir(dataRoot, p.Namespace, p.Name)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(staging, 0o700))
 
-	// missingStore makes the restore resolve to "never backed up", which the
-	// caller treats as an empty start; the point here is only that the marker
-	// did not short-circuit it. The rewritten marker is the evidence — a Skip
-	// would have left the original generation ID in place.
-	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
-		p, zap.NewNop()))
-
-	marker, err := restore.ReadMarker(dataRoot, p.Namespace, p.Name)
+	outcome, err := decideRestore(dataRoot, currentProvenance(p, ""), p)
 	require.NoError(t, err)
-	require.NotNil(t, marker)
-	assert.Empty(t, marker.InitializedFromBackupID, "staging must defeat the marker and re-establish the data")
+	assert.Equal(t, restore.DecisionRestore, outcome.Decision,
+		"a matching marker must not short-circuit leftover staging")
 }
 
 func TestHasManagedVolume(t *testing.T) {

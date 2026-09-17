@@ -117,12 +117,30 @@ type Outcome struct {
 //
 // The ordering is deliberate and is the core safety property of this package:
 //
-//   - Leftover staging means the previous restore died before its cleanup ran,
-//     so it may have swapped some volumes and not others. Nothing on disk can
-//     be trusted to represent a whole generation. Restore again. This mirrors
-//     how backup.CleanStaging treats surviving staging as proof of a dead
-//     process; the difference is that backup only reclaims the space, whereas
-//     here the same signal also invalidates what is on disk.
+//   - Leftover staging wins over everything, including a marker that names
+//     this exact assignment. This is a deliberate fail-closed policy, not a
+//     claim that staging proves the restore was interrupted. Staging survives
+//     three different endings, and on disk they are indistinguishable:
+//
+//     1. The swap completed, the marker was written, and only the cleanup
+//     failed. Restoring again costs whatever the containers wrote since.
+//     2. The swap failed and rolled back cleanly. The previous marker still
+//     describes the data accurately; restoring again is merely redundant.
+//     3. The swap failed and the rollback failed too. The volumes are split
+//     across two generations and no marker describes them.
+//
+//     Only the third is dangerous, and it is the one a marker cannot warn
+//     about — swapAll writes no marker when it fails, so the marker left on
+//     disk is the previous one and it reads as authoritative. Preferring the
+//     marker would serve mixed data in that case. Preferring staging costs a
+//     redundant restore in the first two. Between losing recent writes and
+//     serving a Project data from two different points in time, this package
+//     takes the first.
+//
+//     Making the three distinguishable means giving restore staging a
+//     per-generation identity, so "staging for the generation the marker
+//     names" can be told from "staging for a generation that never landed".
+//     Until that exists, the ambiguity is resolved by refusing to guess.
 //
 //   - An unreadable marker is not an absent one. Absent means this node never
 //     established data; unreadable means it may have and we cannot tell, and
