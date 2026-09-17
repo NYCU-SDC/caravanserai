@@ -187,11 +187,14 @@ func TestEnsureVolumeDataShadowModeReportsButDoesNotBlock(t *testing.T) {
 	assert.EqualValues(t, 7, fields["assignmentGeneration"])
 }
 
-func TestEnsureVolumeDataInitialisesEmptyWhenNeverBackedUp(t *testing.T) {
-	// No generation has ever been written, so there is none to be missing and
-	// starting empty is the correct state — not data loss.
+func TestEnsureVolumeDataInitialisesEmptyOnlyForANeverAssignedProject(t *testing.T) {
+	// A Project that has provably never been placed anywhere has no data to
+	// recover, so starting empty is the correct state rather than a guess.
+	// AssignmentHistory is what proves it; "the object store has no pointer"
+	// does not, and that conflation is the defect below.
 	restorer, coordinator, dataRoot := newSupport(t, missingStore{})
 	p := testProject(managedVolume("db-data"))
+	p.Status.AssignmentHistory = v1.AssignmentHistoryNeverAssigned
 
 	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
 		p, zap.NewNop()))
@@ -203,7 +206,64 @@ func TestEnsureVolumeDataInitialisesEmptyWhenNeverBackedUp(t *testing.T) {
 
 	marker, err := restore.ReadMarker(dataRoot, p.Namespace, p.Name)
 	require.NoError(t, err)
-	assert.NotNil(t, marker, "an empty start is still this node establishing its data")
+	require.NotNil(t, marker, "an empty start is still this node establishing its data")
+	assert.Equal(t, restore.MarkerVersion, marker.Version)
+	assert.Equal(t, "uid-1", marker.ProjectUID)
+	assert.Equal(t, testNode, marker.NodeName)
+	assert.EqualValues(t, 7, marker.AssignmentGeneration)
+	assert.Empty(t, marker.InitializedFromBackupID, "nothing was restored")
+}
+
+// The defect: a missing latest.json used to mean "never backed up", and the
+// response was to start empty. For a Project that has been placed before, the
+// same signal means a bucket typo, an object-store outage, or a backup that
+// never completed — and starting empty turns any of those into a successful
+// deployment whose emptiness the Backup Supervisor then archives over the
+// generation that held the real data.
+func TestEnsureVolumeDataBlocksWhenAPlacedProjectHasNoBackup(t *testing.T) {
+	for _, history := range []v1.AssignmentHistory{
+		v1.AssignmentHistoryKnown,
+		v1.AssignmentHistoryUnknown,
+	} {
+		t.Run(string(history), func(t *testing.T) {
+			restorer, coordinator, dataRoot := newSupport(t, missingStore{})
+			p := testProject(managedVolume("db-data"))
+			p.Status.AssignmentHistory = history
+
+			err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+				p, zap.NewNop())
+
+			var blocked *restore.PlacementBlockedError
+			require.ErrorAs(t, err, &blocked)
+			assert.Equal(t, restore.BlockNoRestoreSource, blocked.Reason)
+
+			live := filepath.Join(dataRoot, "volumes", p.Namespace, p.Name, "db-data", "data")
+			_, statErr := os.Stat(live)
+			assert.True(t, os.IsNotExist(statErr),
+				"a block must not leave a directory a container could mount as success")
+
+			marker, err := restore.ReadMarker(dataRoot, p.Namespace, p.Name)
+			require.NoError(t, err)
+			assert.Nil(t, marker, "nothing was established, so nothing is claimed")
+		})
+	}
+}
+
+// Every refusal reaches an operator through Project status, so the message may
+// name what the Project's own spec names and must not publish this node's
+// filesystem layout.
+func TestPlacementBlockDetailsNameNoHostPaths(t *testing.T) {
+	restorer, coordinator, dataRoot := newSupport(t, missingStore{})
+	p := testProject(managedVolume("db-data"))
+	writeLive(t, dataRoot, p, "db-data", "unproven")
+
+	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+		p, zap.NewNop())
+
+	var blocked *restore.PlacementBlockedError
+	require.ErrorAs(t, err, &blocked)
+	assert.NotContains(t, blocked.Detail, dataRoot)
+	assert.NotContains(t, blocked.Detail, "/volumes/")
 }
 
 func TestEnsureVolumeDataDefersWhenProjectIsBusy(t *testing.T) {
@@ -223,14 +283,30 @@ func TestEnsureVolumeDataDefersWhenProjectIsBusy(t *testing.T) {
 
 func TestEnsureVolumeDataReleasesClaimOnReturn(t *testing.T) {
 	// The claim must not outlive the call, or the poll loop would skip this
-	// Project forever.
-	restorer, coordinator, dataRoot := newSupport(t, missingStore{})
-	p := testProject(managedVolume("db-data"))
+	// Project forever. A refusal is the path that matters: it returns early,
+	// and an early return is where a defer is easiest to lose.
+	key := backup.ResourceKey{Namespace: "default", Name: "blog"}
 
-	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
-		p, zap.NewNop()))
+	t.Run("after a successful empty initialisation", func(t *testing.T) {
+		restorer, coordinator, dataRoot := newSupport(t, missingStore{})
+		p := testProject(managedVolume("db-data"))
+		p.Status.AssignmentHistory = v1.AssignmentHistoryNeverAssigned
 
-	assert.False(t, coordinator.IsBusy(backup.ResourceKey{Namespace: p.Namespace, Name: p.Name}))
+		require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+			p, zap.NewNop()))
+
+		assert.False(t, coordinator.IsBusy(key))
+	})
+
+	t.Run("after a refusal", func(t *testing.T) {
+		restorer, coordinator, dataRoot := newSupport(t, missingStore{})
+		p := testProject(managedVolume("db-data"))
+
+		require.Error(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, true,
+			p, zap.NewNop()))
+
+		assert.False(t, coordinator.IsBusy(key))
+	})
 }
 
 func TestStagingOutranksAMatchingMarkerByPolicy(t *testing.T) {

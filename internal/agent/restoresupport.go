@@ -129,9 +129,12 @@ func markerVersionOf(dataRoot string, p *v1.Project) int {
 	return m.Version
 }
 
-// runRestore resolves the newest generation and puts it on disk, treating
-// "never backed up" as a normal starting state and every other failure as
-// grounds to keep the Project down.
+// runRestore resolves the newest generation and puts it on disk.
+//
+// It is reached only when Decide has established that this node has no local
+// data it may use, so every way of failing to produce a generation here leaves
+// the Project with nothing — and none of them may be answered by creating
+// empty directories and calling that a successful start.
 func runRestore(ctx context.Context, restorer *restore.Restorer, p *v1.Project, log *zap.Logger) error {
 	backupID, err := restorer.ResolveLatest(ctx, p.Namespace, p.Name)
 	switch {
@@ -140,16 +143,22 @@ func runRestore(ctx context.Context, restorer *restore.Restorer, p *v1.Project, 
 		return restorer.RestoreGeneration(ctx, p, backupID)
 
 	case errors.Is(err, restore.ErrNeverBackedUp):
-		// Nothing has ever been backed up under this name, so there is no
-		// generation to be missing. Starting with empty volumes is correct.
+		// "No latest.json" used to be read as "this Project has never held
+		// data", and the response was to start empty. That inference only
+		// holds for a Project that has never been placed anywhere, and Decide
+		// has already handled that case by returning DecisionInitializeEmpty
+		// before anything reached the object store.
 		//
-		// Note this is emphatically not the same as a generation that has gone
-		// missing (restore.ErrGenerationMissing), which falls through to the
-		// default branch and keeps the Project down — backups demonstrably
-		// exist there, and starting empty would present real data loss as a
-		// successful start.
-		log.Info("No backup generation exists; initialising empty volumes")
-		return restorer.InitializeEmpty(p)
+		// Arriving here means the opposite: this Project has been placed
+		// before, or a restore was already in flight. A missing pointer is
+		// then a fault — a bucket typo, an object-store outage, a backup that
+		// never actually completed — and starting empty would present it as a
+		// successful deployment, then let the Backup Supervisor archive the
+		// empty result over the generation that held the real data.
+		return &restore.PlacementBlockedError{
+			Reason: restore.BlockNoRestoreSource,
+			Detail: "this Project has been placed before, but the object store holds no complete backup to restore from",
+		}
 
 	default:
 		return err

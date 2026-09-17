@@ -73,12 +73,15 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	assert.Equal(t, "row-1\nrow-2\n", readVolumeFile(t, h.dataRoot, "e2e-roundtrip", "db-data", "rows.txt"))
 	assert.Equal(t, "\x00\x01\x02binary\xff", readVolumeFile(t, h.dataRoot, "e2e-roundtrip", "uploads", "photo.bin"))
 
-	// The marker names the generation, which is what makes the next startup
-	// skip instead of restoring over live writes.
+	// The marker names the generation and the assignment that restored it,
+	// which is what makes the next startup on this Node skip instead of
+	// restoring over live writes — and what stops a different assignment from
+	// reading the same directory as its own.
 	marker, err := restore.ReadMarker(h.dataRoot, "default", "e2e-roundtrip")
 	require.NoError(t, err)
 	require.NotNil(t, marker)
-	assert.Equal(t, backupID, marker.BackupID)
+	assert.Equal(t, backupID, marker.InitializedFromBackupID)
+	assert.Equal(t, restore.MarkerVersion, marker.Version)
 
 	// Staging is removed only on success, so its absence is the signal that
 	// this restore completed.

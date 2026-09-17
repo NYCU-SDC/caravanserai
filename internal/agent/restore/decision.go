@@ -78,6 +78,13 @@ const (
 	// BlockCorruptProvenance means the marker exists but could not be read.
 	BlockCorruptProvenance BlockReason = "CorruptProvenance"
 
+	// BlockNoRestoreSource means the Project has been placed before but the
+	// object store holds no complete generation to restore from. It is not
+	// the same as a new Project with no backups: that one has nothing to lose
+	// and starts empty. This one had data somewhere, and where it went is a
+	// question the agent cannot answer.
+	BlockNoRestoreSource BlockReason = "NoRestoreSource"
+
 	// BlockMissingData means the marker claims data restored from a
 	// generation while the volume directories are absent or empty. The two
 	// statements cannot both be true, so neither is trusted.
