@@ -1,9 +1,9 @@
 package restore
 
 import (
-	"os"
-	"path/filepath"
+	"errors"
 	"testing"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 
@@ -11,172 +11,203 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func currentAssignment() Provenance {
+	return Provenance{
+		Namespace: "default", Project: "blog",
+		ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 7,
+	}
+}
+
+// markerFor builds an on-disk marker for an assignment, as WriteMarker would.
+func markerFor(prov Provenance) *Marker {
+	return &Marker{
+		Version:                 MarkerVersion,
+		Namespace:               prov.Namespace,
+		Project:                 prov.Project,
+		ProjectUID:              prov.ProjectUID,
+		NodeName:                prov.NodeName,
+		AssignmentGeneration:    prov.AssignmentGeneration,
+		InitializedFromBackupID: prov.BackupID,
+		EstablishedAt:           time.Now().UTC(),
+	}
+}
+
 func TestDecide(t *testing.T) {
+	want := currentAssignment()
+
+	mine := func(backupID string) *Marker {
+		p := want
+		p.BackupID = backupID
+		return markerFor(p)
+	}
+	otherGeneration := func() *Marker {
+		p := want
+		p.AssignmentGeneration = 5
+		return markerFor(p)
+	}
+	otherLifetime := func() *Marker {
+		p := want
+		p.ProjectUID = "uid-0"
+		return markerFor(p)
+	}
+	otherNode := func() *Marker {
+		p := want
+		p.NodeName = "node-b"
+		return markerFor(p)
+	}
+	legacy := func() *Marker {
+		return &Marker{Version: 1, Namespace: "default", Project: "blog"}
+	}
+
 	tests := []struct {
-		name            string
-		stagingPresent  bool
-		markerPresent   bool
-		volumesHaveData bool
-		want            Decision
-		why             string
+		name     string
+		state    PlacementState
+		history  v1.AssignmentHistory
+		decision Decision
+		reason   BlockReason
 	}{
 		{
-			name:            "no marker and no data is a fresh placement",
-			volumesHaveData: false,
-			want:            DecisionRestore,
-			why:             "nothing local to lose, so restoring is safe",
+			name:     "leftover staging invalidates whatever is on disk",
+			state:    PlacementState{StagingPresent: true, Marker: mine("gen-1"), VolumesHaveData: true},
+			history:  v1.AssignmentHistoryKnown,
+			decision: DecisionRestore,
 		},
 		{
-			name:            "marker present means this node already served the project",
-			markerPresent:   true,
-			volumesHaveData: true,
-			want:            DecisionSkip,
-			why:             "local volumes may have moved ahead of the newest generation",
+			name:     "provenance for this exact assignment reuses local data",
+			state:    PlacementState{Marker: mine("gen-1"), VolumesHaveData: true},
+			history:  v1.AssignmentHistoryKnown,
+			decision: DecisionSkip,
 		},
 		{
-			name:            "marker present with empty volumes still skips",
-			markerPresent:   true,
-			volumesHaveData: false,
-			want:            DecisionSkip,
-			why: "a legitimately empty volume must not be repopulated from an older " +
-				"generation — that would undo a deliberate deletion",
+			name:     "initialised empty with nothing written yet is still ours",
+			state:    PlacementState{Marker: mine(""), VolumesHaveData: false},
+			history:  v1.AssignmentHistoryKnown,
+			decision: DecisionSkip,
 		},
 		{
-			name:            "data without a marker is adopted, never overwritten",
-			markerPresent:   false,
-			volumesHaveData: true,
-			want:            DecisionAdoptExisting,
-			why: "a project born on this node, or one predating markers, has live " +
-				"data that a restore would destroy",
+			name:     "restored from a generation but the volumes are gone",
+			state:    PlacementState{Marker: mine("gen-1"), VolumesHaveData: false},
+			history:  v1.AssignmentHistoryKnown,
+			decision: DecisionBlock,
+			reason:   BlockMissingData,
 		},
 		{
-			name:            "leftover staging outranks a marker",
-			stagingPresent:  true,
-			markerPresent:   true,
-			volumesHaveData: true,
-			want:            DecisionRestore,
-			why: "the previous restore died mid-swap, so the marker and the volumes " +
-				"may describe different generations",
+			name:     "an earlier generation on this node predates a move away",
+			state:    PlacementState{Marker: otherGeneration(), VolumesHaveData: true},
+			history:  v1.AssignmentHistoryKnown,
+			decision: DecisionBlock,
+			reason:   BlockForeignProvenance,
 		},
 		{
-			name:            "leftover staging outranks existing data",
-			stagingPresent:  true,
-			markerPresent:   false,
-			volumesHaveData: true,
-			want:            DecisionRestore,
-			why: "adopting here would freeze a half-swapped volume set and bless it " +
-				"with a marker",
+			name:     "another lifetime of the same name",
+			state:    PlacementState{Marker: otherLifetime(), VolumesHaveData: true},
+			history:  v1.AssignmentHistoryKnown,
+			decision: DecisionBlock,
+			reason:   BlockForeignProvenance,
+		},
+		{
+			name:     "a copy that names another node",
+			state:    PlacementState{Marker: otherNode(), VolumesHaveData: true},
+			history:  v1.AssignmentHistoryKnown,
+			decision: DecisionBlock,
+			reason:   BlockForeignProvenance,
+		},
+		{
+			name:     "a marker from before provenance existed",
+			state:    PlacementState{Marker: legacy(), VolumesHaveData: true},
+			history:  v1.AssignmentHistoryKnown,
+			decision: DecisionBlock,
+			reason:   BlockLegacyProvenance,
+		},
+		{
+			name:     "data nothing accounts for is not adopted",
+			state:    PlacementState{VolumesHaveData: true},
+			history:  v1.AssignmentHistoryKnown,
+			decision: DecisionBlock,
+			reason:   BlockUnprovenData,
+		},
+		{
+			name:     "an unreadable marker is not an absent one",
+			state:    PlacementState{MarkerErr: errors.New("invalid character"), VolumesHaveData: true},
+			history:  v1.AssignmentHistoryKnown,
+			decision: DecisionBlock,
+			reason:   BlockCorruptProvenance,
+		},
+		{
+			name:     "a Project that has never been placed starts empty",
+			state:    PlacementState{},
+			history:  v1.AssignmentHistoryNeverAssigned,
+			decision: DecisionInitializeEmpty,
+		},
+		{
+			name:     "a clean node for a Project that has run before restores",
+			state:    PlacementState{},
+			history:  v1.AssignmentHistoryKnown,
+			decision: DecisionRestore,
+		},
+		{
+			name:     "unknown history on a clean node restores rather than starting empty",
+			state:    PlacementState{},
+			history:  v1.AssignmentHistoryUnknown,
+			decision: DecisionRestore,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Decide(tt.stagingPresent, tt.markerPresent, tt.volumesHaveData)
-			assert.Equal(t, tt.want, got, tt.why)
+			got := Decide(tt.state, want, tt.history)
+			assert.Equal(t, tt.decision, got.Decision)
+			assert.Equal(t, tt.reason, got.Reason)
+			if tt.decision == DecisionBlock {
+				assert.NotEmpty(t, got.Detail, "a block must say why")
+			}
 		})
 	}
 }
 
-func TestDecideStagingAlwaysForcesRestore(t *testing.T) {
-	// Whatever else is on disk, an interrupted restore must never be adopted:
-	// its volumes may be split across generations.
-	for _, marker := range []bool{true, false} {
-		for _, data := range []bool{true, false} {
-			assert.Equal(t, DecisionRestore, Decide(true, marker, data),
-				"staging=true marker=%v data=%v must restore", marker, data)
-		}
+// The defect this package was changed for: a directory left behind by an
+// earlier assignment used to be proof enough to skip the restore, so the
+// Project started on data that belonged to a Node it had since moved away
+// from. Whatever else changes, this must never resolve to Skip again.
+func TestDecideNeverSkipsOnForeignProvenance(t *testing.T) {
+	want := currentAssignment()
+
+	foreign := []struct {
+		name   string
+		marker *Marker
+	}{
+		{"earlier generation", func() *Marker { p := want; p.AssignmentGeneration = 6; return markerFor(p) }()},
+		{"later generation", func() *Marker { p := want; p.AssignmentGeneration = 8; return markerFor(p) }()},
+		{"another lifetime", func() *Marker { p := want; p.ProjectUID = "uid-0"; return markerFor(p) }()},
+		{"another node", func() *Marker { p := want; p.NodeName = "node-z"; return markerFor(p) }()},
+		{"legacy schema", &Marker{Version: 1}},
+	}
+
+	for _, f := range foreign {
+		t.Run(f.name, func(t *testing.T) {
+			for _, hasData := range []bool{true, false} {
+				got := Decide(PlacementState{Marker: f.marker, VolumesHaveData: hasData}, want,
+					v1.AssignmentHistoryKnown)
+				require.Equal(t, DecisionBlock, got.Decision, "volumesHaveData=%v", hasData)
+			}
+		})
 	}
 }
 
-func TestDecideNeverRestoresOverLocalData(t *testing.T) {
-	// The single property this package exists to guarantee: if there is any
-	// local data, no combination of inputs may produce a restore.
-	for _, markerPresent := range []bool{true, false} {
-		assert.NotEqual(t, DecisionRestore, Decide(false, markerPresent, true),
-			"markerPresent=%v with data on disk must never restore", markerPresent)
-	}
+// Detail reaches an operator through Project status, so it may name the
+// Project's own identity and must not leak this node's filesystem layout.
+func TestBlockDetailNamesIdentityNotPaths(t *testing.T) {
+	want := currentAssignment()
+	other := want
+	other.NodeName = "node-b"
+
+	got := Decide(PlacementState{Marker: markerFor(other), VolumesHaveData: true}, want,
+		v1.AssignmentHistoryKnown)
+
+	require.Equal(t, DecisionBlock, got.Decision)
+	assert.Contains(t, got.Detail, "node-b")
+	assert.NotContains(t, got.Detail, "/var/lib")
+	assert.NotContains(t, got.Detail, dataDirForTest)
 }
 
-func TestDecisionString(t *testing.T) {
-	assert.Equal(t, "Restore", DecisionRestore.String())
-	assert.Equal(t, "Skip", DecisionSkip.String())
-	assert.Equal(t, "AdoptExisting", DecisionAdoptExisting.String())
-}
-
-// writeVolumeFile creates a Managed volume's data directory and optionally
-// puts a file in it.
-func writeVolumeFile(t *testing.T, dataRoot, namespace, project, volume string, withContent bool) {
-	t.Helper()
-	dir := filepath.Join(dataRoot, "volumes", namespace, project, volume, "data")
-	require.NoError(t, os.MkdirAll(dir, 0o700))
-	if withContent {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "content.txt"), []byte("x"), 0o600))
-	}
-}
-
-func TestVolumesHaveData(t *testing.T) {
-	managed := []v1.VolumeDef{
-		{Name: "db-data", Type: v1.VolumeTypeManaged},
-		{Name: "uploads", Type: v1.VolumeTypeManaged},
-	}
-
-	t.Run("absent directories count as no data", func(t *testing.T) {
-		root := t.TempDir()
-		got, err := VolumesHaveData(root, "default", "blog", managed)
-		require.NoError(t, err)
-		assert.False(t, got)
-	})
-
-	t.Run("existing but empty directories count as no data", func(t *testing.T) {
-		// The agent provisions empty directories for Managed volumes, so mere
-		// existence must not be read as "this node has served the project".
-		root := t.TempDir()
-		writeVolumeFile(t, root, "default", "blog", "db-data", false)
-		writeVolumeFile(t, root, "default", "blog", "uploads", false)
-
-		got, err := VolumesHaveData(root, "default", "blog", managed)
-		require.NoError(t, err)
-		assert.False(t, got)
-	})
-
-	t.Run("content in any single volume counts", func(t *testing.T) {
-		root := t.TempDir()
-		writeVolumeFile(t, root, "default", "blog", "db-data", false)
-		writeVolumeFile(t, root, "default", "blog", "uploads", true)
-
-		got, err := VolumesHaveData(root, "default", "blog", managed)
-		require.NoError(t, err)
-		assert.True(t, got)
-	})
-
-	t.Run("ephemeral volumes are ignored", func(t *testing.T) {
-		root := t.TempDir()
-		writeVolumeFile(t, root, "default", "blog", "cache", true)
-
-		got, err := VolumesHaveData(root, "default", "blog",
-			[]v1.VolumeDef{{Name: "cache", Type: v1.VolumeTypeEphemeral}})
-		require.NoError(t, err)
-		assert.False(t, got, "Ephemeral volumes are never restored, so their content is irrelevant")
-	})
-
-	t.Run("invalid volume name is rejected", func(t *testing.T) {
-		_, err := VolumesHaveData(t.TempDir(), "default", "blog",
-			[]v1.VolumeDef{{Name: "../escape", Type: v1.VolumeTypeManaged}})
-		assert.Error(t, err)
-	})
-}
-
-func TestStagingDir(t *testing.T) {
-	got, err := StagingDir("/var/lib/cara", "default", "blog")
-	require.NoError(t, err)
-
-	assert.Equal(t, "/var/lib/cara/restore-staging/default/blog", got)
-	assert.NotContains(t, got, "/volumes/",
-		"staging must live outside the volumes tree so a partial extraction "+
-			"can never be mistaken for live volume data")
-}
-
-func TestStagingDirRejectsInvalidNames(t *testing.T) {
-	_, err := StagingDir("/var/lib/cara", "default", "../escape")
-	assert.Error(t, err)
-}
+const dataDirForTest = "/volumes/"

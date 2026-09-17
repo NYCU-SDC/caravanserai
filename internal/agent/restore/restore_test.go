@@ -198,7 +198,7 @@ func TestRestoreGenerationWritesMarker(t *testing.T) {
 	m, err := ReadMarker(h.dataRoot, "default", "blog")
 	require.NoError(t, err)
 	require.NotNil(t, m)
-	assert.Equal(t, h.backupID, m.BackupID,
+	assert.Equal(t, h.backupID, m.InitializedFromBackupID,
 		"the marker records which generation this node holds")
 }
 
@@ -335,7 +335,7 @@ func TestRestoreGenerationKeepsStagingAfterFailure(t *testing.T) {
 	assert.True(t, present, "a failed restore must leave the signal in place")
 
 	// And that signal must drive the next decision back to Restore.
-	assert.Equal(t, DecisionRestore, Decide(present, false, true))
+	assert.Equal(t, DecisionRestore, Decide(PlacementState{StagingPresent: present, VolumesHaveData: true}, Provenance{}, v1.AssignmentHistoryKnown).Decision)
 }
 
 // ── InitializeEmpty ──────────────────────────────────────────────────────────
@@ -354,7 +354,7 @@ func TestInitializeEmptyCreatesDirsAndMarker(t *testing.T) {
 	m, err := ReadMarker(h.dataRoot, "default", "blog")
 	require.NoError(t, err)
 	require.NotNil(t, m)
-	assert.Empty(t, m.BackupID, "no generation was restored, so none is recorded")
+	assert.Empty(t, m.InitializedFromBackupID, "no generation was restored, so none is recorded")
 }
 
 func TestInitializeEmptyMarkerPreventsLaterOverwrite(t *testing.T) {
@@ -369,7 +369,7 @@ func TestInitializeEmptyMarkerPreventsLaterOverwrite(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, m)
 
-	assert.Equal(t, DecisionSkip, Decide(false, m != nil, false))
+	assert.Equal(t, DecisionSkip, Decide(PlacementState{Marker: m}, ProvenanceFor(h.project, h.restorer.cfg.NodeName, ""), v1.AssignmentHistoryKnown).Decision)
 }
 
 // ── Correction 5: the two "no generation" failures must not be conflated ─────
@@ -487,5 +487,5 @@ func TestInitializeEmptyClearsStaging(t *testing.T) {
 	marker, err := ReadMarker(dataRoot, project.Namespace, project.Name)
 	require.NoError(t, err)
 	require.NotNil(t, marker)
-	assert.Empty(t, marker.BackupID, "empty volumes came from no generation")
+	assert.Empty(t, marker.InitializedFromBackupID, "empty volumes came from no generation")
 }

@@ -29,6 +29,8 @@ func ensureVolumeData(
 	restorer *restore.Restorer,
 	coordinator *backup.Coordinator,
 	dataRoot string,
+	nodeName string,
+	strict bool,
 	p *v1.Project,
 	logger *zap.Logger,
 ) error {
@@ -57,29 +59,57 @@ func ensureVolumeData(
 	}
 	defer release()
 
-	decision, err := decideRestore(dataRoot, p)
+	want := restore.ProvenanceFor(p, nodeName, "")
+	outcome, err := decideRestore(dataRoot, want, p)
 	if err != nil {
 		return err
 	}
 
-	switch decision {
+	if outcome.Decision == restore.DecisionBlock {
+		if strict {
+			return &restore.PlacementBlockedError{Reason: outcome.Reason, Detail: outcome.Detail}
+		}
+		// Shadow mode reports the judgement and then does what the previous
+		// release would have done. It exists so an operator can see how the
+		// rule lands on real deployments before it starts refusing to place
+		// Projects — and it is at Warn precisely because the defect it
+		// replaces spent a week invisible at Debug.
+		log.Warn("Provenance check would block this placement (shadow mode)",
+			zap.String("reason", string(outcome.Reason)),
+			zap.String("detail", outcome.Detail),
+			zap.String("projectUID", want.ProjectUID),
+			zap.String("nodeName", want.NodeName),
+			zap.Int64("assignmentGeneration", want.AssignmentGeneration),
+			zap.Int("markerVersion", markerVersionOf(dataRoot, p)))
+		outcome = restore.Outcome{Decision: restore.DecisionSkip}
+	}
+
+	switch outcome.Decision {
 	case restore.DecisionSkip:
-		log.Debug("Local volume data is authoritative, skipping restore")
+		log.Debug("Local provenance matches this assignment, skipping restore")
 		return nil
 
-	case restore.DecisionAdoptExisting:
-		// Data with no marker: a Project born on this node, or one predating
-		// markers. Record ownership so future passes skip cleanly, and never
-		// overwrite what is already there.
-		log.Info("Adopting existing volume data without restoring")
-		return restore.WriteMarker(dataRoot, p.Namespace, p.Name, "", nowUTC())
+	case restore.DecisionInitializeEmpty:
+		log.Info("Project has never been assigned anywhere; initialising empty volumes")
+		return restorer.InitializeEmpty(p)
 
 	case restore.DecisionRestore:
 		return runRestore(ctx, restorer, p, log)
 
 	default:
-		return fmt.Errorf("agent: unhandled restore decision %v", decision)
+		return fmt.Errorf("agent: unhandled restore decision %v", outcome.Decision)
 	}
+}
+
+// markerVersionOf reports the on-disk marker schema version for the shadow
+// log, or zero when there is none to read. Failures are not surfaced: this
+// only annotates a line whose decision has already been made.
+func markerVersionOf(dataRoot string, p *v1.Project) int {
+	m, err := restore.ReadMarker(dataRoot, p.Namespace, p.Name)
+	if err != nil || m == nil {
+		return 0
+	}
+	return m.Version
 }
 
 // runRestore resolves the newest generation and puts it on disk, treating
@@ -109,25 +139,26 @@ func runRestore(ctx context.Context, restorer *restore.Restorer, p *v1.Project, 
 	}
 }
 
-// decideRestore gathers the three facts the decision rests on and applies the
-// rule. Kept separate so the fact-gathering is not tangled with the policy.
-func decideRestore(dataRoot string, p *v1.Project) (restore.Decision, error) {
-	stagingPresent, err := restore.StagingPresent(dataRoot, p.Namespace, p.Name)
-	if err != nil {
-		return 0, err
+// decideRestore gathers the facts the decision rests on and applies the rule.
+// Kept separate so the fact-gathering is not tangled with the policy.
+func decideRestore(dataRoot string, want restore.Provenance, p *v1.Project) (restore.Outcome, error) {
+	var state restore.PlacementState
+
+	var err error
+	if state.StagingPresent, err = restore.StagingPresent(dataRoot, p.Namespace, p.Name); err != nil {
+		return restore.Outcome{}, err
 	}
 
-	marker, err := restore.ReadMarker(dataRoot, p.Namespace, p.Name)
-	if err != nil {
-		return 0, err
+	// A marker that cannot be read is carried into the decision rather than
+	// returned as an error: "unreadable" is one of the states the rule has an
+	// answer for, and that answer is to block rather than to fail the Project.
+	state.Marker, state.MarkerErr = restore.ReadMarker(dataRoot, p.Namespace, p.Name)
+
+	if state.VolumesHaveData, err = restore.VolumesHaveData(dataRoot, p.Namespace, p.Name, p.Spec.Volumes); err != nil {
+		return restore.Outcome{}, err
 	}
 
-	volumesHaveData, err := restore.VolumesHaveData(dataRoot, p.Namespace, p.Name, p.Spec.Volumes)
-	if err != nil {
-		return 0, err
-	}
-
-	return restore.Decide(stagingPresent, marker != nil, volumesHaveData), nil
+	return restore.Decide(state, want, p.Status.AssignmentHistory), nil
 }
 
 func hasManagedVolume(volumes []v1.VolumeDef) bool {

@@ -27,6 +27,16 @@ func TestMarkerPathRejectsInvalidNames(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// testProvenance is the provenance these tests write: one Project, one Node,
+// one assignment, varying only the generation it was initialised from.
+func testProvenance(backupID string) Provenance {
+	return Provenance{
+		Namespace: "default", Project: "blog",
+		ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 7,
+		BackupID: backupID,
+	}
+}
+
 func TestReadMarkerAbsent(t *testing.T) {
 	// Absent is the normal state for a fresh placement and must not be an
 	// error — the caller distinguishes it by the nil marker.
@@ -39,7 +49,7 @@ func TestWriteThenReadMarker(t *testing.T) {
 	root := t.TempDir()
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 
-	require.NoError(t, WriteMarker(root, "default", "blog", "20260730T120000Z-abcd1234", now))
+	require.NoError(t, WriteMarker(root, testProvenance("20260730T120000Z-abcd1234"), now))
 
 	m, err := ReadMarker(root, "default", "blog")
 	require.NoError(t, err)
@@ -47,8 +57,8 @@ func TestWriteThenReadMarker(t *testing.T) {
 
 	assert.Equal(t, "default", m.Namespace)
 	assert.Equal(t, "blog", m.Project)
-	assert.Equal(t, "20260730T120000Z-abcd1234", m.BackupID)
-	assert.Equal(t, now, m.RestoredAt)
+	assert.Equal(t, "20260730T120000Z-abcd1234", m.InitializedFromBackupID)
+	assert.Equal(t, now, m.EstablishedAt)
 }
 
 func TestWriteMarkerWithoutBackupID(t *testing.T) {
@@ -57,17 +67,17 @@ func TestWriteMarkerWithoutBackupID(t *testing.T) {
 	// whatever the containers have written since.
 	root := t.TempDir()
 
-	require.NoError(t, WriteMarker(root, "default", "blog", "", time.Now()))
+	require.NoError(t, WriteMarker(root, testProvenance(""), time.Now()))
 
 	m, err := ReadMarker(root, "default", "blog")
 	require.NoError(t, err)
 	require.NotNil(t, m)
-	assert.Empty(t, m.BackupID)
+	assert.Empty(t, m.InitializedFromBackupID)
 }
 
 func TestWriteMarkerIsAtomic(t *testing.T) {
 	root := t.TempDir()
-	require.NoError(t, WriteMarker(root, "default", "blog", "gen-1", time.Now()))
+	require.NoError(t, WriteMarker(root, testProvenance("gen-1"), time.Now()))
 
 	path, err := MarkerPath(root, "default", "blog")
 	require.NoError(t, err)
@@ -79,13 +89,13 @@ func TestWriteMarkerIsAtomic(t *testing.T) {
 
 func TestWriteMarkerOverwrites(t *testing.T) {
 	root := t.TempDir()
-	require.NoError(t, WriteMarker(root, "default", "blog", "gen-1", time.Now()))
-	require.NoError(t, WriteMarker(root, "default", "blog", "gen-2", time.Now()))
+	require.NoError(t, WriteMarker(root, testProvenance("gen-1"), time.Now()))
+	require.NoError(t, WriteMarker(root, testProvenance("gen-2"), time.Now()))
 
 	m, err := ReadMarker(root, "default", "blog")
 	require.NoError(t, err)
 	require.NotNil(t, m)
-	assert.Equal(t, "gen-2", m.BackupID)
+	assert.Equal(t, "gen-2", m.InitializedFromBackupID)
 }
 
 func TestReadMarkerRejectsCorruptFile(t *testing.T) {
@@ -103,7 +113,7 @@ func TestMarkerSurvivesVolumeDirectoryReplacement(t *testing.T) {
 	// The reason the marker lives at Project level: restore swaps each
 	// {volume}/data directory wholesale, and the marker must outlive that.
 	root := t.TempDir()
-	require.NoError(t, WriteMarker(root, "default", "blog", "gen-1", time.Now()))
+	require.NoError(t, WriteMarker(root, testProvenance("gen-1"), time.Now()))
 
 	volumeData := filepath.Join(root, "volumes", "default", "blog", "db-data", "data")
 	require.NoError(t, os.MkdirAll(volumeData, 0o700))

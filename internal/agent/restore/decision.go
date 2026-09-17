@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	caravolume "NYCU-SDC/caravanserai/internal/agent/volume"
@@ -14,19 +15,28 @@ import (
 type Decision int
 
 const (
-	// DecisionRestore means this node has no local data for the Project and
-	// should pull the newest complete generation from the object store.
+	// DecisionRestore means the local volumes cannot be used and the newest
+	// complete generation must be pulled from the object store.
 	DecisionRestore Decision = iota
 
-	// DecisionSkip means a marker shows this node has already established
-	// local data for the Project. The local volumes are authoritative and must
-	// not be touched.
+	// DecisionSkip means provenance proves the local data belongs to this
+	// exact assignment. The local volumes are authoritative and must not be
+	// touched.
 	DecisionSkip
 
-	// DecisionAdoptExisting means the volumes already hold data but no marker
-	// records why. The data is kept and a marker is written to record this
-	// node's ownership from now on.
-	DecisionAdoptExisting
+	// DecisionInitializeEmpty means this Project has provably never been
+	// placed anywhere, so there is nothing to restore and nothing to lose.
+	DecisionInitializeEmpty
+
+	// DecisionBlock means the data source cannot be established safely.
+	// Nothing is started, nothing is created, and nothing is overwritten.
+	//
+	// It replaces what used to be DecisionAdoptExisting. Adopting data whose
+	// origin is unknown was the mechanism behind silent loss: a directory left
+	// by another lifetime or another assignment was taken as this Project's,
+	// stamped with a marker, served to clients, and then backed up over the
+	// generation that held the real data.
+	DecisionBlock
 )
 
 func (d Decision) String() string {
@@ -35,49 +45,160 @@ func (d Decision) String() string {
 		return "Restore"
 	case DecisionSkip:
 		return "Skip"
-	case DecisionAdoptExisting:
-		return "AdoptExisting"
+	case DecisionInitializeEmpty:
+		return "InitializeEmpty"
+	case DecisionBlock:
+		return "Block"
 	default:
 		return fmt.Sprintf("Decision(%d)", int(d))
 	}
 }
 
-// Decide chooses whether to restore, given the three facts that matter.
+// BlockReason names why a placement was refused. It is the machine-readable
+// half of the decision: it reaches Project status as a condition reason, so it
+// must name a class of problem rather than describe one occurrence.
+type BlockReason string
+
+const (
+	// BlockNone is the zero value, used when the decision is not Block.
+	BlockNone BlockReason = ""
+
+	// BlockLegacyProvenance means a marker exists but predates provenance, so
+	// which assignment produced the data cannot be determined.
+	BlockLegacyProvenance BlockReason = "LegacyProvenance"
+
+	// BlockForeignProvenance means the marker names a different Project
+	// lifetime, Node, or assignment generation.
+	BlockForeignProvenance BlockReason = "ForeignProvenance"
+
+	// BlockUnprovenData means volumes hold data with no marker at all.
+	BlockUnprovenData BlockReason = "UnprovenData"
+
+	// BlockCorruptProvenance means the marker exists but could not be read.
+	BlockCorruptProvenance BlockReason = "CorruptProvenance"
+
+	// BlockMissingData means the marker claims data restored from a
+	// generation while the volume directories are absent or empty. The two
+	// statements cannot both be true, so neither is trusted.
+	BlockMissingData BlockReason = "MissingData"
+)
+
+// PlacementState is what the agent found on disk for one Project.
+type PlacementState struct {
+	// StagingPresent reports leftover restore staging.
+	StagingPresent bool
+
+	// Marker is the parsed marker, nil when absent.
+	Marker *Marker
+
+	// MarkerErr is set when a marker exists but could not be read. It is kept
+	// apart from Marker == nil: absent means this node never established data,
+	// unreadable means it may have and we cannot tell.
+	MarkerErr error
+
+	// VolumesHaveData reports whether any Managed volume directory holds
+	// content.
+	VolumesHaveData bool
+}
+
+// Outcome is a decision and, when it is Block, why.
+type Outcome struct {
+	Decision Decision
+	Reason   BlockReason
+
+	// Detail carries the specific mismatch for logs and operator-facing
+	// messages. It names fields and values from the Project's own identity,
+	// never host paths.
+	Detail string
+}
+
+// Decide chooses what to do with a Project's Managed volumes before its
+// containers start.
 //
 // The ordering is deliberate and is the core safety property of this package:
 //
 //   - Leftover staging means the previous restore died before its cleanup ran,
 //     so it may have swapped some volumes and not others. Nothing on disk can
-//     be trusted to represent a whole generation, and adopting it would freeze
-//     a mixed state and bless it with a marker. Restore again. This mirrors
+//     be trusted to represent a whole generation. Restore again. This mirrors
 //     how backup.CleanStaging treats surviving staging as proof of a dead
 //     process; the difference is that backup only reclaims the space, whereas
 //     here the same signal also invalidates what is on disk.
 //
-//   - A marker means this node has served the Project before. Its volumes may
-//     legitimately have moved ahead of every generation in the object store —
-//     containers write continuously, backups only run on an interval — so
-//     restoring would roll those writes back. Skip.
+//   - An unreadable marker is not an absent one. Absent means this node never
+//     established data; unreadable means it may have and we cannot tell, and
+//     the second must not be resolved by guessing.
 //
-//   - No marker but data on disk is the awkward case: a Project that was born
-//     on this node and never restored, or one that predates markers existing.
-//     Restoring here would destroy live data, so the data is adopted and a
-//     marker written to record ownership.
+//   - A marker that matches this exact assignment is the only proof local data
+//     may be reused. It is checked before anything else about the data,
+//     because this is the case that must keep working: containers write
+//     continuously and backups run on an interval, so an agent restart that
+//     restored from S3 would roll back everything written since the last one.
 //
-//   - Only when there is none of the above is a restore safe, because there is
-//     nothing local to lose.
+//   - Any other marker — older schema, another lifetime, another Node, an
+//     earlier generation — proves the data is not this assignment's. Restoring
+//     over it is not safe either, because in this ticket nothing quarantines
+//     what is displaced, so the answer is to stop.
 //
-// Note that "no marker" alone is never sufficient grounds to restore.
-func Decide(stagingPresent, markerPresent, volumesHaveData bool) Decision {
+//   - Data with no marker is the same class of problem arriving by a different
+//     route, and used to be adopted silently.
+//
+// history distinguishes the one case where having nothing is not a problem: a
+// Project that has provably never been assigned anywhere has no data to
+// recover, so starting empty is correct rather than a guess.
+func Decide(state PlacementState, want Provenance, history v1.AssignmentHistory) Outcome {
 	switch {
-	case stagingPresent:
-		return DecisionRestore
-	case markerPresent:
-		return DecisionSkip
-	case volumesHaveData:
-		return DecisionAdoptExisting
+	case state.StagingPresent:
+		return Outcome{Decision: DecisionRestore}
+
+	case state.MarkerErr != nil:
+		return Outcome{
+			Decision: DecisionBlock,
+			Reason:   BlockCorruptProvenance,
+			Detail:   "the local provenance marker could not be read",
+		}
+
+	case state.Marker.Matches(want):
+		// Proven ours. One contradiction is still possible: the marker says it
+		// restored a generation, and the directories it describes are gone.
+		if state.Marker.InitializedFromBackupID != "" && !state.VolumesHaveData {
+			return Outcome{
+				Decision: DecisionBlock,
+				Reason:   BlockMissingData,
+				Detail: fmt.Sprintf("provenance records a restore from generation %q but the volumes are empty",
+					state.Marker.InitializedFromBackupID),
+			}
+		}
+		return Outcome{Decision: DecisionSkip}
+
+	case state.Marker != nil && state.Marker.IsLegacy():
+		return Outcome{
+			Decision: DecisionBlock,
+			Reason:   BlockLegacyProvenance,
+			Detail:   "local data predates provenance recording, so the assignment that produced it is unknown",
+		}
+
+	case state.Marker != nil:
+		return Outcome{
+			Decision: DecisionBlock,
+			Reason:   BlockForeignProvenance,
+			Detail: "local data belongs to another assignment (" +
+				strings.Join(state.Marker.Mismatches(want), "; ") + ")",
+		}
+
+	case state.VolumesHaveData:
+		return Outcome{
+			Decision: DecisionBlock,
+			Reason:   BlockUnprovenData,
+			Detail:   "the volumes hold data that no provenance marker accounts for",
+		}
+
+	case history == v1.AssignmentHistoryNeverAssigned:
+		return Outcome{Decision: DecisionInitializeEmpty}
+
 	default:
-		return DecisionRestore
+		// Nothing local, and this Project has been placed before. Whatever it
+		// wrote is in the object store or nowhere.
+		return Outcome{Decision: DecisionRestore}
 	}
 }
 
@@ -151,4 +272,20 @@ func StagingDir(dataRoot, namespace, project string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(filepath.Clean(dataRoot), stagingRoot, namespace, project), nil
+}
+
+// PlacementBlockedError reports that a Project's Managed volume data source
+// could not be established safely, so nothing was started.
+//
+// It is an error rather than a status because every caller must stop: the
+// Project has no data it is allowed to use, and the alternatives — starting on
+// someone else's data, or creating an empty directory and calling that success
+// — are the two failures this package exists to prevent.
+type PlacementBlockedError struct {
+	Reason BlockReason
+	Detail string
+}
+
+func (e *PlacementBlockedError) Error() string {
+	return fmt.Sprintf("restore: placement blocked (%s): %s", e.Reason, e.Detail)
 }

@@ -117,12 +117,15 @@ func NewBackupSupport(
 		DataRoot:     cfg.DataRoot,
 		MinFreeBytes: cfg.MinFreeBytes,
 		Timeout:      restoreTimeout,
+		NodeName:     cfg.NodeName,
 	}, logger)
 
 	return &BackupSupport{
 		Supervisor:  backup.NewSupervisor(runner, logger),
-		Coordinator: coordinator,
-		Restorer:    restorer,
-		DataRoot:    cfg.DataRoot,
+		Coordinator:      coordinator,
+		Restorer:         restorer,
+		DataRoot:         cfg.DataRoot,
+		NodeName:         cfg.NodeName,
+		StrictProvenance: cfg.StrictProvenance,
 	}, nil
 }
