@@ -106,6 +106,14 @@ type RunConfig struct {
 	AgentPort         int
 	AdvertiseIP       string
 
+	// Resources measures the node's static capacity for each heartbeat. Nil
+	// omits Capacity and Allocatable from heartbeats.
+	Resources ResourceProber
+
+	// SystemReserved is subtracted from the measured capacity to derive the
+	// Allocatable reported to the server.
+	SystemReserved SystemReserved
+
 	// Routes maintains proxy routes for projects with ingress definitions.
 	// Nil disables proxy route maintenance.
 	Routes RouteUpdater
@@ -221,6 +229,7 @@ func Run(ctx context.Context, cfg RunConfig) {
 				State:   v1.NodeStateReady,
 				Network: heartbeatNetworkStatus(client, cfg.AgentPort, cfg.AdvertiseIP),
 			}
+			status.Capacity, status.Allocatable = probeNodeCapacity(ctx, cfg.Resources, cfg.SystemReserved, logger)
 			if err := client.Heartbeat(ctx, status); err != nil {
 				if errors.Is(err, ErrNodeNotFound) {
 					logger.Info("Node not found on server (404), initiating re-registration")

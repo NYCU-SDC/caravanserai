@@ -249,3 +249,65 @@ func TestAgentConfig_Validate_Overlay(t *testing.T) {
 func ptr[T any](v T) *T {
 	return &v
 }
+
+func TestAgentFromFileAndEnvReservedResources(t *testing.T) {
+	path := writeConfigFile(t, `
+reserved_cpu: "1"
+reserved_memory: 1Gi
+`, 0o600)
+	base := &AgentConfig{ReservedCPU: defaultReservedCPU, ReservedMemory: defaultReservedMemory}
+
+	got, err := AgentFromFile(path, base, NewConfigLogger())
+	require.NoError(t, err)
+	assert.Equal(t, "1", got.ReservedCPU)
+	assert.Equal(t, "1Gi", got.ReservedMemory)
+
+	// Env overrides file; an unset env var leaves the file value alone.
+	t.Chdir(t.TempDir()) // keep godotenv from loading a developer's .env
+	t.Setenv("AGENT_RESERVED_CPU", "250m")
+	got, err = AgentFromEnv(got, NewConfigLogger())
+	require.NoError(t, err)
+	assert.Equal(t, "250m", got.ReservedCPU)
+	assert.Equal(t, "1Gi", got.ReservedMemory)
+}
+
+func TestAgentConfig_SystemReserved(t *testing.T) {
+	tests := []struct {
+		name       string
+		cpu        string
+		memory     string
+		wantCPU    int64
+		wantMemory int64
+		wantErr    string
+	}{
+		{name: "defaults", cpu: defaultReservedCPU, memory: defaultReservedMemory, wantCPU: 500, wantMemory: 512 << 20},
+		{name: "fractional cores", cpu: "0.25", memory: "1Gi", wantCPU: 250, wantMemory: 1 << 30},
+		{name: "empty reserves nothing"},
+		{name: "invalid cpu", cpu: "half", memory: "512Mi", wantErr: "reserved_cpu"},
+		{name: "invalid memory", cpu: "500m", memory: "512MB", wantErr: "reserved_memory"},
+		{name: "negative memory", cpu: "500m", memory: "-1Gi", wantErr: "reserved_memory"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := AgentConfig{
+				ServerURL:      "http://localhost:8080",
+				AdvertiseIP:    "10.0.0.1",
+				ReservedCPU:    tt.cpu,
+				ReservedMemory: tt.memory,
+			}
+
+			cpu, mem, err := cfg.SystemReserved()
+			validateErr := cfg.Validate()
+			if tt.wantErr != "" {
+				assert.ErrorContains(t, err, tt.wantErr)
+				assert.ErrorContains(t, validateErr, tt.wantErr, "Validate must reject it at startup")
+				return
+			}
+			require.NoError(t, err)
+			require.NoError(t, validateErr)
+			assert.Equal(t, tt.wantCPU, cpu)
+			assert.Equal(t, tt.wantMemory, mem)
+		})
+	}
+}
