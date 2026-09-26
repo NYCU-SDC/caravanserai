@@ -84,6 +84,9 @@ type BackupSupport struct {
 	Restorer    *restore.Restorer
 	// DataRoot is where Managed volume data and restore markers live.
 	DataRoot string
+	// NodeName is this agent's Node name, recorded in and checked against the
+	// provenance marker.
+	NodeName string
 }
 
 // RouteUpdater is the narrow interface consumed by the agent loop to maintain
@@ -519,7 +522,7 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	// is the last moment the volumes can be populated without a service seeing
 	// an empty directory.
 	if backups != nil {
-		err := ensureVolumeData(ctx, backups.Restorer, backups.Coordinator, backups.DataRoot, p, logger)
+		err := ensureVolumeData(ctx, backups.Restorer, backups.Coordinator, backups.DataRoot, backups.NodeName, p, logger)
 		switch {
 		case err == nil:
 		case errors.Is(err, errDeferred):
@@ -527,10 +530,34 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 			// and let the next tick try again — losing a race is not a fault.
 			return
 		default:
+			// A refusal is not a failure. The agent has established that it
+			// cannot prove which data belongs to this assignment, and every
+			// way out of that — an operator clearing stale bytes, a bucket
+			// misconfiguration being fixed, the real backup appearing — is
+			// something that happens later and should be picked up on the next
+			// poll. Reporting Failed would close that door: Failed is terminal
+			// for the poll loop, so the Project would never be looked at
+			// again even once the problem was resolved.
+			//
+			// The containers are not started and the phase is left alone, so
+			// backup supervision does not begin either: shouldSupervise
+			// requires Running.
+			var blocked *restore.PlacementBlockedError
+			if errors.As(err, &blocked) {
+				log.Warn("Refusing to place the project on data it cannot prove is its own",
+					zap.String("reason", string(blocked.Reason)),
+					zap.String("detail", blocked.Detail))
+				reportRecoveryBlocked(ctx, client, p, string(blocked.Reason), blocked.Detail, log)
+				return
+			}
 			log.Error("Failed to prepare volume data", zap.Error(err))
 			_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "RestoreError", err.Error())
 			return
 		}
+
+		// The data is in place. A block recorded on an earlier tick is over,
+		// and leaving it would report a Project as refused while it serves.
+		clearRecoveryBlocked(ctx, client, p, log)
 	}
 
 	if err := runtime.ReconcileProject(ctx, resolved); err != nil {
@@ -1142,6 +1169,15 @@ const (
 	recoveryBlockedSecretNotFound    = "SecretNotFound"
 	recoveryBlockedSecretKeyNotFound = "SecretKeyNotFound"
 	recoveryBlockedStaleContainer    = "StaleContainer"
+
+	// Placement-time refusals reuse this condition rather than introducing a
+	// type of their own, and carry a restore.BlockReason as the reason.
+	//
+	// RecoveryBlocked already means what is needed: the agent has refused to
+	// act, the Project must not be moved to a terminal phase because only a
+	// human or a restore can resolve it, and the reason says which problem it
+	// is. A second condition with the same contract would give an operator two
+	// places to look for one answer.
 )
 
 // The condition messages below name only what the Project's own spec names —

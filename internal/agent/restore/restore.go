@@ -81,6 +81,10 @@ type Config struct {
 	// a known ceiling rather than a network operation that can hang. Zero
 	// means no bound beyond the caller's context.
 	Timeout time.Duration
+	// NodeName is this agent's Node name. It is recorded in the provenance
+	// marker so a directory that arrives on the wrong host — copied by hand,
+	// restored into the wrong data root — cannot pass as local data.
+	NodeName string
 }
 
 // Restorer puts a Project's Managed volumes back on disk from a backup
@@ -299,7 +303,9 @@ func (r *Restorer) RestoreGeneration(ctx context.Context, project *v1.Project, b
 		return err
 	}
 
-	if err := WriteMarker(r.cfg.DataRoot, namespace, name, backupID, r.now()); err != nil {
+	// Written only now: the generation is verified and every volume has been
+	// swapped, so the provenance this records is true of what is on disk.
+	if err := WriteMarker(r.cfg.DataRoot, ProvenanceFor(project, r.cfg.NodeName, backupID), r.now()); err != nil {
 		return err
 	}
 
@@ -337,7 +343,9 @@ func (r *Restorer) InitializeEmpty(project *v1.Project) error {
 		}
 	}
 
-	if err := WriteMarker(r.cfg.DataRoot, namespace, name, "", r.now()); err != nil {
+	// Empty BackupID: this data did not come from a generation. Decide reads
+	// that back to tell "initialised empty" from "restored and then lost".
+	if err := WriteMarker(r.cfg.DataRoot, ProvenanceFor(project, r.cfg.NodeName, ""), r.now()); err != nil {
 		return err
 	}
 

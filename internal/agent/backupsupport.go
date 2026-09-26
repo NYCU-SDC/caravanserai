@@ -117,6 +117,7 @@ func NewBackupSupport(
 		DataRoot:     cfg.DataRoot,
 		MinFreeBytes: cfg.MinFreeBytes,
 		Timeout:      restoreTimeout,
+		NodeName:     cfg.NodeName,
 	}, logger)
 
 	return &BackupSupport{
@@ -124,5 +125,6 @@ func NewBackupSupport(
 		Coordinator: coordinator,
 		Restorer:    restorer,
 		DataRoot:    cfg.DataRoot,
+		NodeName:    cfg.NodeName,
 	}, nil
 }

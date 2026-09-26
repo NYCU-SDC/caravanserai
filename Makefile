@@ -87,6 +87,12 @@ test-orphan-e2e:
 		&& echo -e "==> $(BLUE)Orphan-cleanup rehearsal passed$(NC)" \
 		|| (echo -e "==> $(RED)Orphan-cleanup rehearsal failed$(NC)" && exit 1)
 
+test-managed-failover-e2e:
+	@echo -e ":: $(GREEN)Running isolated Managed-volume failover rehearsal (about 10 minutes)...$(NC)"
+	@./scripts/e2e/managed-failover.sh \
+		&& echo -e "==> $(BLUE)Managed-volume failover rehearsal passed$(NC)" \
+		|| (echo -e "==> $(RED)Managed-volume failover rehearsal failed$(NC)" && exit 1)
+
 test-recovery-e2e:
 	@echo -e ":: $(GREEN)Running isolated local-recovery rehearsal (about 6 minutes)...$(NC)"
 	@./scripts/e2e/local-recovery.sh \
@@ -163,6 +169,6 @@ install-hooks:
 		&& echo -e "==> $(BLUE)Git hooks installed (using .githooks/)$(NC)" \
 		|| (echo -e "==> $(RED)Failed to configure git hooks$(NC)" && exit 1)
 
-.PHONY: all prepare build run-server run-agent run-cli test test-integration test-orphan-e2e test-recovery-e2e schemas
+.PHONY: all prepare build run-server run-agent run-cli test test-integration test-orphan-e2e test-recovery-e2e test-managed-failover-e2e schemas
 .PHONY: dev-up dev-down dev-reset dev-server dev-logs install-hooks
 .PHONY: walg-backup walg-restore walg-verify

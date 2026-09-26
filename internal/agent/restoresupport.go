@@ -29,6 +29,7 @@ func ensureVolumeData(
 	restorer *restore.Restorer,
 	coordinator *backup.Coordinator,
 	dataRoot string,
+	nodeName string,
 	p *v1.Project,
 	logger *zap.Logger,
 ) error {
@@ -57,34 +58,39 @@ func ensureVolumeData(
 	}
 	defer release()
 
-	decision, err := decideRestore(dataRoot, p)
+	want := restore.ProvenanceFor(p, nodeName, "")
+	outcome, err := decideRestore(dataRoot, want, p)
 	if err != nil {
 		return err
 	}
 
-	switch decision {
+	if outcome.Decision == restore.DecisionBlock {
+		return &restore.PlacementBlockedError{Reason: outcome.Reason, Detail: outcome.Detail}
+	}
+
+	switch outcome.Decision {
 	case restore.DecisionSkip:
-		log.Debug("Local volume data is authoritative, skipping restore")
+		log.Debug("Local provenance matches this assignment, skipping restore")
 		return nil
 
-	case restore.DecisionAdoptExisting:
-		// Data with no marker: a Project born on this node, or one predating
-		// markers. Record ownership so future passes skip cleanly, and never
-		// overwrite what is already there.
-		log.Info("Adopting existing volume data without restoring")
-		return restore.WriteMarker(dataRoot, p.Namespace, p.Name, "", nowUTC())
+	case restore.DecisionInitializeEmpty:
+		log.Info("Project has never been assigned anywhere; initialising empty volumes")
+		return restorer.InitializeEmpty(p)
 
 	case restore.DecisionRestore:
 		return runRestore(ctx, restorer, p, log)
 
 	default:
-		return fmt.Errorf("agent: unhandled restore decision %v", decision)
+		return fmt.Errorf("agent: unhandled restore decision %v", outcome.Decision)
 	}
 }
 
-// runRestore resolves the newest generation and puts it on disk, treating
-// "never backed up" as a normal starting state and every other failure as
-// grounds to keep the Project down.
+// runRestore resolves the newest generation and puts it on disk.
+//
+// It is reached only when Decide has established that this node has no local
+// data it may use, so every way of failing to produce a generation here leaves
+// the Project with nothing — and none of them may be answered by creating
+// empty directories and calling that a successful start.
 func runRestore(ctx context.Context, restorer *restore.Restorer, p *v1.Project, log *zap.Logger) error {
 	backupID, err := restorer.ResolveLatest(ctx, p.Namespace, p.Name)
 	switch {
@@ -93,41 +99,48 @@ func runRestore(ctx context.Context, restorer *restore.Restorer, p *v1.Project, 
 		return restorer.RestoreGeneration(ctx, p, backupID)
 
 	case errors.Is(err, restore.ErrNeverBackedUp):
-		// Nothing has ever been backed up under this name, so there is no
-		// generation to be missing. Starting with empty volumes is correct.
+		// "No latest.json" used to be read as "this Project has never held
+		// data", and the response was to start empty. That inference only
+		// holds for a Project that has never been placed anywhere, and Decide
+		// has already handled that case by returning DecisionInitializeEmpty
+		// before anything reached the object store.
 		//
-		// Note this is emphatically not the same as a generation that has gone
-		// missing (restore.ErrGenerationMissing), which falls through to the
-		// default branch and keeps the Project down — backups demonstrably
-		// exist there, and starting empty would present real data loss as a
-		// successful start.
-		log.Info("No backup generation exists; initialising empty volumes")
-		return restorer.InitializeEmpty(p)
+		// Arriving here means the opposite: this Project has been placed
+		// before, or a restore was already in flight. A missing pointer is
+		// then a fault — a bucket typo, an object-store outage, a backup that
+		// never actually completed — and starting empty would present it as a
+		// successful deployment, then let the Backup Supervisor archive the
+		// empty result over the generation that held the real data.
+		return &restore.PlacementBlockedError{
+			Reason: restore.BlockNoRestoreSource,
+			Detail: "this Project has been placed before, but the object store holds no complete backup to restore from",
+		}
 
 	default:
 		return err
 	}
 }
 
-// decideRestore gathers the three facts the decision rests on and applies the
-// rule. Kept separate so the fact-gathering is not tangled with the policy.
-func decideRestore(dataRoot string, p *v1.Project) (restore.Decision, error) {
-	stagingPresent, err := restore.StagingPresent(dataRoot, p.Namespace, p.Name)
-	if err != nil {
-		return 0, err
+// decideRestore gathers the facts the decision rests on and applies the rule.
+// Kept separate so the fact-gathering is not tangled with the policy.
+func decideRestore(dataRoot string, want restore.Provenance, p *v1.Project) (restore.Outcome, error) {
+	var state restore.PlacementState
+
+	var err error
+	if state.StagingPresent, err = restore.StagingPresent(dataRoot, p.Namespace, p.Name); err != nil {
+		return restore.Outcome{}, err
 	}
 
-	marker, err := restore.ReadMarker(dataRoot, p.Namespace, p.Name)
-	if err != nil {
-		return 0, err
+	// A marker that cannot be read is carried into the decision rather than
+	// returned as an error: "unreadable" is one of the states the rule has an
+	// answer for, and that answer is to block rather than to fail the Project.
+	state.Marker, state.MarkerErr = restore.ReadMarker(dataRoot, p.Namespace, p.Name)
+
+	if state.Volumes, err = restore.SurveyVolumes(dataRoot, p.Namespace, p.Name, p.Spec.Volumes); err != nil {
+		return restore.Outcome{}, err
 	}
 
-	volumesHaveData, err := restore.VolumesHaveData(dataRoot, p.Namespace, p.Name, p.Spec.Volumes)
-	if err != nil {
-		return 0, err
-	}
-
-	return restore.Decide(stagingPresent, marker != nil, volumesHaveData), nil
+	return restore.Decide(state, want, p.Status.AssignmentHistory), nil
 }
 
 func hasManagedVolume(volumes []v1.VolumeDef) bool {
