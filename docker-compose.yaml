@@ -81,32 +81,39 @@ services:
       timeout: 5s
       retries: 10
 
-  # Pulled from Quay, and pinned, because MinIO's Docker Hub repositories are
-  # gone: `minio/minio` and `minio/mc` now answer an anonymous pull with 401,
-  # which Docker reports as "repository does not exist or may require docker
-  # login". MinIO stopped publishing free images in October 2025 and archived
-  # the community repository in February 2026.
+  # Chainguard's rebuild of MinIO, pinned by digest, because MinIO no longer
+  # serves an image anyone can pull. It deleted minio/minio and minio/mc from
+  # Docker Hub in September 2026, and days later made quay.io/minio/minio and
+  # quay.io/minio/mc private too: an anonymous token for those repositories
+  # carries no pull permission, so every tag answers 401. Re-pinning to
+  # another Quay tag does not help.
   #
-  # The pin is no longer the tradeoff the earlier comment here described. What
-  # Quay still serves is a frozen archive that will not be updated, so leaving
-  # this floating would point a moving name at something that stopped moving —
-  # and would break again the day those tags are retagged or removed. The
-  # digest is pinned too, so a retag cannot change what is pulled.
+  # The one image MinIO still publishes, quay.io/minio/aistor/minio, is its
+  # commercial product. Without a license it starts with every S3 operation
+  # blocked, so using it would mean handing a license to CI and to every
+  # machine that runs this stack.
   #
-  # Server and client are separate products with separate release trains, so
-  # they carry different dates. Where MinIO goes from here — stay on this
-  # archive, move to a maintained rebuild, or replace it — is an open decision.
+  # Chainguard builds the same server and client from source and publishes
+  # only "latest", so the digest is the pin; the tag in front of it is only a
+  # label. Keep the server digest in step with test/integration/testhelper/
+  # minio.go. MinIO itself is archived and no longer gets security fixes, so
+  # whether to stay on it at all is still an open decision.
   #
-  # The healthcheck below is the part that does depend on image internals: it
-  # assumes `mc` ships inside this image with a preconfigured `local` alias. If
-  # `up --wait` ever reports minio unhealthy right after an image pull, check
-  # that before suspecting the service itself.
+  # Both images run as uid 65532 and ship no shell. A minio-data volume
+  # created by the old Quay image holds root-owned files that uid 65532
+  # cannot write. Remove only that volume, once, with the stack stopped:
+  # `docker volume rm <project>_minio-data`. `down -v` would also take
+  # headscale's and postgres's volumes with it.
+  #
+  # MC_HOST_local gives the healthcheck its alias explicitly rather than
+  # relying on whatever mc's default config happens to contain.
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    image: cgr.dev/chainguard/minio:latest@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?missing; copy .env.example to .env}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?missing; copy .env.example to .env}
+      MC_HOST_local: http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@localhost:9000
     ports:
       - "${MINIO_BIND:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
       - "${MINIO_BIND:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
@@ -121,17 +128,19 @@ services:
   # Creates the bucket once and exits. Postgres waits for it, because an
   # archive_command firing against a missing bucket just accumulates failures
   # in pg_stat_archiver until someone notices.
+  #
+  # The image's entrypoint is mc and there is no shell to chain commands with,
+  # so the alias comes from MC_HOST_local and the command is a single mc call.
+  # The credentials sit inside a URL there, and the same variables set the
+  # server's own credentials, so they must not contain @, / or :.
   minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    image: cgr.dev/chainguard/minio-client:latest@sha256:b8b144ab34694ecea25aa352c4be9de4c26ee2a02701521dce02ee5593c57338
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint:
-      - sh
-      - -c
-      - |
-        mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
-        mc mb --ignore-existing local/cara-backups
+    environment:
+      MC_HOST_local: http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000
+    command: ["mb", "--ignore-existing", "local/cara-backups"]
 
   headscale:
     image: headscale/headscale:v0.29.2
