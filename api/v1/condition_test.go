@@ -176,3 +176,90 @@ func TestUpsertConditionHonoursTransitionedFlag(t *testing.T) {
 	assert.Equal(t, began, got[0].LastTransitionTime,
 		"nothing changed inside or outside the condition; the timestamp must not move")
 }
+
+// The rescheduler's clocks carry their whole meaning in LastTransitionTime:
+// Status, Reason and Message are fixed strings, identical on every incident.
+// Upserting one without transitioned=true therefore keeps the previous
+// incident's start time, and a clock that cannot be restarted is not a clock.
+func TestUpsertConditionRestartsAClockOnlyWhenTransitioned(t *testing.T) {
+	first := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+	second := first.Add(4 * time.Hour)
+
+	// A clock condition as the rescheduler writes it: the timestamp is the
+	// only field that ever differs between two writes.
+	clock := func(at time.Time) Condition {
+		return Condition{
+			Type:               ConditionTypeNotReadyAt,
+			Status:             ConditionTrue,
+			Reason:             "NodeNotReady",
+			Message:            "Node went NotReady while project was Running; running grace period clock started",
+			LastTransitionTime: at,
+		}
+	}
+
+	t.Run("transitioned=false keeps the old start time", func(t *testing.T) {
+		// Pinned as the reason the clocks must not use this form, not as
+		// desired behaviour: it is correct for a condition re-asserted every
+		// tick and wrong for one that marks the start of an incident.
+		got := UpsertCondition([]Condition{clock(first)}, clock(second), false)
+		require.Len(t, got, 1)
+		assert.Equal(t, first, got[0].LastTransitionTime,
+			"identical Status/Reason/Message means the write is treated as a re-assertion")
+	})
+
+	t.Run("transitioned=true restarts the clock", func(t *testing.T) {
+		got := UpsertCondition([]Condition{clock(first)}, clock(second), true)
+		require.Len(t, got, 1)
+		assert.Equal(t, second, got[0].LastTransitionTime,
+			"a new incident must start its own clock")
+	})
+
+	t.Run("the first write lands either way", func(t *testing.T) {
+		for _, transitioned := range []bool{false, true} {
+			got := UpsertCondition(nil, clock(first), transitioned)
+			require.Len(t, got, 1)
+			assert.Equal(t, first, got[0].LastTransitionTime)
+		}
+	})
+}
+
+func TestRemoveConditions(t *testing.T) {
+	base := []Condition{
+		{Type: ConditionTypePhase, Reason: "ContainersRunning"},
+		{Type: ConditionTypeNotReadyAt, Reason: "NodeNotReady"},
+		{Type: ConditionTypeMaintenance, Reason: "BackingUp"},
+	}
+
+	t.Run("removes the named types and keeps the order of the rest", func(t *testing.T) {
+		got := RemoveConditions(base, ConditionTypeNotReadyAt, ConditionTypeTerminatingAt)
+		require.Len(t, got, 2)
+		assert.Equal(t, ConditionTypePhase, got[0].Type)
+		assert.Equal(t, ConditionTypeMaintenance, got[1].Type)
+	})
+
+	t.Run("does not mutate the caller's slice", func(t *testing.T) {
+		input := make([]Condition, len(base))
+		copy(input, base)
+		_ = RemoveConditions(input, ConditionTypeNotReadyAt)
+		require.Len(t, input, 3)
+		assert.Equal(t, ConditionTypeNotReadyAt, input[1].Type)
+	})
+
+	t.Run("removing an absent type keeps everything", func(t *testing.T) {
+		assert.Len(t, RemoveConditions(base, ConditionTypeRecoveryBlocked), 3)
+	})
+
+	t.Run("empty inputs are safe", func(t *testing.T) {
+		assert.Empty(t, RemoveConditions(nil, ConditionTypeNotReadyAt))
+		assert.Len(t, RemoveConditions(base), 3, "removing no types keeps the set")
+	})
+
+	t.Run("a removed clock cannot be found by a Type-only reader", func(t *testing.T) {
+		// How the rescheduler reads these: scan for the Type, take the
+		// timestamp. A tombstone left with Status=False would still be found,
+		// which is why the entry is dropped rather than negated.
+		for _, c := range RemoveConditions(base, ConditionTypeNotReadyAt) {
+			assert.NotEqual(t, ConditionTypeNotReadyAt, c.Type)
+		}
+	})
+}

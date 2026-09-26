@@ -75,6 +75,16 @@ type ReschedulerProjectStore interface {
 	// Phase condition with reason=TerminationTimeout.  The
 	// ProjectTerminationController will delete the record shortly after.
 	ForceTerminated(ctx context.Context, name string) error
+
+	// ClearRescheduleClocks removes the NotReadyAt and TerminatingAt
+	// conditions from the Project without touching its phase.  Called when the
+	// node recovers before either clock expires.
+	//
+	// It must ignore a Project no longer assigned to nodeRef, and a clock
+	// stamped after notAfter — that one belongs to an outage which began after
+	// this cleanup was decided on, and deleting it would restart a timeout
+	// that is legitimately running.
+	ClearRescheduleClocks(ctx context.Context, name, nodeRef string, notAfter time.Time) error
 }
 
 // ReschedulerNodeStore is the store surface needed to check node state.
@@ -154,8 +164,20 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 	}
 
 	if snap.State != v1.NodeStateNotReady {
-		log.Debug("Node is not NotReady, nothing to do", zap.String("state", string(snap.State)))
-		return Result{}, nil
+		// The node is healthy. Either it never went NotReady, or it came back
+		// before a clock expired — and in that second case the Projects stayed
+		// put and their phases never changed, so nothing else in the system
+		// will remove the clocks this controller started on them.
+		//
+		// The clocks are already harmless by then: both handlers ignore one
+		// older than the node's last heartbeat. What is left is Project status
+		// reporting a failure that is over, which is worth clearing but is not
+		// what correctness rests on — this path runs on a single node.updated
+		// event, and event.Bus.Publish drops events when a subscriber is
+		// behind.
+		log.Debug("Node is not NotReady, clearing any reschedule clocks",
+			zap.String("state", string(snap.State)))
+		return Result{}, c.clearRescheduleClocks(ctx, log, name, snap.LastHeartbeat)
 	}
 
 	projects, err := c.projects.ListProjectsByNodeRef(ctx, name, []v1.ProjectPhase{
@@ -190,7 +212,7 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 			log.Info("Scheduled project reset to Pending", zap.String("project", p.Name))
 
 		case v1.ProjectPhaseRunning:
-			requeue, err := c.handleRunning(ctx, log, p)
+			requeue, err := c.handleRunning(ctx, log, p, snap.LastHeartbeat)
 			if err != nil {
 				return Result{}, err
 			}
@@ -199,7 +221,7 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 			}
 
 		case v1.ProjectPhaseTerminating:
-			requeue, err := c.handleTerminating(ctx, log, p)
+			requeue, err := c.handleTerminating(ctx, log, p, snap.LastHeartbeat)
 			if err != nil {
 				return Result{}, err
 			}
@@ -218,31 +240,135 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 	return Result{}, nil
 }
 
+// clearRescheduleClocks removes the reschedule clocks from every Project still
+// assigned to a node that is no longer NotReady.
+//
+// Only Projects that actually carry a clock are written. This runs on every
+// node.updated event for a healthy node, which is the common case, and the
+// common case must not cost a write per Project per event.
+//
+// notAfter is the heartbeat that proved the node healthy; the store refuses to
+// delete a clock stamped later than it, so a cleanup overtaken by the next
+// outage cannot delete that outage's clock.
+//
+// A failure on one Project does not abandon the rest. These are stale records,
+// not state anything is waiting on, so clearing as many as possible and
+// reporting that something was missed is the useful outcome — the node is
+// healthy and there is no deadline left to race.
+func (c *ProjectReschedulerController) clearRescheduleClocks(
+	ctx context.Context,
+	log *zap.Logger,
+	nodeName string,
+	notAfter time.Time,
+) error {
+	// Failed is in this list and not in the one the NotReady path uses. The
+	// rescheduler never acts on a Failed Project — it is terminal for this
+	// controller — but a Project can carry a clock from when it was Running
+	// and be reported Failed by its agent before the node recovers. Nothing
+	// else would ever take the clock off it: node.updated fires on a phase
+	// change, not on every heartbeat, and the periodic resync only re-enqueues
+	// NotReady nodes, so this cleanup is the last thing that will look at it.
+	projects, err := c.projects.ListProjectsByNodeRef(ctx, nodeName, []v1.ProjectPhase{
+		v1.ProjectPhaseScheduled,
+		v1.ProjectPhaseRunning,
+		v1.ProjectPhaseTerminating,
+		v1.ProjectPhaseFailed,
+	})
+	if err != nil {
+		return err
+	}
+
+	var firstErr error
+	for _, p := range projects {
+		if !hasRescheduleClock(p) {
+			continue
+		}
+		log.Info("Node recovered, clearing reschedule clock", zap.String("project", p.Name))
+		if err := c.projects.ClearRescheduleClocks(ctx, p.Name, nodeName, notAfter); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				log.Debug("Project disappeared before clock clear, skipping",
+					zap.String("project", p.Name))
+				continue
+			}
+			log.Error("Failed to clear reschedule clock",
+				zap.String("project", p.Name), zap.Error(err))
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasRescheduleClock reports whether p carries either reschedule clock.
+func hasRescheduleClock(p *ProjectSnapshot) bool {
+	for _, cond := range p.Conditions {
+		if cond.Type == v1.ConditionTypeNotReadyAt || cond.Type == v1.ConditionTypeTerminatingAt {
+			return true
+		}
+	}
+	return false
+}
+
+// incidentClock finds the clock condition of type t and reports whether it is
+// running for the node's current unhealthy period.
+//
+// startedAt is whatever timestamp was found, zero when there is no such
+// condition. running is false in both the absent case and the stale case, so a
+// caller that gets false starts the clock; startedAt tells it which of the two
+// happened, for the log.
+//
+// A clock started before the node's most recent successful heartbeat was
+// started during an earlier failure that the node has since recovered from.
+// Reading it would measure this failure from that one — however many hours or
+// days old — so the wait it governs would be skipped entirely, and would
+// protect each Project exactly once before silently stopping.
+//
+// Deciding this from the node's own heartbeat rather than from a cleanup step
+// is deliberate: it holds even when nothing removed the stale condition.
+// Removing it is worth doing so that status stops reporting a failure that is
+// over, but it must not be what correctness rests on.
+func incidentClock(
+	conds []ConditionSnapshot,
+	t v1.ConditionType,
+	lastHeartbeat time.Time,
+) (startedAt time.Time, running bool) {
+	for _, cond := range conds {
+		if cond.Type != t {
+			continue
+		}
+		return cond.LastTransitionTime, !cond.LastTransitionTime.Before(lastHeartbeat)
+	}
+	return time.Time{}, false
+}
+
 // handleTerminating processes a single Terminating project on a NotReady node.
 // Returns (true, nil) if the project still needs to be checked again later.
+// The timeout it governs ends in force-termination, which declares the Project
+// Terminated without the agent confirming teardown and may strand Docker
+// resources on the node. That is the reason the clock must belong to this
+// outage: a node that recovers, starts a slow teardown and fails again part-way
+// would otherwise be force-terminated against the previous outage's clock,
+// reaching the destructive outcome without the wait that exists to avoid it.
 func (c *ProjectReschedulerController) handleTerminating(
 	ctx context.Context,
 	log *zap.Logger,
 	p *ProjectSnapshot,
+	lastHeartbeat time.Time,
 ) (requeue bool, err error) {
 	log = log.With(zap.String("project", p.Name))
 
-	// Find the TerminatingAt condition, if any.
-	var terminatingAt time.Time
-	var found bool
-	for _, cond := range p.Conditions {
-		if cond.Type == v1.ConditionTypeTerminatingAt {
-			terminatingAt = cond.LastTransitionTime
-			found = true
-			break
-		}
-	}
+	terminatingAt, running := incidentClock(p.Conditions, v1.ConditionTypeTerminatingAt, lastHeartbeat)
 
-	if !found {
-		// First time we see this Terminating project on a NotReady node.
-		// Record the current time as the start of the timeout clock.
+	if !running {
+		if terminatingAt.IsZero() {
+			log.Info("Recording TerminatingAt timestamp for stranded project")
+		} else {
+			log.Info("Ignoring a TerminatingAt from an earlier outage, restarting the timeout",
+				zap.Time("staleClock", terminatingAt), zap.Time("lastHeartbeat", lastHeartbeat))
+		}
+
 		now := c.clock.Now().UTC()
-		log.Info("Recording TerminatingAt timestamp for stranded project", zap.Time("at", now))
 		if err := c.projects.SetTerminatingAt(ctx, p.Name, now); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				log.Debug("Project disappeared before TerminatingAt write, skipping")
@@ -282,29 +408,30 @@ func (c *ProjectReschedulerController) handleTerminating(
 
 // handleRunning processes a single Running project on a NotReady node.
 // Returns (true, nil) if the project still needs to be checked again later.
+//
+// lastHeartbeat is the node's most recent heartbeat. It is what separates a
+// clock started during this failure from one left over by an earlier one, and
+// so what makes the grace period repeatable rather than a once-per-Project
+// protection. See incidentClock.
 func (c *ProjectReschedulerController) handleRunning(
 	ctx context.Context,
 	log *zap.Logger,
 	p *ProjectSnapshot,
+	lastHeartbeat time.Time,
 ) (requeue bool, err error) {
 	log = log.With(zap.String("project", p.Name))
 
-	// Find the NotReadyAt condition, if any.
-	var notReadyAt time.Time
-	var found bool
-	for _, cond := range p.Conditions {
-		if cond.Type == v1.ConditionTypeNotReadyAt {
-			notReadyAt = cond.LastTransitionTime
-			found = true
-			break
-		}
-	}
+	notReadyAt, running := incidentClock(p.Conditions, v1.ConditionTypeNotReadyAt, lastHeartbeat)
 
-	if !found {
-		// First time we see this Running project on a NotReady node.
-		// Record the current time as the start of the grace period clock.
+	if !running {
+		if notReadyAt.IsZero() {
+			log.Info("Recording NotReadyAt timestamp for stranded running project")
+		} else {
+			log.Info("Ignoring a NotReadyAt from an earlier incident, restarting the grace period",
+				zap.Time("staleClock", notReadyAt), zap.Time("lastHeartbeat", lastHeartbeat))
+		}
+
 		now := c.clock.Now().UTC()
-		log.Info("Recording NotReadyAt timestamp for stranded running project", zap.Time("at", now))
 		if err := c.projects.SetNotReadyAt(ctx, p.Name, now); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				log.Debug("Project disappeared before NotReadyAt write, skipping")

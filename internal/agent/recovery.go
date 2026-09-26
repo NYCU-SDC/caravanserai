@@ -22,12 +22,6 @@ const (
 	// the next poll after it expires.
 	recoveryVerifyTimeout = 30 * time.Second
 
-	// recoveryStableWindow is how long a Project must stay healthy before its
-	// attempt count is forgotten. Without it a container that fails every
-	// eleven minutes would be recovered forever, one attempt at a time, and
-	// never look like the persistent fault it is.
-	recoveryStableWindow = 10 * time.Minute
-
 	// transientObservationTimeout bounds how long a Project may sit with a
 	// container in Docker's "restarting" state before it is reported Failed.
 	// cara sets no restart policy, so "restarting" only appears while
@@ -78,13 +72,12 @@ func keyForProject(p *v1.Project) recoveryKey {
 	}
 }
 
+// recoveryEntry is the state of one unresolved incident. There is no entry
+// between incidents: observeHealthy deletes it, so a Project with no entry is
+// one with nothing outstanding.
 type recoveryEntry struct {
 	attempts      int
 	lastAttemptAt time.Time
-
-	// healthySince is when the Project was first seen healthy after an
-	// attempt. Zero while it is unhealthy.
-	healthySince time.Time
 }
 
 // recoveryDecision is what the tracker says to do about an unhealthy Project
@@ -144,10 +137,6 @@ func (t *recoveryTracker) next(key recoveryKey) recoveryDecision {
 
 	e := t.entryLocked(key)
 
-	// Any unhealthy observation ends the stable window: a Project that fails
-	// again has not proven itself, whatever it did in between.
-	e.healthySince = time.Time{}
-
 	if e.attempts == 0 {
 		e.attempts = 1
 		e.lastAttemptAt = t.clock.Now()
@@ -172,26 +161,32 @@ func (t *recoveryTracker) next(key recoveryKey) recoveryDecision {
 	return recoveryAttempt
 }
 
-// observeHealthy records that every container is running. It clears the
-// Project's state once it has stayed healthy for the full stable window, so a
-// Project that recovers and holds starts its next incident from zero.
+// observeHealthy records that every container is running, which closes the
+// incident: the attempt count is dropped, so the next failure starts again at
+// attempt one.
+//
+// The budget bounds one unresolved failure, not a Project's lifetime. Three
+// failures on three separate days, each recovered and each seen running
+// afterwards, are three incidents of one attempt — not one incident of three.
+// Counting them together is what would abandon a Project that recovers
+// reliably on its fourth failure, reporting a fault that had already been
+// fixed three times.
+//
+// A single healthy observation is enough because of when it happens. The
+// caller is the poll loop, so being seen running means the container was
+// still up a full poll interval after the attempt that started it. A
+// container that dies faster than that is never observed running at all: its
+// entry survives, its attempts accumulate, and it exhausts as it should.
+//
+// What this deliberately does not bound is a container that stays up longer
+// than a poll and then dies, again and again. That is flapping, and a retry
+// counter is the wrong instrument for it: "did this attempt work?" and "is
+// this workload stable?" are different questions, and answering the second
+// with the first is precisely what made the budget leak across incidents.
 func (t *recoveryTracker) observeHealthy(key recoveryKey) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
-	e, ok := t.entries[key]
-	if !ok {
-		return
-	}
-
-	if e.healthySince.IsZero() {
-		e.healthySince = t.clock.Now()
-		return
-	}
-
-	if t.clock.Since(e.healthySince) >= recoveryStableWindow {
-		delete(t.entries, key)
-	}
+	delete(t.entries, key)
 }
 
 // observeTransient records that the Project has a container restarting, and

@@ -20,15 +20,23 @@
 //	  the machine-readable Reason and human-readable Message.  Status is always
 //	  True; the field acts as a structured changelog, not a health signal.
 //
-//	  ConditionTypeTerminatingAt — written once by ProjectReschedulerController
-//	  when it first observes a Terminating project on a NotReady node.
-//	  LastTransitionTime is the start of the force-termination timeout clock.
-//	  The condition is never updated after it is set; only read.
+//	  ConditionTypeTerminatingAt — written by ProjectReschedulerController when
+//	  it observes a Terminating project on a NotReady node without a clock for
+//	  the current outage. LastTransitionTime is the start of the
+//	  force-termination timeout clock, and carries the same per-incident rule
+//	  as ConditionTypeNotReadyAt below.
 //
-//	  ConditionTypeNotReadyAt — written once by ProjectReschedulerController
-//	  when it first observes a Running project on a NotReady node.
-//	  LastTransitionTime is the start of the running grace-period clock.
-//	  The condition is never updated after it is set; only read.
+//	  ConditionTypeNotReadyAt — written by ProjectReschedulerController when it
+//	  observes a Running project on a NotReady node without a clock for the
+//	  current failure. LastTransitionTime is the start of the running
+//	  grace-period clock.
+//
+//	  It measures one incident, not the Project's lifetime. A node can go
+//	  NotReady, recover, and fail again; the second failure gets its own full
+//	  grace period, decided by comparing the clock against the node's last
+//	  heartbeat rather than by trusting that something removed the old one.
+//	  Anything reading this condition must make the same comparison — a
+//	  timestamp alone cannot say which failure it belongs to.
 //
 //	  ConditionTypeMaintenance — set and cleared by the agent around an
 //	  operation that stops containers on purpose, such as a backup.
@@ -150,18 +158,21 @@ func IsMaintenanceActive(conditions []Condition, now time.Time) bool {
 // Reason, which without this flag would keep a timestamp from the previous
 // visit to Pending.
 //
-// Callers that write a condition standing on its own — the rescheduler's
-// TerminatingAt and NotReadyAt clocks — pass false: for them the condition
-// fields are the whole story. The field means "when the Status last changed"; refreshing it on an
-// unchanged re-assertion misreports that, and it also defeats every downstream
-// no-op guard, because a status whose bytes differ is a status that must be
-// written. The agent re-reports the same phase, reason and message on every
-// poll tick for every Project on every node, so a moving timestamp turns each
-// of those into a database write and a project.updated event carrying no news.
+// Callers re-asserting a condition they report continuously pass false. The
+// field means "when the Status last changed"; refreshing it on an unchanged
+// re-assertion misreports that, and it also defeats every downstream no-op
+// guard, because a status whose bytes differ is a status that must be written.
+// The agent re-reports the same phase, reason and message on every poll tick
+// for every Project on every node, so a moving timestamp turns each of those
+// into a database write and a project.updated event carrying no news.
 //
-// Rescheduler timers read LastTransitionTime as the moment a state began
-// (TerminatingAt, NotReadyAt), and Maintenance staleness is measured from it,
-// so preserving it is what those readers already assume.
+// The rescheduler's TerminatingAt and NotReadyAt clocks are the opposite case
+// and pass true. Their whole content is the timestamp: Status, Reason and
+// Message are fixed strings, identical on the first incident and the tenth, so
+// the equality check above cannot tell a restart from a re-assertion and would
+// silently keep the previous incident's start time. They are written only when
+// a clock should begin, never on a tick, so there is no no-op traffic to
+// protect against — and a clock that cannot be restarted is not a clock.
 func UpsertCondition(conditions []Condition, cond Condition, transitioned bool) []Condition {
 	for i := range conditions {
 		if conditions[i].Type != cond.Type {
@@ -200,4 +211,34 @@ type Condition struct {
 
 	// Message is a human-readable explanation.
 	Message string `json:"message,omitempty" yaml:"message,omitempty"`
+}
+
+// RemoveConditions returns conditions with every entry whose Type appears in
+// types dropped.
+//
+// Dropped, not set to False: these conditions are records that an incident is
+// in progress, and a finished incident has no record to report. A False entry
+// would also still be found by a reader that matches on Type alone, which is
+// how the rescheduler's clocks are read — it would go on being treated as a
+// start time.
+//
+// The input is never mutated. The result is always a fresh slice, so a caller
+// may keep or discard either independently.
+func RemoveConditions(conditions []Condition, types ...ConditionType) []Condition {
+	if len(conditions) == 0 {
+		return nil
+	}
+
+	drop := make(map[ConditionType]bool, len(types))
+	for _, t := range types {
+		drop[t] = true
+	}
+
+	out := make([]Condition, 0, len(conditions))
+	for _, c := range conditions {
+		if !drop[c.Type] {
+			out = append(out, c)
+		}
+	}
+	return out
 }

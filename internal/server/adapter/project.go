@@ -138,6 +138,13 @@ func (a *ProjectStoreAdapter) SetProjectPending(ctx context.Context, name string
 		// as-is (it was assigned, so it is Known) — releasing ownership never
 		// makes a Project look never-assigned.
 		status.NodeRef = ""
+		// The incident is over for this Project: it is leaving the node that
+		// went NotReady. Both clocks are scoped to that outage, so they go with
+		// it — carried to the next node they would be read as the start of
+		// that node's first failure, which by then is already past every
+		// timeout.
+		status.Conditions = v1.RemoveConditions(status.Conditions,
+			v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt)
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypePhase,
 			Status:             v1.ConditionTrue,
@@ -145,6 +152,53 @@ func (a *ProjectStoreAdapter) SetProjectPending(ctx context.Context, name string
 			Message:            "Node went NotReady; project reset to Pending for rescheduling",
 			LastTransitionTime: now,
 		}, transitioned)
+		return nil
+	})
+}
+
+// ClearRescheduleClocks satisfies controller.ReschedulerProjectStore.
+// Removes the NotReadyAt and TerminatingAt conditions from a Project still
+// assigned to nodeRef, ending the reschedule clocks without touching the phase.
+//
+// This is the other way an incident ends: the node came back before either
+// clock expired, so the Project never moved and its phase never changed. The
+// clocks no longer govern anything — handleRunning and handleTerminating both
+// ignore a clock older than the node's last heartbeat — but they are still in
+// Project status, reporting a failure that is over to anyone who reads it.
+//
+// Two guards, because this write races the next outage. The cleanup decides to
+// run while the node is Ready; between that decision and this write the node
+// can fail again and a fresh clock be written, and deleting that one would
+// hand the Project an extra full grace period:
+//
+//   - notAfter is the heartbeat that proved the node healthy. A clock stamped
+//     later than it belongs to an outage that began after this cleanup was
+//     decided on, and is left alone.
+//   - nodeRef must still be the Project's, so a Project reassigned in the
+//     meantime is not written by the old node's cleanup at all.
+//
+// Writing unconditionally is otherwise fine: UpdateProjectStatusWithRetry is a
+// no-op when the status is unchanged, and the caller only asks for Projects
+// that carry a clock.
+func (a *ProjectStoreAdapter) ClearRescheduleClocks(
+	ctx context.Context,
+	name, nodeRef string,
+	notAfter time.Time,
+) error {
+	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		if status.NodeRef != nodeRef {
+			return nil
+		}
+
+		kept := make([]v1.Condition, 0, len(status.Conditions))
+		for _, c := range status.Conditions {
+			isClock := c.Type == v1.ConditionTypeNotReadyAt || c.Type == v1.ConditionTypeTerminatingAt
+			if isClock && !c.LastTransitionTime.After(notAfter) {
+				continue
+			}
+			kept = append(kept, c)
+		}
+		status.Conditions = kept
 		return nil
 	})
 }
@@ -160,15 +214,21 @@ func (a *ProjectStoreAdapter) SetTerminatingAt(ctx context.Context, name string,
 			Reason:             "NodeNotReady",
 			Message:            "Node went NotReady while project was Terminating; force-termination timeout clock started",
 			LastTransitionTime: at,
-		}, false)
+			// true, not false: every field but the timestamp is a fixed
+			// string, so an unchanged-content check would keep the previous
+			// incident's start time and the clock would never restart.
+		}, true)
 		return nil
 	})
 }
 
 // SetNotReadyAt satisfies controller.ReschedulerProjectStore.
-// Writes (or replaces) the NotReadyAt condition to record the time at which
-// the rescheduler first observed this Running project as stranded on a NotReady
-// node.  The grace period clock starts from this timestamp.
+// Starts, or restarts, the running grace-period clock at the given time.
+//
+// Restarting matters as much as starting: a node can go NotReady, recover, and
+// fail again, and the second failure is owed its own full grace period. The
+// caller only reaches here when it has decided a clock should begin, so this
+// always writes the timestamp it was given.
 func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at time.Time) error {
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
@@ -177,7 +237,8 @@ func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at
 			Reason:             "NodeNotReady",
 			Message:            "Node went NotReady while project was Running; running grace period clock started",
 			LastTransitionTime: at,
-		}, false)
+			// true, for the same reason as SetTerminatingAt above.
+		}, true)
 		return nil
 	})
 }

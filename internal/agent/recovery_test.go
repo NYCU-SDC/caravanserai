@@ -102,42 +102,53 @@ func TestRecoveryStaysExhausted(t *testing.T) {
 	assert.Equal(t, maxRecoveryAttempts, tr.attempts(key))
 }
 
-// Recovering is not enough; the Project has to hold. A container that fails
-// every few minutes would otherwise be recovered forever, one attempt at a
-// time, and never look like the persistent fault it is.
-func TestRecoveryClearsStateOnlyAfterTheStableWindow(t *testing.T) {
-	tr, clk := newTestTracker()
+// Seeing the Project running closes the incident. The budget bounds one
+// unresolved failure, so a Project that is recovered and then fails again
+// hours later must not be charged for the recovery that already worked.
+func TestRecoveryHealthyObservationClearsTheAttemptCount(t *testing.T) {
+	tr, _ := newTestTracker()
 	key := testKey()
 
 	require.Equal(t, recoveryAttempt, tr.next(key))
+	require.Equal(t, 1, tr.attempts(key))
 
-	tr.observeHealthy(key) // starts the window
-	clk.advance(recoveryStableWindow - time.Second)
 	tr.observeHealthy(key)
-	assert.Equal(t, 1, tr.attempts(key), "window not finished, attempts must survive")
+	assert.Equal(t, 0, tr.attempts(key), "a verified recovery closes the incident")
 
-	clk.advance(2 * time.Second)
-	tr.observeHealthy(key)
-	assert.Equal(t, 0, tr.attempts(key), "a full healthy window forgets the incident")
+	assert.Equal(t, recoveryAttempt, tr.next(key), "the next failure is a new incident")
+	assert.Equal(t, 1, tr.attempts(key))
 }
 
-// Failing again mid-window restarts the clock, so a flapping Project cannot
-// accumulate partial healthy periods into a reset.
-func TestRecoveryFailureResetsTheStableWindow(t *testing.T) {
+// Only an actual healthy observation resets. A container that never comes
+// back is one incident however long it runs for, and still exhausts: this is
+// the protection the per-incident budget must not give away.
+func TestRecoveryWithoutAHealthyObservationKeepsAccumulating(t *testing.T) {
 	tr, clk := newTestTracker()
 	key := testKey()
 
-	require.Equal(t, recoveryAttempt, tr.next(key))
+	for i := 1; i <= maxRecoveryAttempts; i++ {
+		require.Equal(t, recoveryAttempt, tr.next(key), "attempt %d", i)
+		require.Equal(t, i, tr.attempts(key))
+		if i < len(recoveryBackoff)+1 {
+			clk.advance(defaultPollInterval)
+		}
+	}
+
+	clk.advance(recoveryVerifyTimeout)
+	assert.Equal(t, recoveryExhausted, tr.next(key))
+}
+
+// observeHealthy is called on every healthy poll, including for Projects that
+// have never failed. It must not panic or resurrect an entry for them.
+func TestRecoveryHealthyObservationWithoutAnEntryIsANoOp(t *testing.T) {
+	tr, _ := newTestTracker()
+	key := testKey()
+
+	tr.observeHealthy(key)
 	tr.observeHealthy(key)
 
-	clk.advance(recoveryStableWindow - time.Second)
-	clk.advance(recoveryBackoff[0])
-	require.Equal(t, recoveryAttempt, tr.next(key), "failed again before the window closed")
-
-	tr.observeHealthy(key)
-	clk.advance(recoveryStableWindow - time.Second)
-	tr.observeHealthy(key)
-	assert.Equal(t, 2, tr.attempts(key), "the window restarted from the new failure")
+	assert.Equal(t, 0, tr.attempts(key))
+	assert.Empty(t, tr.entries, "a healthy Project needs no entry at all")
 }
 
 // A Project reassigned away and back, or deleted and recreated under the same

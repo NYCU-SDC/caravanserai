@@ -33,8 +33,16 @@ var versionCmd = &cobra.Command{
 
 func init() {
 	// Global persistent flags available to every subcommand.
-	rootCmd.PersistentFlags().String("server", "http://localhost:8080", "cara-server address")
-	rootCmd.PersistentFlags().String("output", "table", "output format: table | json | yaml")
+	//
+	// The server address defaults to CARA_SERVER when it is set, so the common
+	// case — always talking to the same control plane — needs no --server flag.
+	// An explicit --server still overrides the environment.
+	defaultServer := os.Getenv("CARA_SERVER")
+	if defaultServer == "" {
+		defaultServer = "http://localhost:8080"
+	}
+	rootCmd.PersistentFlags().String("server", defaultServer, "cara-server address (env: CARA_SERVER)")
+	rootCmd.PersistentFlags().StringP("output", "o", "table", "output format: table | json | yaml")
 
 	// Prevent cobra from printing errors itself — main() handles it.
 	rootCmd.SilenceErrors = true
