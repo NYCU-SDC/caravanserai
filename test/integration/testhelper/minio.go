@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -20,6 +21,58 @@ const (
 	MinioBucket    = "cara-backups-test"
 )
 
+// The MinIO server image, pinned by digest.
+//
+// Chainguard's rebuild, because MinIO no longer serves an image anyone can
+// pull. It deleted minio/minio from Docker Hub in September 2026, and days
+// later made quay.io/minio/minio private too: an anonymous token for that
+// repository now carries no pull permission, so every tag answers 401 and
+// Docker reports "unauthorized: access to the requested resource is not
+// authorized". Re-pinning to another Quay tag does not help.
+//
+// The one image MinIO still publishes, quay.io/minio/aistor/minio, is its
+// commercial product. Without a license it starts with every S3 operation
+// blocked, so using it would mean handing a license to CI and to every
+// machine that runs these tests.
+//
+// Chainguard builds the same server from source and publishes only "latest",
+// so the digest is the pin; there is no release tag to fall back on. Keep it
+// in step with the minio service in docker-compose.yaml.
+const (
+	minioRepository = "cgr.dev/chainguard/minio"
+	minioDigest     = "sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1"
+)
+
+// pinMinioImage makes the pinned MinIO image available under a local tag and
+// returns that tag.
+//
+// dockertest names an image as "repository:tag" both when it pulls and when
+// it creates the container, so it cannot express "repository@digest". Docker's
+// pull API does accept a bare digest in place of a tag, so the image is
+// pulled by digest here and then tagged locally under a name derived from
+// that digest. RunWithOptions finds the tag already present and never pulls.
+func pinMinioImage(dtPool *dockertest.Pool) (string, error) {
+	tag := "pinned-" + strings.TrimPrefix(minioDigest, "sha256:")[:12]
+	ref := minioRepository + ":" + tag
+	if _, err := dtPool.Client.InspectImage(ref); err == nil {
+		return tag, nil
+	}
+
+	if err := dtPool.Client.PullImage(docker.PullImageOptions{
+		Repository: minioRepository,
+		Tag:        minioDigest,
+	}, docker.AuthConfiguration{}); err != nil {
+		return "", fmt.Errorf("dockertest: pull %s@%s: %w", minioRepository, minioDigest, err)
+	}
+	if err := dtPool.Client.TagImage(minioRepository+"@"+minioDigest, docker.TagImageOptions{
+		Repo: minioRepository,
+		Tag:  tag,
+	}); err != nil {
+		return "", fmt.Errorf("dockertest: tag %s: %w", ref, err)
+	}
+	return tag, nil
+}
+
 // StartMinio launches a disposable MinIO container, waits for it to accept
 // requests, creates the test bucket, and returns the endpoint host:port along
 // with a cleanup function.
@@ -34,21 +87,19 @@ func StartMinio() (endpoint string, cleanup func(), err error) {
 	}
 	dtPool.MaxWait = 60 * time.Second
 
-	// Quay, and pinned, because MinIO's Docker Hub repositories are gone: an
-	// anonymous pull of minio/minio now returns 401, which Docker reports as
-	// "repository does not exist or may require docker login". What Quay still
-	// serves is a frozen archive, so "latest" would name something that no
-	// longer moves.
-	//
-	// The digest for this tag is
-	// sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e,
-	// recorded here rather than used: dockertest builds the image reference as
-	// "repository:tag", which has no room for one. docker-compose.yaml pins
-	// both.
+	tag, pinErr := pinMinioImage(dtPool)
+	if pinErr != nil {
+		return "", nil, pinErr
+	}
+
 	resource, runErr := dtPool.RunWithOptions(&dockertest.RunOptions{
-		Repository: "quay.io/minio/minio",
-		Tag:        "RELEASE.2025-09-07T16-13-09Z",
+		Repository: minioRepository,
+		Tag:        tag,
 		Cmd:        []string{"server", "/data"},
+		// The Chainguard image declares no EXPOSE, and dockertest publishes
+		// only the ports an image declares, so without this the container
+		// runs with no host port and GetHostPort returns "".
+		ExposedPorts: []string{"9000/tcp"},
 		Env: []string{
 			"MINIO_ROOT_USER=" + MinioAccessKey,
 			"MINIO_ROOT_PASSWORD=" + MinioSecretKey,

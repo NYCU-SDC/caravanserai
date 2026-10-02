@@ -84,6 +84,9 @@ type BackupSupport struct {
 	Restorer    *restore.Restorer
 	// DataRoot is where Managed volume data and restore markers live.
 	DataRoot string
+	// NodeName is this agent's Node name, recorded in and checked against the
+	// provenance marker.
+	NodeName string
 }
 
 // RouteUpdater is the narrow interface consumed by the agent loop to maintain
@@ -426,6 +429,15 @@ func projectsForReconcile(projects []*v1.Project) []*v1.Project {
 func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, p *v1.Project, logger *zap.Logger) {
 	log := logger.With(zap.String("project", p.Name))
 
+	// Same first question as the health check, and for the same reason: a
+	// container from another assignment is not this one's to adopt, and a
+	// service the spec has since dropped leaves one that walking the spec
+	// cannot find. An unanswerable question stops the tick too — this is the
+	// path that would otherwise start a second generation's containers.
+	if checkStaleContainers(ctx, client, runtime, p, log) != staleNone {
+		return
+	}
+
 	states, err := runtime.InspectProject(ctx, p)
 	if err != nil {
 		log.Warn("Failed to inspect project containers", zap.Error(err))
@@ -435,6 +447,25 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 			err.Error(),
 		)
 		return
+	}
+
+	// A container under a service's name that belongs to another assignment
+	// is checked before anything is counted. Counted as it is found, a stale
+	// container that is running would satisfy this assignment — the Project
+	// reported Running and proxy routes pointed at a workload from an earlier
+	// grant — and one that exited with an error would fail it. Nor may the
+	// reconcile below run: ensureContainer would refuse to adopt the stale
+	// container, and the failure path must not be what removes it. So the
+	// Project is reported blocked, its phase left as it is, and Docker left
+	// alone, exactly as healthCheckOne does for a Running Project.
+	for _, s := range states {
+		if s.NotOwned != nil {
+			log.Warn("A container under a service's name belongs to another assignment",
+				zap.String("reason", recoveryBlockedStaleContainer),
+				zap.String("service", s.ServiceName), zap.Error(s.NotOwned))
+			reportRecoveryBlocked(ctx, client, p, recoveryBlockedStaleContainer, staleContainerMessage(s.NotOwned), log)
+			return
+		}
 	}
 
 	// Check for containers that exited with a non-zero exit code.
@@ -500,7 +531,7 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	// is the last moment the volumes can be populated without a service seeing
 	// an empty directory.
 	if backups != nil {
-		err := ensureVolumeData(ctx, backups.Restorer, backups.Coordinator, backups.DataRoot, p, logger)
+		err := ensureVolumeData(ctx, backups.Restorer, backups.Coordinator, backups.DataRoot, backups.NodeName, p, logger)
 		switch {
 		case err == nil:
 		case errors.Is(err, errDeferred):
@@ -508,13 +539,48 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 			// and let the next tick try again — losing a race is not a fault.
 			return
 		default:
+			// A refusal is not a failure. The agent has established that it
+			// cannot prove which data belongs to this assignment, and every
+			// way out of that — an operator clearing stale bytes, a bucket
+			// misconfiguration being fixed, the real backup appearing — is
+			// something that happens later and should be picked up on the next
+			// poll. Reporting Failed would close that door: Failed is terminal
+			// for the poll loop, so the Project would never be looked at
+			// again even once the problem was resolved.
+			//
+			// The containers are not started and the phase is left alone, so
+			// backup supervision does not begin either: shouldSupervise
+			// requires Running.
+			var blocked *restore.PlacementBlockedError
+			if errors.As(err, &blocked) {
+				log.Warn("Refusing to place the project on data it cannot prove is its own",
+					zap.String("reason", string(blocked.Reason)),
+					zap.String("detail", blocked.Detail))
+				reportRecoveryBlocked(ctx, client, p, string(blocked.Reason), blocked.Detail, log)
+				return
+			}
 			log.Error("Failed to prepare volume data", zap.Error(err))
 			_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "RestoreError", err.Error())
 			return
 		}
+
+		// The data is in place. A block recorded on an earlier tick is over,
+		// and leaving it would report a Project as refused while it serves.
+		clearRecoveryBlocked(ctx, client, p, log)
 	}
 
 	if err := runtime.ReconcileProject(ctx, resolved); err != nil {
+		// A container from another assignment appeared between the check above
+		// and the reconcile. Nothing was mutated — ReconcileProject refuses
+		// before its first Docker call — and this must not become Failed:
+		// Failed is terminal for the poll loop, so the Project would never be
+		// reconciled again even after the stale container is removed.
+		if errors.Is(err, docker.ErrContainerNotOwned) {
+			log.Warn("A container from another assignment appeared during reconcile",
+				zap.String("reason", recoveryBlockedStaleContainer), zap.Error(err))
+			reportRecoveryBlocked(ctx, client, p, recoveryBlockedStaleContainer, staleContainerMessage(err), log)
+			return
+		}
 		log.Error("Failed to reconcile project", zap.Error(err))
 		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "ReconcileError", err.Error())
 		return
@@ -742,6 +808,15 @@ func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime,
 		return
 	}
 
+	// Before anything is inspected or judged: a container from another
+	// assignment blocks the Project, whatever the current spec declares, and
+	// an unanswerable question stops the tick just as firmly. Either way the
+	// restart timer ends, because no judgement is being made this tick.
+	if checkStaleContainers(ctx, client, runtime, p, log) != staleNone {
+		clearTransient()
+		return
+	}
+
 	states, err := runtime.InspectProject(ctx, p)
 	if err != nil {
 		log.Warn("Failed to inspect project containers", zap.Error(err))
@@ -758,8 +833,10 @@ func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime,
 	// pointed at the stale container, and recovery never considered. Nothing
 	// here is this assignment's to judge or to act on, so it is reported as
 	// blocked and left exactly as it is — no route update, no condition
-	// cleared, no Docker call. Only the orphan sweep or an operator can
-	// resolve it.
+	// cleared, no Docker call. A container from a previous lifetime is
+	// reclaimed by the orphan sweep; one left by an earlier grant of this
+	// same lifetime is not reclaimed by anything yet, and an operator has to
+	// remove it.
 	if stale := firstNotOwned(bad); stale != nil {
 		clearTransient()
 		log.Warn("A container under a service's name belongs to another assignment",
@@ -953,9 +1030,10 @@ func recoverLocally(
 			// A container under the service's name belongs to another
 			// assignment. Starting it would run a stale grant's workload as
 			// this one, and removing it would destroy something this
-			// assignment does not own. Like missing data, waiting does not
-			// change that — the orphan sweep or an operator has to — so it
-			// blocks rather than spending attempts.
+			// assignment does not own. Like missing data, retrying does not
+			// change that, so it blocks rather than spending attempts. What
+			// eventually removes the container is described on
+			// docker.ErrContainerNotOwned.
 			log.Warn("Recovery blocked: a container under the service's name belongs to another assignment",
 				zap.String("reason", recoveryBlockedStaleContainer),
 				zap.Strings("services", names), zap.Error(err))
@@ -1100,6 +1178,15 @@ const (
 	recoveryBlockedSecretNotFound    = "SecretNotFound"
 	recoveryBlockedSecretKeyNotFound = "SecretKeyNotFound"
 	recoveryBlockedStaleContainer    = "StaleContainer"
+
+	// Placement-time refusals reuse this condition rather than introducing a
+	// type of their own, and carry a restore.BlockReason as the reason.
+	//
+	// RecoveryBlocked already means what is needed: the agent has refused to
+	// act, the Project must not be moved to a terminal phase because only a
+	// human or a restore can resolve it, and the reason says which problem it
+	// is. A second condition with the same contract would give an operator two
+	// places to look for one answer.
 )
 
 // The condition messages below name only what the Project's own spec names —
@@ -1233,6 +1320,62 @@ func needsHuman(bad []serviceState) bool {
 		}
 	}
 	return false
+}
+
+// staleCheck is what the ownership sweep found before anything else is judged.
+type staleCheck int
+
+const (
+	// staleNone means every container labelled for the Project belongs to the
+	// current assignment. Judging may proceed.
+	staleNone staleCheck = iota
+
+	// staleBlocked means at least one does not. It has been reported;
+	// the caller stops.
+	staleBlocked
+
+	// staleUnknown means Docker could not be asked. The caller stops without
+	// reporting anything: the question "is another assignment's workload
+	// running here" is unanswered, and every action below it — starting a
+	// container, pointing routes, calling a Project healthy — assumes the
+	// answer is no.
+	staleUnknown
+)
+
+// checkStaleContainers asks whether any container on this node labelled for
+// the Project belongs to another assignment, and reports it as blocked if so.
+//
+// It asks Docker for every container carrying the Project's labels, not just
+// the ones the current spec names. A generation that declared a service the
+// spec has since dropped leaves a container no per-service check can see: the
+// new assignment would start beside it, and the orphan sweep would not reclaim
+// it either, because the Project is still assigned to this node. Two
+// generations of the same Project would be running at once.
+//
+// A listing failure fails closed. Inspecting by name can succeed while the
+// list call fails — they are separate Docker API calls — and that combination
+// is exactly the one that hides a container whose service the spec no longer
+// declares. Proceeding on an unanswered question is how two generations end up
+// running; waiting one poll is not.
+func checkStaleContainers(ctx context.Context, client *Client, runtime docker.Runtime, p *v1.Project, log *zap.Logger) staleCheck {
+	stale, err := runtime.StaleContainers(ctx, p)
+	if err != nil {
+		log.Warn("Could not list the Project's containers, skipping this tick", zap.Error(err))
+		return staleUnknown
+	}
+	if len(stale) == 0 {
+		return staleNone
+	}
+
+	names := make([]string, 0, len(stale))
+	for _, c := range stale {
+		names = append(names, c.Name)
+	}
+	log.Warn("Containers on this node belong to another assignment",
+		zap.String("reason", recoveryBlockedStaleContainer),
+		zap.Strings("containers", names), zap.Error(stale[0].Reason))
+	reportRecoveryBlocked(ctx, client, p, recoveryBlockedStaleContainer, staleContainerMessage(stale[0].Reason), log)
+	return staleBlocked
 }
 
 // firstNotOwned returns the first service whose container belongs to another
