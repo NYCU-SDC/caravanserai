@@ -99,6 +99,17 @@ func (r *DockerRuntime) Close() error {
 	return r.client.Close()
 }
 
+// NodeResources reports the CPU count and total memory the Docker daemon
+// makes available to containers. On Docker Desktop these are the VM's limits,
+// not the host's.
+func (r *DockerRuntime) NodeResources(ctx context.Context) (cpuCores int, memoryBytes int64, err error) {
+	info, err := r.client.Info(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("docker: info: %w", err)
+	}
+	return info.NCPU, info.MemTotal, nil
+}
+
 // ── Runtime interface ────────────────────────────────────────────────────────
 
 // ReconcileProject implements Runtime.

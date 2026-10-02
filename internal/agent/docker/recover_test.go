@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -46,6 +47,10 @@ type fakeDocker struct {
 	// onInspect, when set, runs at the start of every ContainerInspect, so a
 	// test can change what Docker holds between two reads of it.
 	onInspect func(name string)
+
+	// info and infoErr are what Info returns.
+	info    system.Info
+	infoErr error
 
 	// pullErr makes ImagePull fail for the named images, to drive a
 	// ReconcileProject into its rollback part-way through.
@@ -215,6 +220,10 @@ func (f *fakeDocker) ContainerLogs(context.Context, string, container.LogsOption
 
 func (f *fakeDocker) VolumeList(context.Context, volume.ListOptions) (volume.ListResponse, error) {
 	return volume.ListResponse{}, nil
+}
+
+func (f *fakeDocker) Info(context.Context) (system.Info, error) {
+	return f.info, f.infoErr
 }
 
 func (f *fakeDocker) Close() error { return nil }
