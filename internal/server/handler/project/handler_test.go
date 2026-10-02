@@ -169,3 +169,32 @@ func TestValidateProjectSpecBackup(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateProjectSpecSize(t *testing.T) {
+	tests := []struct {
+		name    string
+		size    v1.ProjectSize
+		wantErr string // empty means valid
+	}{
+		{name: "omitted size is valid", size: ""},
+		{name: "Small is valid", size: v1.ProjectSizeSmall},
+		{name: "Medium is valid", size: v1.ProjectSizeMedium},
+		{name: "Large is valid", size: v1.ProjectSizeLarge},
+		{name: "lowercase is rejected", size: "medium", wantErr: `spec.size must be one of "Small", "Medium", "Large"`},
+		{name: "unknown size is rejected", size: "XL", wantErr: `spec.size must be one of "Small", "Medium", "Large"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := specWithVolumes(nil, nil)
+			spec.Size = tt.size
+
+			err := validateProjectSpec(spec)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}
