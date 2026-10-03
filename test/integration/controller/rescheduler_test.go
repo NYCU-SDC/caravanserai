@@ -49,6 +49,7 @@ func TestNodeFailureTriggersRescheduling(t *testing.T) {
 			Spec:       v1.NodeSpec{Hostname: name},
 			Status: v1.NodeStatus{
 				State:         v1.NodeStateReady,
+				Allocatable:   controllerhelper.RoomyAllocatable(),
 				LastHeartbeat: clock.Now(),
 			},
 		}

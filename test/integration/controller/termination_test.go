@@ -34,6 +34,7 @@ func TestTerminationLifecycle(t *testing.T) {
 		Spec:       v1.NodeSpec{Hostname: "term-node-01"},
 		Status: v1.NodeStatus{
 			State:         v1.NodeStateReady,
+			Allocatable:   controllerhelper.RoomyAllocatable(),
 			LastHeartbeat: time.Now().UTC(),
 		},
 	}
