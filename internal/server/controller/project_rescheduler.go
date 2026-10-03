@@ -33,11 +33,12 @@ const (
 )
 
 // ProjectSnapshot is the minimal view of a Project needed by
-// ProjectReschedulerController.
+// ProjectReschedulerController and CapacityLedger.
 type ProjectSnapshot struct {
 	Name       string
 	Phase      v1.ProjectPhase
 	NodeRef    string
+	Size       v1.ProjectSize
 	Conditions []ConditionSnapshot
 }
 
