@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 
@@ -135,6 +136,18 @@ var describeProjectCoveredFields = newStringSet(
 	"Status.NodeRef",
 	"Status.AssignmentGeneration",
 	"Status.AssignmentHistory",
+	"Status.Recovery.HealthySinceGeneration",
+	"Status.Recovery.PreferredNode",
+	"Status.Recovery.PreviousAssignment.AssignmentGeneration",
+	"Status.Recovery.PreviousAssignment.NodeName",
+	"Status.Recovery.PreviousAssignment.ProjectUID",
+	"Status.Recovery.RescheduleAttempts",
+	"Status.Recovery.ResourcesRemoved.Assignment.AssignmentGeneration",
+	"Status.Recovery.ResourcesRemoved.Assignment.NodeName",
+	"Status.Recovery.ResourcesRemoved.Assignment.ProjectUID",
+	"Status.Recovery.WorkloadStopped.Assignment.AssignmentGeneration",
+	"Status.Recovery.WorkloadStopped.Assignment.NodeName",
+	"Status.Recovery.WorkloadStopped.Assignment.ProjectUID",
 	"Status.Conditions",
 )
 
@@ -224,4 +237,30 @@ func newStringSet(vals ...string) stringSet {
 func (s stringSet) has(v string) bool {
 	_, ok := s[v]
 	return ok
+}
+
+// The Recovery section appears only once recovery has recorded something, and
+// a healthy window from an older assignment is labelled stale rather than shown
+// as if it described the current one.
+func TestDescribeProjectRecoverySection(t *testing.T) {
+	var none strings.Builder
+	describeProject(&none, &v1.Project{Status: v1.ProjectStatus{Phase: v1.ProjectPhaseRunning}})
+	assert.NotContains(t, none.String(), "Recovery:")
+
+	healthy := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
+	prev := v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 6}
+	var out strings.Builder
+	describeProject(&out, &v1.Project{Status: v1.ProjectStatus{
+		AssignmentGeneration: 7,
+		Recovery: &v1.ProjectRecoveryStatus{
+			RescheduleAttempts:     2,
+			HealthySince:           &healthy,
+			HealthySinceGeneration: 6,
+			PreviousAssignment:     &prev,
+		},
+	}})
+	text := out.String()
+	assert.Contains(t, text, "Recovery:")
+	assert.Contains(t, text, "(stale: generation 6)")
+	assert.Contains(t, text, "node-a generation 6 (uid uid-1)")
 }

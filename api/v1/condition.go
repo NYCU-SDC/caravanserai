@@ -110,6 +110,23 @@ const (
 	// without logging into the node.
 	ConditionTypeRecoveryBlocked ConditionType = "RecoveryBlocked"
 
+	// ConditionTypeRecovering indicates that the server is moving the Project
+	// to another Node. Server-owned: agents cannot write it.
+	//
+	// Like every condition, its message is for humans. Retry counts, backoff
+	// and evidence live in ProjectStatus.Recovery; code must not parse this
+	// message to recover them.
+	ConditionTypeRecovering ConditionType = "Recovering"
+
+	// ConditionTypeRecoveryExhausted indicates that automatic cross-Node
+	// recovery has stopped retrying. Server-owned.
+	ConditionTypeRecoveryExhausted ConditionType = "RecoveryExhausted"
+
+	// ConditionTypeTakeoverRequired indicates that recovery cannot proceed
+	// without an operator: the previous assignment can be neither confirmed
+	// stopped nor fenced. Server-owned.
+	ConditionTypeTakeoverRequired ConditionType = "TakeoverRequired"
+
 	// ConditionTypeDiskPressure indicates whether the node's disk usage is
 	// approaching capacity. Set by the NodeConditionController based on
 	// the Agent's reported Capacity and Allocatable values.

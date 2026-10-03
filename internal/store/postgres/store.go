@@ -997,14 +997,17 @@ const maxStatusUpdateAttempts = 3
 
 // copyProjectStatus returns a status sharing nothing mutable with src.
 //
-// slices.Clone is enough only because every field of v1.Condition is a value
-// type. Should Condition gain a slice, map or pointer field, the copy stops
-// being independent: mutate would edit the original alongside the candidate,
-// statusEqual would report "unchanged" for every in-place edit, and every such
-// update would become a silent no-op that writes nothing and returns nil.
+// Every slice, map or pointer reachable from ProjectStatus must be copied here.
+// A field that is shared instead lets mutate edit the original alongside the
+// candidate; statusEqual then reports "unchanged" for every in-place edit, and
+// each such update becomes a silent no-op that writes nothing and returns nil.
+//
+// slices.Clone is enough for Conditions only because every field of
+// v1.Condition is a value type. Recovery holds pointers, so it is deep-copied.
 func copyProjectStatus(src v1.ProjectStatus) v1.ProjectStatus {
 	dst := src
 	dst.Conditions = slices.Clone(src.Conditions)
+	dst.Recovery = src.Recovery.DeepCopy()
 	return dst
 }
 

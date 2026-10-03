@@ -265,6 +265,11 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 	project.Status.AssignmentGeneration = 0
 	project.Status.AssignmentHistory = v1.AssignmentHistoryNeverAssigned
 
+	// Recovery is server-owned for the same reason: recovery controllers read
+	// its retry counters and evidence as fact, so a value a client injected at
+	// creation would later be acted on as if the server had recorded it.
+	project.Status.Recovery = nil
+
 	if err := h.store.CreateProject(traceCtx, &project); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
 			h.problemWriter.WriteError(traceCtx, w,

@@ -278,6 +278,45 @@ func describeProject(w io.Writer, project *v1.Project) {
 	printField(w, "  Assignment Generation", fmt.Sprintf("%d", project.Status.AssignmentGeneration))
 	printField(w, "  Assignment History", stringOrNone(string(project.Status.AssignmentHistory)))
 
+	// Recovery — shown only once recovery has recorded something, so the
+	// common case prints exactly what it did before.
+	if r := project.Status.Recovery; r != nil {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Recovery:")
+		printField(w, "  Reschedule Attempts", fmt.Sprintf("%d", r.RescheduleAttempts))
+		lastAttempt := "<none>"
+		if r.LastAttemptAt != nil {
+			lastAttempt = formatTimestamp(*r.LastAttemptAt)
+		}
+		printField(w, "  Last Attempt", lastAttempt)
+		// A healthy window from an older assignment says nothing about the
+		// current one, so it is shown as stale rather than as a live window.
+		healthy := "<none>"
+		if r.HealthySince != nil {
+			healthy = formatTimestamp(*r.HealthySince)
+			if r.HealthySinceGeneration != project.Status.AssignmentGeneration {
+				healthy += fmt.Sprintf(" (stale: generation %d)", r.HealthySinceGeneration)
+			}
+		}
+		printField(w, "  Healthy Since", healthy)
+		printField(w, "  Preferred Node", stringOrNone(r.PreferredNode))
+		workloadStopped := "<none>"
+		if e := r.WorkloadStopped; e != nil {
+			workloadStopped = formatEvidence(e.Assignment, e.ObservedAt)
+		}
+		printField(w, "  Workload Stopped", workloadStopped)
+		previous := "<none>"
+		if r.PreviousAssignment != nil {
+			previous = formatAssignment(*r.PreviousAssignment)
+		}
+		printField(w, "  Previous Assignment", previous)
+		resourcesRemoved := "<none>"
+		if e := r.ResourcesRemoved; e != nil {
+			resourcesRemoved = formatEvidence(e.Assignment, e.ObservedAt)
+		}
+		printField(w, "  Resources Removed", resourcesRemoved)
+	}
+
 	// Conditions
 	fmt.Fprintln(w)
 	printConditions(w, project.Status.Conditions)
@@ -313,6 +352,17 @@ func describeSecret(w io.Writer, secret *v1.Secret) {
 }
 
 // --- helpers ----------------------------------------------------------------
+
+// formatAssignment returns "node-a generation 6 (uid 8f14…)".
+func formatAssignment(a v1.AssignmentIdentity) string {
+	return fmt.Sprintf("%s generation %d (uid %s)", stringOrNone(a.NodeName), a.AssignmentGeneration, stringOrNone(a.ProjectUID))
+}
+
+// formatEvidence returns the assignment the evidence is about and when it was
+// observed.
+func formatEvidence(a v1.AssignmentIdentity, observedAt time.Time) string {
+	return formatAssignment(a) + " at " + formatTimestamp(observedAt)
+}
 
 // formatTimestamp returns "2006-01-02T15:04:05Z (3d ago)" or "<none>" for zero.
 func formatTimestamp(t time.Time) string {

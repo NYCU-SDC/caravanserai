@@ -12,6 +12,27 @@
       ],
       "description": "Whether a Project has ever held a Node assignment, and how confidently that is known."
     },
+    "AssignmentIdentity": {
+      "properties": {
+        "projectUID": {
+          "type": "string"
+        },
+        "nodeName": {
+          "type": "string"
+        },
+        "assignmentGeneration": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "projectUID",
+        "nodeName",
+        "assignmentGeneration"
+      ],
+      "description": "AssignmentIdentity names one assignment of one Project lifetime."
+    },
     "Condition": {
       "properties": {
         "type": {
@@ -249,6 +270,47 @@
       ],
       "description": "Lifecycle state of a Project as maintained by the Controller Manager."
     },
+    "ProjectRecoveryStatus": {
+      "properties": {
+        "rescheduleAttempts": {
+          "type": "integer",
+          "description": "RescheduleAttempts counts cross-Node reschedules in the current incident."
+        },
+        "lastAttemptAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "LastAttemptAt is when the most recent reschedule was attempted. Backoff\nis computed from it."
+        },
+        "healthySince": {
+          "type": "string",
+          "format": "date-time",
+          "description": "HealthySince is when the Project was last seen continuously healthy. It\nis meaningful only while HealthySinceGeneration equals the current\nassignment generation: a window observed under an older assignment says\nnothing about the current one."
+        },
+        "healthySinceGeneration": {
+          "type": "integer",
+          "description": "HealthySinceGeneration is the assignment generation HealthySince was\nobserved under."
+        },
+        "preferredNode": {
+          "type": "string",
+          "description": "PreferredNode is a scheduler hint only. Status.NodeRef remains the\nauthoritative assignment."
+        },
+        "workloadStopped": {
+          "$ref": "#/$defs/WorkloadStoppedEvidence",
+          "description": "WorkloadStopped is the durable no-start latch for one assignment\ngeneration: the assigned Agent confirmed that every Project container is\nstopped. It is not proof that runtime resources were removed, and it\nalone never authorizes final deletion. Only a committed newer assignment\nclears it; time alone does not."
+        },
+        "previousAssignment": {
+          "$ref": "#/$defs/AssignmentIdentity",
+          "description": "PreviousAssignment identifies an assignment whose Node may still hold\nthe Project's resources after nodeRef moved on. It is the durable cleanup\nowner: a new assignment cannot be committed while it is unresolved."
+        },
+        "resourcesRemoved": {
+          "$ref": "#/$defs/ResourcesRemovedEvidence",
+          "description": "ResourcesRemoved is evidence that the cleanup owner removed every\ndeletion-scoped resource it held for that assignment. Normal final\ndeletion requires it."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ProjectRecoveryStatus is the structured recovery state of a Project."
+    },
     "ProjectSpec": {
       "properties": {
         "services": {
@@ -313,11 +375,33 @@
           },
           "type": "array",
           "description": "Conditions is a list of granular observable states."
+        },
+        "recovery": {
+          "$ref": "#/$defs/ProjectRecoveryStatus",
+          "description": "Recovery is the durable state of cross-Node recovery: retry bookkeeping\nand the evidence that lets an assignment be released or a record be\ndeleted. It lives here rather than in Condition messages because it must\nsurvive server restarts and duplicate controller events, and because code\nmust never recover a counter or an identity by parsing a message.\n\nServer-owned; not a user manifest field. Nil until recovery first records\nsomething."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "ProjectStatus is written by the Controller Manager and Agent."
+    },
+    "ResourcesRemovedEvidence": {
+      "properties": {
+        "assignment": {
+          "$ref": "#/$defs/AssignmentIdentity"
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "assignment",
+        "observedAt"
+      ],
+      "description": "ResourcesRemovedEvidence records that the cleanup owner of Assignment removed every deletion-scoped resource it held for that assignment."
     },
     "SecretKeySelector": {
       "properties": {
@@ -420,6 +504,24 @@
         "Ephemeral"
       ],
       "description": "Governs the lifecycle and backup behaviour of a Volume."
+    },
+    "WorkloadStoppedEvidence": {
+      "properties": {
+        "assignment": {
+          "$ref": "#/$defs/AssignmentIdentity"
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "assignment",
+        "observedAt"
+      ],
+      "description": "WorkloadStoppedEvidence records that the Agent of Assignment confirmed every Project container stopped."
     }
   },
   "title": "Project"

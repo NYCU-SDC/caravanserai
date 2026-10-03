@@ -335,6 +335,117 @@ type ProjectStatus struct {
 
 	// Conditions is a list of granular observable states.
 	Conditions []Condition `json:"conditions,omitempty" yaml:"conditions,omitempty"`
+
+	// Recovery is the durable state of cross-Node recovery: retry bookkeeping
+	// and the evidence that lets an assignment be released or a record be
+	// deleted. It lives here rather than in Condition messages because it must
+	// survive server restarts and duplicate controller events, and because code
+	// must never recover a counter or an identity by parsing a message.
+	//
+	// Server-owned; not a user manifest field. Nil until recovery first records
+	// something.
+	Recovery *ProjectRecoveryStatus `json:"recovery,omitempty" yaml:"recovery,omitempty"`
+}
+
+// ProjectRecoveryStatus is the structured recovery state of a Project.
+//
+// The retry, backoff, preference and healthy-window fields are written only by
+// server-side controllers. The evidence fields are written only through
+// dedicated guarded mutations that validate the reporting Agent's identity; an
+// ordinary Agent status report can set or clear none of them.
+type ProjectRecoveryStatus struct {
+	// RescheduleAttempts counts cross-Node reschedules in the current incident.
+	RescheduleAttempts int `json:"rescheduleAttempts,omitempty" yaml:"rescheduleAttempts,omitempty"`
+
+	// LastAttemptAt is when the most recent reschedule was attempted. Backoff
+	// is computed from it.
+	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty" yaml:"lastAttemptAt,omitempty"`
+
+	// HealthySince is when the Project was last seen continuously healthy. It
+	// is meaningful only while HealthySinceGeneration equals the current
+	// assignment generation: a window observed under an older assignment says
+	// nothing about the current one.
+	HealthySince *time.Time `json:"healthySince,omitempty" yaml:"healthySince,omitempty"`
+
+	// HealthySinceGeneration is the assignment generation HealthySince was
+	// observed under.
+	HealthySinceGeneration int64 `json:"healthySinceGeneration,omitempty" yaml:"healthySinceGeneration,omitempty"`
+
+	// PreferredNode is a scheduler hint only. Status.NodeRef remains the
+	// authoritative assignment.
+	PreferredNode string `json:"preferredNode,omitempty" yaml:"preferredNode,omitempty"`
+
+	// WorkloadStopped is the durable no-start latch for one assignment
+	// generation: the assigned Agent confirmed that every Project container is
+	// stopped. It is not proof that runtime resources were removed, and it
+	// alone never authorizes final deletion. Only a committed newer assignment
+	// clears it; time alone does not.
+	WorkloadStopped *WorkloadStoppedEvidence `json:"workloadStopped,omitempty" yaml:"workloadStopped,omitempty"`
+
+	// PreviousAssignment identifies an assignment whose Node may still hold
+	// the Project's resources after nodeRef moved on. It is the durable cleanup
+	// owner: a new assignment cannot be committed while it is unresolved.
+	PreviousAssignment *AssignmentIdentity `json:"previousAssignment,omitempty" yaml:"previousAssignment,omitempty"`
+
+	// ResourcesRemoved is evidence that the cleanup owner removed every
+	// deletion-scoped resource it held for that assignment. Normal final
+	// deletion requires it.
+	ResourcesRemoved *ResourcesRemovedEvidence `json:"resourcesRemoved,omitempty" yaml:"resourcesRemoved,omitempty"`
+}
+
+// AssignmentIdentity names one assignment of one Project lifetime. All three
+// parts are needed: UID separates lifetimes that share a name, and the
+// generation separates assignments that reuse a Node (A→B→A).
+type AssignmentIdentity struct {
+	ProjectUID           string `json:"projectUID" yaml:"projectUID"`
+	NodeName             string `json:"nodeName" yaml:"nodeName"`
+	AssignmentGeneration int64  `json:"assignmentGeneration" yaml:"assignmentGeneration"`
+}
+
+// WorkloadStoppedEvidence records that the Agent of Assignment confirmed every
+// Project container stopped. ObservedAt is when that verification completed.
+type WorkloadStoppedEvidence struct {
+	Assignment AssignmentIdentity `json:"assignment" yaml:"assignment"`
+	ObservedAt time.Time          `json:"observedAt" yaml:"observedAt"`
+}
+
+// ResourcesRemovedEvidence records that the cleanup owner of Assignment
+// removed every deletion-scoped resource it held for that assignment.
+// ObservedAt is when that verification completed.
+type ResourcesRemovedEvidence struct {
+	Assignment AssignmentIdentity `json:"assignment" yaml:"assignment"`
+	ObservedAt time.Time          `json:"observedAt" yaml:"observedAt"`
+}
+
+// DeepCopy returns a ProjectRecoveryStatus sharing no pointer with r.
+func (r *ProjectRecoveryStatus) DeepCopy() *ProjectRecoveryStatus {
+	if r == nil {
+		return nil
+	}
+	out := *r
+	out.LastAttemptAt = copyTime(r.LastAttemptAt)
+	out.HealthySince = copyTime(r.HealthySince)
+	if r.WorkloadStopped != nil {
+		ws := *r.WorkloadStopped
+		out.WorkloadStopped = &ws
+	}
+	if r.PreviousAssignment != nil {
+		pa := *r.PreviousAssignment
+		out.PreviousAssignment = &pa
+	}
+	if r.ResourcesRemoved != nil {
+		rr := *r.ResourcesRemoved
+		out.ResourcesRemoved = &rr
+	}
+	return &out
+}
+
+func copyTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	return &c
 }
 
 // Project is the central workload resource. It groups one or more containers
