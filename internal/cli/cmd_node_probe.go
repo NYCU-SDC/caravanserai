@@ -15,6 +15,7 @@ import (
 // Usage:
 //
 //	caractl node probe <name>
+//	caractl node set-tier <name> primary|backup
 //
 // Additional node subcommands can be added over time; the tree is intentionally
 // separate from `get nodes` / `describe nodes` because those are read-only
@@ -26,6 +27,7 @@ func NewNodeCmd() *cobra.Command {
 		Short: "Node-level operations",
 	}
 	cmd.AddCommand(newNodeProbeCmd())
+	cmd.AddCommand(newNodeSetTierCmd())
 	return cmd
 }
 
