@@ -119,3 +119,49 @@ func keys[V any](m map[string]V) []string {
 	}
 	return out
 }
+
+// TestCapacityLedgerAgainstPostgres validates that the ledger books only the
+// phases that hold resources, reads each Project's size back from PostgreSQL,
+// and applies the fit check to the sum.
+func TestCapacityLedgerAgainstPostgres(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+
+	ctx := context.Background()
+	const node = "ledger-node"
+
+	create := func(name string, phase v1.ProjectPhase, nodeRef string, size v1.ProjectSize) {
+		t.Helper()
+		require.NoError(t, s.Store.CreateProject(ctx, &v1.Project{
+			TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"},
+			ObjectMeta: v1.ObjectMeta{Name: name},
+			Spec:       v1.ProjectSpec{Size: size},
+			Status:     v1.ProjectStatus{Phase: phase, NodeRef: nodeRef},
+		}))
+	}
+	create("running-large", v1.ProjectPhaseRunning, node, v1.ProjectSizeLarge)         // 2c / 4Gi
+	create("terminating-small", v1.ProjectPhaseTerminating, node, v1.ProjectSizeSmall) // 0.5c / 512Mi
+	create("scheduled-default", v1.ProjectPhaseScheduled, node, "")                    // omitted → Medium: 1c / 2Gi
+	create("failed-large", v1.ProjectPhaseFailed, node, v1.ProjectSizeLarge)           // not booked
+	create("pending-large", v1.ProjectPhasePending, "", v1.ProjectSizeLarge)           // not on the node
+	create("elsewhere-large", v1.ProjectPhaseRunning, "other-node", v1.ProjectSizeLarge)
+
+	ledger := ctrl.NewCapacityLedger(shared.logger, adapter.NewProjectStoreAdapter(s.Store))
+
+	used, err := ledger.Used(ctx, node)
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.NodeUsage{CPUMilli: 3500, MemoryBytes: 4<<30 + 512<<20 + 2<<30}, used,
+		"only Running, Terminating and Scheduled projects on the node are booked")
+
+	// 3.5c / 6.5Gi booked. 4c / 8Gi allocatable leaves 0.5c / 1.5Gi.
+	n := ctrl.ReadyNode{Name: node, Allocatable: v1.ResourceList{"cpu": "4", "memory": "8Gi"}}
+
+	ok, reason, err := ledger.Fits(ctx, n, v1.ProjectSizeSmall)
+	require.NoError(t, err)
+	assert.True(t, ok, "Small fits the remaining 0.5c / 1.5Gi exactly on cpu: %s", reason)
+
+	ok, reason, err = ledger.Fits(ctx, n, v1.ProjectSizeMedium)
+	require.NoError(t, err)
+	assert.False(t, ok, "Medium needs 1c but only 0.5c remains")
+	assert.Contains(t, reason, "lacks cpu")
+}
