@@ -25,6 +25,14 @@ type SchedulerProjectStore interface {
 	// GetProjectPhase returns the current phase and nodeRef of the named Project.
 	GetProjectPhase(ctx context.Context, name string) (v1.ProjectPhase, string, error)
 
+	// GetProjectSize returns the declared size of the named Project; empty
+	// when it declared none.
+	GetProjectSize(ctx context.Context, name string) (v1.ProjectSize, error)
+
+	// CapacityProjectStore lets the scheduler's capacity ledger see what is
+	// already placed on each Node.
+	CapacityProjectStore
+
 	// SetProjectScheduled writes the nodeRef and transitions the Project to
 	// Scheduled phase atomically.
 	SetProjectScheduled(ctx context.Context, name, nodeRef string) error
@@ -40,6 +48,9 @@ type ReadyNode struct {
 	// Allocatable is the capacity the Node offers to Projects, as last
 	// reported by its agent. Empty when the agent has not reported it.
 	Allocatable v1.ResourceList
+
+	// Conditions are the Node's observable conditions, e.g. DiskPressure.
+	Conditions []v1.Condition
 }
 
 // SchedulerNodeStore is the store surface needed to enumerate schedulable Nodes.
@@ -52,14 +63,15 @@ type SchedulerNodeStore interface {
 // ProjectSchedulerController picks a target Node for every Project in Pending
 // phase and transitions it to Scheduled.
 //
-// MVP scheduling algorithm: select the first Ready Node in the list returned
-// by the store.  A more sophisticated algorithm (resource-aware, affinity,
-// weighted random) can be dropped in later without changing the controller
-// lifecycle or the Manager wiring.
+// Scheduling is Filter -> pick. Filter narrows the Ready Nodes to those that
+// can legitimately host the Project (see filterNodes). The pick is still the
+// MVP one, the first candidate; a Score stage can be dropped in later without
+// changing the controller lifecycle or the Manager wiring.
 type ProjectSchedulerController struct {
 	logger       *zap.Logger
 	projects     SchedulerProjectStore
 	nodes        SchedulerNodeStore
+	ledger       *CapacityLedger
 	bus          *event.Bus
 	seedInterval time.Duration
 }
@@ -84,6 +96,7 @@ func NewProjectSchedulerController(
 		logger:       logger,
 		projects:     projects,
 		nodes:        nodes,
+		ledger:       NewCapacityLedger(logger, projects),
 		bus:          bus,
 		seedInterval: interval,
 	}
@@ -130,8 +143,29 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		return Result{Requeue: true}, nil
 	}
 
-	// MVP: pick the first node. Replace with a real scoring algorithm later.
-	target := readyNodes[0].Name
+	size, err := c.projects.GetProjectSize(ctx, name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			log.Debug("Project not found, skipping")
+			return Result{}, nil
+		}
+		return Result{}, err
+	}
+
+	candidates, rejected, err := filterNodes(ctx, c.ledger, readyNodes, size)
+	if err != nil {
+		return Result{}, err
+	}
+
+	if len(candidates) == 0 {
+		log.Warn("No node can host the project, will retry",
+			zap.String("size", string(v1.ProjectSpec{Size: size}.EffectiveSize())),
+			zap.Strings("rejected", rejected))
+		return Result{Requeue: true}, nil
+	}
+
+	// MVP: pick the first candidate. Replace with a Score stage later.
+	target := candidates[0].Name
 
 	log.Info("Scheduling project", zap.String("node", target))
 

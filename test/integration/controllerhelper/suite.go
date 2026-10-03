@@ -40,6 +40,13 @@ type Suite struct {
 	Logger  *zap.Logger
 }
 
+// RoomyAllocatable is an Allocatable large enough that no test Project fills
+// it. The scheduler skips a Node that has not reported Allocatable, so a test
+// Node that should receive Projects needs it set.
+func RoomyAllocatable() v1.ResourceList {
+	return v1.ResourceList{"cpu": "64", "memory": "256Gi"}
+}
+
 // NewSuite wires up a real pgstore, event bus, adapters, and controller
 // manager with all 4 controllers registered.  The controller manager is NOT
 // started yet — call Start(ctx) to launch it.
