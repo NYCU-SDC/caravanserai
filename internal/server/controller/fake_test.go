@@ -227,20 +227,26 @@ func (f *fakeSchedulerProjectStore) SetProjectScheduled(_ context.Context, name,
 
 type fakeSchedulerNodeStore struct {
 	mu         sync.Mutex
-	readyNodes []string
+	readyNodes []ReadyNode
 }
 
 var _ SchedulerNodeStore = (*fakeSchedulerNodeStore)(nil)
 
+// newFakeSchedulerNodeStore returns a store whose ready Nodes have the given
+// names and no labels or Allocatable.
 func newFakeSchedulerNodeStore(ready ...string) *fakeSchedulerNodeStore {
-	return &fakeSchedulerNodeStore{readyNodes: ready}
+	nodes := make([]ReadyNode, len(ready))
+	for i, name := range ready {
+		nodes[i] = ReadyNode{Name: name}
+	}
+	return &fakeSchedulerNodeStore{readyNodes: nodes}
 }
 
-func (f *fakeSchedulerNodeStore) ListReadyNodeNames(_ context.Context) ([]string, error) {
+func (f *fakeSchedulerNodeStore) ListReadyNodes(_ context.Context) ([]ReadyNode, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	out := make([]string, len(f.readyNodes))
+	out := make([]ReadyNode, len(f.readyNodes))
 	copy(out, f.readyNodes)
 	return out, nil
 }

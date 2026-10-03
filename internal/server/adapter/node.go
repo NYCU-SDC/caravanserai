@@ -113,16 +113,20 @@ func NewNodeReadyAdapter(s *pgstore.Store) *NodeReadyAdapter {
 	return &NodeReadyAdapter{s: s}
 }
 
-func (a *NodeReadyAdapter) ListReadyNodeNames(ctx context.Context) ([]string, error) {
+func (a *NodeReadyAdapter) ListReadyNodes(ctx context.Context) ([]controller.ReadyNode, error) {
 	nodes, err := a.s.ListNodes(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var names []string
+	var ready []controller.ReadyNode
 	for _, n := range nodes {
 		if n.Status.State == v1.NodeStateReady && !n.Spec.Unschedulable {
-			names = append(names, n.Name)
+			ready = append(ready, controller.ReadyNode{
+				Name:        n.Name,
+				Labels:      n.Labels,
+				Allocatable: n.Status.Allocatable,
+			})
 		}
 	}
-	return names, nil
+	return ready, nil
 }
