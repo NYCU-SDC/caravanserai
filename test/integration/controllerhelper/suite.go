@@ -94,6 +94,11 @@ func NewSuite(t *testing.T, pool *pgxpool.Pool, databaseURL string, logger *zap.
 		bus,
 		opts...,
 	))
+	mgr.Add(controller.NewFailedProjectReschedulerController(logger,
+		projectAdapter,
+		bus,
+		opts...,
+	))
 
 	return &Suite{
 		Store:   pgStore,

@@ -1005,6 +1005,7 @@ const maxStatusUpdateAttempts = 3
 func copyProjectStatus(src v1.ProjectStatus) v1.ProjectStatus {
 	dst := src
 	dst.Conditions = slices.Clone(src.Conditions)
+	dst.FailedNodes = slices.Clone(src.FailedNodes)
 	return dst
 }
 
@@ -1192,12 +1193,21 @@ func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) erro
 		return fmt.Errorf("postgres: marshal project annotations: %w", err)
 	}
 
+	// Applying a Project again starts its retry budget over: whoever applies it
+	// has seen it fail and may have fixed what was wrong, so the nodes it failed
+	// on are no longer ruled out and the moves it spent are given back. The
+	// exhausted marker goes with them, or a Project that can be retried would
+	// still read as one that cannot.
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE resources
-		SET spec = $1, labels = $2, annotations = $3, updated_at = $4, resource_version = resource_version + 1
+		SET spec = $1, labels = $2, annotations = $3, updated_at = $4, resource_version = resource_version + 1,
+		    status = (status - 'failedNodes') || jsonb_build_object('conditions',
+		        COALESCE((SELECT jsonb_agg(c) FROM jsonb_array_elements(COALESCE(status->'conditions', '[]'::jsonb)) c
+		                  WHERE c->>'type' <> $9), '[]'::jsonb))
 		WHERE kind = $5 AND namespace = $6 AND name = $7 AND phase = ANY($8)`,
 		spec, labels, annotations, now, kindProject, project.ObjectMeta.Namespace, project.Name,
 		[]string{string(v1.ProjectPhasePending), string(v1.ProjectPhaseFailed)},
+		string(v1.ConditionTypeRescheduleExhausted),
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: update project spec %q: %w", project.Name, err)

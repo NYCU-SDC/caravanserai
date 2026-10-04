@@ -6,6 +6,7 @@ package adapter
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -52,12 +53,15 @@ func (a *ProjectStoreAdapter) GetProjectPhase(ctx context.Context, name string) 
 	return project.Status.Phase, project.Status.NodeRef, nil
 }
 
-func (a *ProjectStoreAdapter) GetProjectSize(ctx context.Context, name string) (v1.ProjectSize, error) {
+func (a *ProjectStoreAdapter) GetProjectPlacement(ctx context.Context, name string) (controller.ProjectPlacement, error) {
 	project, err := a.s.GetProject(ctx, name)
 	if err != nil {
-		return "", err
+		return controller.ProjectPlacement{}, err
 	}
-	return project.Spec.Size, nil
+	return controller.ProjectPlacement{
+		Size:          project.Spec.Size,
+		ExcludedNodes: slices.Clone(project.Status.FailedNodes),
+	}, nil
 }
 
 func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nodeRef string) error {
@@ -114,20 +118,7 @@ func (a *ProjectStoreAdapter) ListProjectsByNodeRef(ctx context.Context, nodeRef
 	}
 	snapshots := make([]*controller.ProjectSnapshot, len(projects))
 	for i, p := range projects {
-		conditions := make([]controller.ConditionSnapshot, len(p.Status.Conditions))
-		for j, c := range p.Status.Conditions {
-			conditions[j] = controller.ConditionSnapshot{
-				Type:               c.Type,
-				LastTransitionTime: c.LastTransitionTime,
-			}
-		}
-		snapshots[i] = &controller.ProjectSnapshot{
-			Name:       p.Name,
-			Phase:      p.Status.Phase,
-			NodeRef:    p.Status.NodeRef,
-			Size:       p.Spec.Size,
-			Conditions: conditions,
-		}
+		snapshots[i] = snapshotOf(p)
 	}
 	return snapshots, nil
 }
@@ -267,6 +258,97 @@ func (a *ProjectStoreAdapter) ForceTerminated(ctx context.Context, name string) 
 			Message:            "Node was NotReady for too long; project force-terminated. Docker resources on the node may need manual cleanup.",
 			LastTransitionTime: now,
 		}, transitioned)
+		return nil
+	})
+}
+
+// snapshotOf converts an api/v1 Project into the view the controllers read.
+func snapshotOf(p *v1.Project) *controller.ProjectSnapshot {
+	conditions := make([]controller.ConditionSnapshot, len(p.Status.Conditions))
+	for i, c := range p.Status.Conditions {
+		conditions[i] = controller.ConditionSnapshot{
+			Type:               c.Type,
+			Reason:             c.Reason,
+			LastTransitionTime: c.LastTransitionTime,
+		}
+	}
+	return &controller.ProjectSnapshot{
+		Name:        p.Name,
+		Phase:       p.Status.Phase,
+		NodeRef:     p.Status.NodeRef,
+		Size:        p.Spec.Size,
+		FailedNodes: slices.Clone(p.Status.FailedNodes),
+		Conditions:  conditions,
+	}
+}
+
+// GetProjectSnapshot satisfies controller.FailedProjectStore.
+func (a *ProjectStoreAdapter) GetProjectSnapshot(ctx context.Context, name string) (*controller.ProjectSnapshot, error) {
+	project, err := a.s.GetProject(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return snapshotOf(project), nil
+}
+
+// MoveFailedProject satisfies controller.FailedProjectStore. It returns a
+// Failed Project to Pending so the scheduler places it again, and records the
+// Node it leaves in FailedNodes so the scheduler does not choose it again.
+//
+// It does nothing unless the Project is still Failed on fromNode: the decision
+// to move was made on an earlier read, and a Project that was since applied
+// again, deleted or moved is no longer the one that was judged.
+//
+// Clearing nodeRef revokes the assignment but, as in SetProjectPending, leaves
+// the generation counter and assignment history alone.
+func (a *ProjectStoreAdapter) MoveFailedProject(ctx context.Context, name, fromNode, message string) error {
+	now := time.Now().UTC()
+	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		if status.Phase != v1.ProjectPhaseFailed || status.NodeRef != fromNode {
+			return nil
+		}
+		if !slices.Contains(status.FailedNodes, fromNode) {
+			status.FailedNodes = append(status.FailedNodes, fromNode)
+		}
+		status.Phase = v1.ProjectPhasePending
+		status.NodeRef = ""
+		status.Conditions = v1.RemoveConditions(status.Conditions,
+			v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt)
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypePhase,
+			Status:             v1.ConditionTrue,
+			Reason:             "RescheduledAfterFailure",
+			Message:            message,
+			LastTransitionTime: now,
+		}, true)
+		return nil
+	})
+}
+
+// ClearFailedNodes satisfies controller.FailedProjectStore.
+func (a *ProjectStoreAdapter) ClearFailedNodes(ctx context.Context, name string) error {
+	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		status.FailedNodes = nil
+		return nil
+	})
+}
+
+// SetRescheduleExhausted satisfies controller.FailedProjectStore. It marks a
+// Failed Project as out of moves; it does nothing for a Project that is no
+// longer Failed.
+func (a *ProjectStoreAdapter) SetRescheduleExhausted(ctx context.Context, name, message string) error {
+	now := time.Now().UTC()
+	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		if status.Phase != v1.ProjectPhaseFailed {
+			return nil
+		}
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypeRescheduleExhausted,
+			Status:             v1.ConditionTrue,
+			Reason:             "RetriesExhausted",
+			Message:            message,
+			LastTransitionTime: now,
+		}, false)
 		return nil
 	})
 }
