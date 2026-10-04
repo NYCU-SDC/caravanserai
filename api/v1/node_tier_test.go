@@ -48,6 +48,7 @@ func TestNodeEffectiveTier(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			node := Node{ObjectMeta: ObjectMeta{Labels: tt.labels}}
 			assert.Equal(t, tt.want, node.EffectiveTier())
+			assert.Equal(t, tt.want, NodeTierFromLabels(tt.labels))
 		})
 	}
 	assert.Equal(t, NodeTierBackup, DefaultNodeTier, "unlabeled nodes default to backup")
