@@ -417,6 +417,28 @@ type ResourcesRemovedEvidence struct {
 	ObservedAt time.Time          `json:"observedAt" yaml:"observedAt"`
 }
 
+// ClearForNewAssignment drops the state a newly committed assignment
+// invalidates: the previous generation's no-start latch and its healthy
+// window. It is the only operation that clears WorkloadStopped, and it must run
+// inside the same compare-and-swap that commits the new assignment.
+func (r *ProjectRecoveryStatus) ClearForNewAssignment() {
+	if r == nil {
+		return
+	}
+	r.WorkloadStopped = nil
+	r.ClearHealthyWindow()
+}
+
+// ClearHealthyWindow forgets the current healthy window, as any new failure or
+// assignment must.
+func (r *ProjectRecoveryStatus) ClearHealthyWindow() {
+	if r == nil {
+		return
+	}
+	r.HealthySince = nil
+	r.HealthySinceGeneration = 0
+}
+
 // DeepCopy returns a ProjectRecoveryStatus sharing no pointer with r.
 func (r *ProjectRecoveryStatus) DeepCopy() *ProjectRecoveryStatus {
 	if r == nil {

@@ -288,6 +288,27 @@ type ProjectStore interface {
 	// PatchProjectConditionFenced.
 	ClearProjectConditionFenced(ctx context.Context, name string, ref AssignmentRef, conditionType v1.ConditionType) error
 
+	// RecordWorkloadStopped stores the currently assigned Agent's evidence that
+	// every Project container is stopped. The fence and the phase (Scheduled,
+	// Running, Failed or Terminating) are checked on the same snapshot the
+	// compare-and-swap is versioned against. The evidence identity is taken
+	// from ref, never from the caller separately. The first evidence for an
+	// assignment wins: re-recording it is a no-op that keeps the original
+	// ObservedAt and bumps no version. Returns ErrStaleAssignment for a fence
+	// that is not current, ErrConflictState for a disallowed phase, and
+	// ErrNotFound when the Project is gone.
+	RecordWorkloadStopped(ctx context.Context, name string, ref AssignmentRef, observedAt time.Time) error
+
+	// RecordResourcesRemoved stores the cleanup owner's evidence that every
+	// deletion-scoped resource it held for its assignment is gone. The owner is
+	// either the current assignment or the durable PreviousAssignment; ownership
+	// is checked on the snapshot the version-guarded swap is based on, so a
+	// PreviousAssignment that changes in between turns the swap into a retry
+	// that then fails the check. The first evidence for an assignment wins.
+	// Returns ErrStaleAssignment when owner is neither, and ErrNotFound when the
+	// Project is gone. It grants no status-write or workload-start authority.
+	RecordResourcesRemoved(ctx context.Context, name string, owner AssignmentRef, observedAt time.Time) error
+
 	// UpdateProjectSpec writes only the user-mutable fields of a Project
 	// (spec, labels, annotations). Status is preserved. The update is only
 	// allowed when the project's current phase is Pending or Failed; returns

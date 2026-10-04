@@ -863,6 +863,56 @@ func (s *Store) swapProjectStatusFenced(
 	return nil
 }
 
+// swapProjectStatusForUID is a compare-and-swap pinned to one Project
+// lifetime: it matches only the row with this UID at this version. Use it
+// wherever the status was read on behalf of a caller that named a specific
+// lifetime, so a delete-and-recreate between read and write cannot redirect
+// the write to a same-name successor.
+func (s *Store) swapProjectStatusForUID(
+	ctx context.Context,
+	name string,
+	expectedVersion int64,
+	uid string,
+	status v1.ProjectStatus,
+) error {
+	raw, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal project status: %w", err)
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE resources
+		SET phase = $1, status = $2, updated_at = $3, resource_version = resource_version + 1
+		WHERE kind = $4 AND namespace = $5 AND name = $6 AND resource_version = $7 AND uid = $8`,
+		string(status.Phase), raw, time.Now().UTC(),
+		kindProject, defaultNamespace, name, expectedVersion, uid,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: update project status %q at version %d: %w", name, expectedVersion, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return s.classifyUIDSwapMiss(ctx, name, uid)
+	}
+	return nil
+}
+
+// classifyUIDSwapMiss explains a UID-pinned swap that matched no row: the
+// same lifetime at a newer version is a retryable race; a different lifetime
+// under the name means the caller's lifetime is gone, which no retry fixes.
+func (s *Store) classifyUIDSwapMiss(ctx context.Context, name, uid string) error {
+	project, err := s.getProject(ctx, name)
+	switch {
+	case err == nil && project.ObjectMeta.UID == uid:
+		return fmt.Errorf("%w: project %q", store.ErrVersionConflict, name)
+	case err == nil:
+		return fmt.Errorf("%w: project %q", store.ErrStaleAssignment, name)
+	case errors.Is(err, store.ErrNotFound):
+		return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+	default:
+		return fmt.Errorf("postgres: classify project status update %q: %w", name, err)
+	}
+}
+
 // classifyFencedSwapMiss explains a fenced compare-and-swap that matched no
 // row. A matching fence means only the version moved (a real race, retryable);
 // a mismatching fence means ownership changed under the Agent (stale, not
@@ -947,6 +997,134 @@ func (s *Store) ClearProjectConditionFenced(
 
 	s.publish(event.TopicProjectUpdated, name)
 	return nil
+}
+
+// workloadStoppedPhases are the phases in which the assigned Agent may record
+// that every Project container is stopped. Pending carries no nodeRef, so no
+// fence can match it; Terminated means the containers were already reported
+// removed, so stop evidence would say nothing new. Scheduled is included
+// because a Project told to stop before its containers ever started is,
+// truthfully, fully stopped.
+var workloadStoppedPhases = map[v1.ProjectPhase]bool{
+	v1.ProjectPhaseScheduled:   true,
+	v1.ProjectPhaseRunning:     true,
+	v1.ProjectPhaseFailed:      true,
+	v1.ProjectPhaseTerminating: true,
+}
+
+// assignmentIdentity converts an Agent's fence into the identity evidence is
+// recorded against. Evidence is always about the assignment that presented it.
+func assignmentIdentity(ref store.AssignmentRef) v1.AssignmentIdentity {
+	return v1.AssignmentIdentity{ProjectUID: ref.UID, NodeName: ref.NodeRef, AssignmentGeneration: ref.Generation}
+}
+
+// RecordWorkloadStopped implements store.ProjectStore.
+//
+// It rides on ReportProjectStatusFenced, so the fence is enforced by the swap's
+// own WHERE and the phase check runs against the snapshot that swap is
+// versioned on — the check and the write cannot be separated by a
+// reassignment.
+func (s *Store) RecordWorkloadStopped(ctx context.Context, name string, ref store.AssignmentRef, observedAt time.Time) error {
+	evidence := assignmentIdentity(ref)
+	return s.ReportProjectStatusFenced(ctx, name, ref, func(status *v1.ProjectStatus) error {
+		if !workloadStoppedPhases[status.Phase] {
+			return fmt.Errorf("%w: project %q is %s; workload-stopped evidence is accepted only while Scheduled, Running, Failed or Terminating",
+				store.ErrConflictState, name, status.Phase)
+		}
+		if status.Recovery == nil {
+			status.Recovery = &v1.ProjectRecoveryStatus{}
+		}
+		// First evidence for an assignment wins. A retry or a restarted Agent
+		// reporting the same stop again changes nothing, not even ObservedAt,
+		// so the reassertion is a no-op with no version or event.
+		if ws := status.Recovery.WorkloadStopped; ws != nil && ws.Assignment == evidence {
+			return nil
+		}
+		status.Recovery.WorkloadStopped = &v1.WorkloadStoppedEvidence{Assignment: evidence, ObservedAt: observedAt.UTC()}
+		return nil
+	})
+}
+
+// isCleanupOwner reports whether owner may report ResourcesRemoved for p: it
+// must be p's lifetime, and either the current assignment or the durable
+// PreviousAssignment.
+func isCleanupOwner(owner store.AssignmentRef, p *v1.Project) bool {
+	if owner.UID != p.ObjectMeta.UID {
+		return false
+	}
+	if fenceMatches(owner, p) {
+		return true
+	}
+	r := p.Status.Recovery
+	return r != nil && r.PreviousAssignment != nil && *r.PreviousAssignment == assignmentIdentity(owner)
+}
+
+// RecordResourcesRemoved implements store.ProjectStore.
+//
+// The current-assignment fence cannot express "or the previous assignment", so
+// ownership is checked in Go on the snapshot the version-guarded swap is based
+// on. If PreviousAssignment or the assignment changes between the read and the
+// write, the version has changed too: the swap misses, the loop re-reads, and
+// the ownership check then fails on the new state.
+func (s *Store) RecordResourcesRemoved(ctx context.Context, name string, owner store.AssignmentRef, observedAt time.Time) error {
+	return s.recordResourcesRemoved(ctx, name, owner, observedAt, nil)
+}
+
+// recordResourcesRemoved is RecordResourcesRemoved with a hook that runs
+// between the snapshot read and the swap. Production passes nil; tests use it
+// to land a delete-and-recreate inside that window.
+func (s *Store) recordResourcesRemoved(
+	ctx context.Context,
+	name string,
+	owner store.AssignmentRef,
+	observedAt time.Time,
+	beforeSwap func(),
+) error {
+	evidence := assignmentIdentity(owner)
+	var lastConflict error
+
+	for attempt := 0; attempt < maxStatusUpdateAttempts; attempt++ {
+		project, err := s.getProject(ctx, name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+			}
+			return err
+		}
+		if !isCleanupOwner(owner, project) {
+			return fmt.Errorf("%w: project %q", store.ErrStaleAssignment, name)
+		}
+
+		next := copyProjectStatus(project.Status)
+		if next.Recovery == nil {
+			next.Recovery = &v1.ProjectRecoveryStatus{}
+		}
+		if rr := next.Recovery.ResourcesRemoved; rr != nil && rr.Assignment == evidence {
+			return nil
+		}
+		next.Recovery.ResourcesRemoved = &v1.ResourcesRemovedEvidence{Assignment: evidence, ObservedAt: observedAt.UTC()}
+
+		if beforeSwap != nil {
+			beforeSwap()
+		}
+		// The swap carries the UID as well as the version. Version alone is not
+		// enough: a same-name Project created after this read starts its own
+		// version count and can reach the same number, and a version-only swap
+		// would then write the old lifetime's status — nodeRef, generation and
+		// all — over the new one.
+		err = s.swapProjectStatusForUID(ctx, name, project.ObjectMeta.ResourceVersion, owner.UID, next)
+		switch {
+		case err == nil:
+			s.publish(event.TopicProjectUpdated, name)
+			return nil
+		case errors.Is(err, store.ErrVersionConflict):
+			lastConflict = err
+		default:
+			return err
+		}
+	}
+
+	return lastConflict
 }
 
 // classifyFencedConditionMiss explains a fenced condition write that matched no

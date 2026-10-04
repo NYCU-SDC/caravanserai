@@ -67,6 +67,9 @@ func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nod
 		if status.Phase != v1.ProjectPhaseScheduled {
 			status.AssignmentGeneration++
 			status.AssignmentHistory = v1.AssignmentHistoryKnown
+			// The new generation consumes the old one's no-start latch and
+			// healthy window, in the same swap that commits it.
+			status.Recovery.ClearForNewAssignment()
 		}
 		status.Phase = v1.ProjectPhaseScheduled
 		status.NodeRef = nodeRef
@@ -82,6 +85,9 @@ func (a *ProjectStoreAdapter) SetProjectPhase(ctx context.Context, name string, 
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
 		transitioned := status.Phase != phase
 		status.Phase = phase
+		if phase == v1.ProjectPhaseFailed {
+			status.Recovery.ClearHealthyWindow()
+		}
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypePhase,
 			Status:             v1.ConditionTrue,

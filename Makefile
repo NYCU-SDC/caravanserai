@@ -75,9 +75,13 @@ test:
 		&& echo -e "==> $(BLUE)All tests passed$(NC)" \
 		|| (echo -e "==> $(RED)Tests failed$(NC)" && exit 1)
 
+# The store package also carries e2e tests that need its internals, such as a
+# hook between a read and its compare-and-swap. It runs as a separate go test
+# because -args -verbose is defined only by the test/integration suite.
 test-integration:
 	@echo -e ":: $(GREEN)Running integration tests (requires Docker)...$(NC)"
 	@go test -v -tags e2e -timeout 120s ./test/integration/... $(if $(VERBOSE),-args -verbose) \
+		&& go test -v -tags e2e -timeout 120s ./internal/store/postgres/... \
 		&& echo -e "==> $(BLUE)All integration tests passed$(NC)" \
 		|| (echo -e "==> $(RED)Integration tests failed$(NC)" && exit 1)
 
