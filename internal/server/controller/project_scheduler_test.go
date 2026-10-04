@@ -146,6 +146,31 @@ func TestProjectSchedulerReconcile(t *testing.T) {
 		assert.Empty(t, ps.SetProjectScheduledCalls)
 	})
 
+	t.Run("a moved project is not placed back on a node it failed on", func(t *testing.T) {
+		ps := newFakeSchedulerProjectStore()
+		ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhasePending, FailedNodes: []string{"node-a"}}
+		ns := newFakeSchedulerNodeStore("node-a", "node-b")
+		ctrl := NewProjectSchedulerController(zap.NewNop(), ps, ns, nil)
+
+		_, err := ctrl.Reconcile(context.Background(), "my-app")
+		require.NoError(t, err)
+		require.Len(t, ps.SetProjectScheduledCalls, 1)
+		assert.Equal(t, "node-b", ps.SetProjectScheduledCalls[0].NodeRef,
+			"node-a sorts first and has room, but the project already failed on it")
+	})
+
+	t.Run("a moved project stays Pending when every other node is excluded", func(t *testing.T) {
+		ps := newFakeSchedulerProjectStore()
+		ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhasePending, FailedNodes: []string{"node-a"}}
+		ns := newFakeSchedulerNodeStore("node-a")
+		ctrl := NewProjectSchedulerController(zap.NewNop(), ps, ns, nil)
+
+		res, err := ctrl.Reconcile(context.Background(), "my-app")
+		require.NoError(t, err)
+		assert.True(t, res.Requeue)
+		assert.Empty(t, ps.SetProjectScheduledCalls)
+	})
+
 	t.Run("project not found returns without error", func(t *testing.T) {
 		ps := newFakeSchedulerProjectStore()
 		// Do not add "my-app" — GetProjectPhase returns store.ErrNotFound.

@@ -222,6 +222,10 @@ func main() {
 		nodeAdapter,
 		eventBus,
 	))
+	ctrlManager.Add(controller.NewFailedProjectReschedulerController(logger,
+		projectAdapter,
+		eventBus,
+	))
 	// TODO: ProjectGCController — handle spec.expireAt (post-MVP)
 	// TODO: ProjectTimeoutController — reschedule Scheduled projects whose Agent goes silent (post-MVP)
 

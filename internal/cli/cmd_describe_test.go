@@ -136,6 +136,7 @@ var describeProjectCoveredFields = newStringSet(
 	// Status
 	"Status.Phase",
 	"Status.NodeRef",
+	"Status.FailedNodes",
 	"Status.AssignmentGeneration",
 	"Status.AssignmentHistory",
 	"Status.Conditions",
@@ -244,6 +245,25 @@ func TestDescribeProjectSize(t *testing.T) {
 			var buf bytes.Buffer
 			describeProject(&buf, &v1.Project{Spec: v1.ProjectSpec{Size: tt.size}})
 			assert.Regexp(t, `(?m)^  Size:\s+`+regexp.QuoteMeta(tt.want)+`$`, buf.String())
+		})
+	}
+}
+
+func TestDescribeProjectFailedNodes(t *testing.T) {
+	tests := []struct {
+		name  string
+		nodes []string
+		want  string
+	}{
+		{name: "none", want: "<none>"},
+		{name: "one", nodes: []string{"pve1"}, want: "pve1"},
+		{name: "several are listed in order", nodes: []string{"pve1", "pve2"}, want: "pve1, pve2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			describeProject(&buf, &v1.Project{Status: v1.ProjectStatus{FailedNodes: tt.nodes}})
+			assert.Regexp(t, `(?m)^  Failed Nodes:\s+`+regexp.QuoteMeta(tt.want)+`$`, buf.String())
 		})
 	}
 }
