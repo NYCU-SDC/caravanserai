@@ -7,6 +7,18 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 )
 
+// candidate is a Node that passed Filter, with the usage its capacity check
+// was decided on so that Score does not recompute it.
+type candidate struct {
+	ReadyNode
+
+	// Used is what the Projects already placed on the Node book.
+	Used NodeUsage
+
+	// Allocatable is what the Node offers to Projects.
+	Allocatable NodeUsage
+}
+
 // filterNodes is the Filter stage of the scheduler (docs/scheduler-strategy.md
 // §5.1). It narrows nodes, already limited to Ready and schedulable, to the
 // candidates that can host a Project of the given size:
@@ -17,21 +29,21 @@ import (
 // rejected has one line per excluded Node saying why, for the scheduler to log.
 // The error is non-nil only when the ledger could not be computed; the
 // scheduler then retries rather than treating the Node as full.
-func filterNodes(ctx context.Context, ledger *CapacityLedger, nodes []ReadyNode, size v1.ProjectSize) (candidates []ReadyNode, rejected []string, err error) {
+func filterNodes(ctx context.Context, ledger *CapacityLedger, nodes []ReadyNode, size v1.ProjectSize) (candidates []candidate, rejected []string, err error) {
 	for _, n := range nodes {
 		if cond, ok := underPressure(n); ok {
 			rejected = append(rejected, fmt.Sprintf("node %q reports %s", n.Name, cond))
 			continue
 		}
-		fits, reason, err := ledger.Fits(ctx, n, size)
+		c, err := ledger.check(ctx, n, size)
 		if err != nil {
 			return nil, nil, err
 		}
-		if !fits {
-			rejected = append(rejected, reason)
+		if !c.ok {
+			rejected = append(rejected, c.reason)
 			continue
 		}
-		candidates = append(candidates, n)
+		candidates = append(candidates, candidate{ReadyNode: n, Used: c.used, Allocatable: c.allocatable})
 	}
 	return candidates, rejected, nil
 }
