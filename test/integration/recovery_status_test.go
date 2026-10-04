@@ -42,8 +42,12 @@ func TestProjectRecoveryStatusRoundTrip(t *testing.T) {
 		HealthySinceGeneration: 7,
 		PreferredNode:          "node-b",
 		WorkloadStopped:        &v1.WorkloadStoppedEvidence{Assignment: previous, ObservedAt: attempt.Add(-time.Minute)},
-		PreviousAssignment:     &previous,
-		ResourcesRemoved:       &v1.ResourcesRemovedEvidence{Assignment: previous, ObservedAt: attempt.Add(time.Minute)},
+		CleanupObligations: []v1.CleanupObligation{{
+			Assignment:           previous,
+			ReleasedAt:           attempt,
+			ReleaseAuthorization: v1.ReleaseByWorkloadStopped,
+			ResourcesRemoved:     &v1.ResourcesRemovedEvidence{ObservedAt: attempt.Add(time.Minute)},
+		}},
 	}
 	write := func(s *v1.ProjectStatus) error {
 		s.Recovery = want.DeepCopy()
@@ -62,9 +66,13 @@ func TestProjectRecoveryStatusRoundTrip(t *testing.T) {
 	assert.Equal(t, want.PreferredNode, got.PreferredNode)
 	assert.Equal(t, previous, got.WorkloadStopped.Assignment)
 	assert.True(t, want.WorkloadStopped.ObservedAt.Equal(got.WorkloadStopped.ObservedAt))
-	assert.Equal(t, previous, *got.PreviousAssignment)
-	assert.Equal(t, previous, got.ResourcesRemoved.Assignment)
-	assert.True(t, want.ResourcesRemoved.ObservedAt.Equal(got.ResourcesRemoved.ObservedAt))
+	require.Len(t, got.CleanupObligations, 1)
+	o := got.CleanupObligations[0]
+	assert.Equal(t, previous, o.Assignment)
+	assert.True(t, attempt.Equal(o.ReleasedAt))
+	assert.Equal(t, v1.ReleaseByWorkloadStopped, o.ReleaseAuthorization)
+	require.True(t, o.Resolved())
+	assert.True(t, want.CleanupObligations[0].ResourcesRemoved.ObservedAt.Equal(o.ResourcesRemoved.ObservedAt))
 
 	// The same evidence arriving again must not produce a new version.
 	require.NoError(t, suite.store.UpdateProjectStatusWithRetry(ctx, name, write))
@@ -89,7 +97,10 @@ func TestCreateProjectDropsClientRecoveryStatus(t *testing.T) {
 			RescheduleAttempts: 42,
 			PreferredNode:      "node-x",
 			WorkloadStopped:    &v1.WorkloadStoppedEvidence{Assignment: forged, ObservedAt: time.Now()},
-			ResourcesRemoved:   &v1.ResourcesRemovedEvidence{Assignment: forged, ObservedAt: time.Now()},
+			CleanupObligations: []v1.CleanupObligation{{
+				Assignment: forged, ReleasedAt: time.Now(), ReleaseAuthorization: v1.ReleaseByOperatorOverride,
+				ResourcesRemoved: &v1.ResourcesRemovedEvidence{ObservedAt: time.Now()},
+			}},
 		}},
 	})
 	resp := doRequest(t, http.MethodPost, "/api/v1/projects", body)

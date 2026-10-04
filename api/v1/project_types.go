@@ -382,15 +382,72 @@ type ProjectRecoveryStatus struct {
 	// clears it; time alone does not.
 	WorkloadStopped *WorkloadStoppedEvidence `json:"workloadStopped,omitempty" yaml:"workloadStopped,omitempty"`
 
-	// PreviousAssignment identifies an assignment whose Node may still hold
-	// the Project's resources after nodeRef moved on. It is the durable cleanup
-	// owner: a new assignment cannot be committed while it is unresolved.
-	PreviousAssignment *AssignmentIdentity `json:"previousAssignment,omitempty" yaml:"previousAssignment,omitempty"`
+	// CleanupObligations lists every assignment this Project has given up
+	// whose Node may still hold its runtime resources. An entry is appended in
+	// the same write that releases an assignment or moves the Project to
+	// Terminating, so the list is the complete set of Nodes that may still
+	// hold resources. Final deletion requires every entry to be resolved.
+	CleanupObligations []CleanupObligation `json:"cleanupObligations,omitempty" yaml:"cleanupObligations,omitempty"`
+}
 
-	// ResourcesRemoved is evidence that the cleanup owner removed every
-	// deletion-scoped resource it held for that assignment. Normal final
-	// deletion requires it.
+// ReleaseAuthorizationKind records what permitted an assignment to be given
+// up. It answers "why could another Node take over", never "has this Node
+// cleaned up" — that is ResourcesRemoved, recorded separately.
+type ReleaseAuthorizationKind string
+
+const (
+	// ReleaseByWorkloadStopped: the assigned Agent confirmed every container
+	// of that generation stopped.
+	ReleaseByWorkloadStopped ReleaseAuthorizationKind = "WorkloadStopped"
+	// ReleaseByDeletion: the Project entered Terminating; the assignment's
+	// runtime resources are to be removed, not handed to another Node.
+	ReleaseByDeletion ReleaseAuthorizationKind = "Deletion"
+	// ReleaseByProviderFencing: a provider API proved the Node powered off or
+	// isolated. Not implemented yet.
+	ReleaseByProviderFencing ReleaseAuthorizationKind = "ProviderFencing"
+	// ReleaseByOperatorOverride: an operator accepted the risk of takeover
+	// without machine evidence. Not implemented yet; never fencing evidence.
+	ReleaseByOperatorOverride ReleaseAuthorizationKind = "OperatorOverride"
+	// ReleaseByLeaseExpired: the Node's lease expired under the self-fencing
+	// contract proposed in ADR-0023. Not implemented yet; never cleanup
+	// evidence.
+	ReleaseByLeaseExpired ReleaseAuthorizationKind = "LeaseExpired"
+)
+
+// CleanupObligation is one released assignment whose Node may still hold the
+// Project's runtime resources.
+type CleanupObligation struct {
+	// Assignment is the released assignment. Its Agent is the cleanup owner.
+	Assignment AssignmentIdentity `json:"assignment" yaml:"assignment"`
+
+	// ReleasedAt is when the assignment was given up.
+	ReleasedAt time.Time `json:"releasedAt" yaml:"releasedAt"`
+
+	// ReleaseAuthorization is what permitted giving the assignment up.
+	ReleaseAuthorization ReleaseAuthorizationKind `json:"releaseAuthorization" yaml:"releaseAuthorization"`
+
+	// ResourcesRemoved is the cleanup owner's evidence that every
+	// deletion-scoped runtime resource it held for this assignment is gone.
+	// Nil means the obligation is unresolved.
 	ResourcesRemoved *ResourcesRemovedEvidence `json:"resourcesRemoved,omitempty" yaml:"resourcesRemoved,omitempty"`
+}
+
+// Resolved reports whether the cleanup owner has reported ResourcesRemoved.
+func (o CleanupObligation) Resolved() bool {
+	return o.ResourcesRemoved != nil
+}
+
+// FindObligation returns the obligation for assignment, or nil.
+func (r *ProjectRecoveryStatus) FindObligation(assignment AssignmentIdentity) *CleanupObligation {
+	if r == nil {
+		return nil
+	}
+	for i := range r.CleanupObligations {
+		if r.CleanupObligations[i].Assignment == assignment {
+			return &r.CleanupObligations[i]
+		}
+	}
+	return nil
 }
 
 // AssignmentIdentity names one assignment of one Project lifetime. All three
@@ -409,12 +466,11 @@ type WorkloadStoppedEvidence struct {
 	ObservedAt time.Time          `json:"observedAt" yaml:"observedAt"`
 }
 
-// ResourcesRemovedEvidence records that the cleanup owner of Assignment
-// removed every deletion-scoped resource it held for that assignment.
-// ObservedAt is when that verification completed.
+// ResourcesRemovedEvidence records when the cleanup owner of an obligation
+// finished removing every deletion-scoped runtime resource it held. The
+// assignment it is about is the obligation's own.
 type ResourcesRemovedEvidence struct {
-	Assignment AssignmentIdentity `json:"assignment" yaml:"assignment"`
-	ObservedAt time.Time          `json:"observedAt" yaml:"observedAt"`
+	ObservedAt time.Time `json:"observedAt" yaml:"observedAt"`
 }
 
 // ClearForNewAssignment drops the state a newly committed assignment
@@ -451,13 +507,15 @@ func (r *ProjectRecoveryStatus) DeepCopy() *ProjectRecoveryStatus {
 		ws := *r.WorkloadStopped
 		out.WorkloadStopped = &ws
 	}
-	if r.PreviousAssignment != nil {
-		pa := *r.PreviousAssignment
-		out.PreviousAssignment = &pa
-	}
-	if r.ResourcesRemoved != nil {
-		rr := *r.ResourcesRemoved
-		out.ResourcesRemoved = &rr
+	if r.CleanupObligations != nil {
+		out.CleanupObligations = make([]CleanupObligation, len(r.CleanupObligations))
+		for i, o := range r.CleanupObligations {
+			if o.ResourcesRemoved != nil {
+				rr := *o.ResourcesRemoved
+				o.ResourcesRemoved = &rr
+			}
+			out.CleanupObligations[i] = o
+		}
 	}
 	return &out
 }

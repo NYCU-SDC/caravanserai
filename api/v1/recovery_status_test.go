@@ -23,10 +23,18 @@ func fullRecoveryStatus() *ProjectRecoveryStatus {
 			Assignment: AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 6},
 			ObservedAt: time.Date(2026, 10, 3, 8, 59, 0, 0, time.UTC),
 		},
-		PreviousAssignment: &AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 6},
-		ResourcesRemoved: &ResourcesRemovedEvidence{
-			Assignment: AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 6},
-			ObservedAt: time.Date(2026, 10, 3, 9, 1, 0, 0, time.UTC),
+		CleanupObligations: []CleanupObligation{
+			{
+				Assignment:           AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 5},
+				ReleasedAt:           time.Date(2026, 10, 3, 8, 0, 0, 0, time.UTC),
+				ReleaseAuthorization: ReleaseByWorkloadStopped,
+				ResourcesRemoved:     &ResourcesRemovedEvidence{ObservedAt: time.Date(2026, 10, 3, 8, 30, 0, 0, time.UTC)},
+			},
+			{
+				Assignment:           AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 6},
+				ReleasedAt:           time.Date(2026, 10, 3, 9, 1, 0, 0, time.UTC),
+				ReleaseAuthorization: ReleaseByWorkloadStopped,
+			},
 		},
 	}
 }
@@ -49,9 +57,17 @@ func TestProjectRecoveryStatus_RoundTrip(t *testing.T) {
 		assert.Equal(t, want.PreferredNode, have.PreferredNode)
 		assert.Equal(t, want.WorkloadStopped.Assignment, have.WorkloadStopped.Assignment)
 		assert.True(t, want.WorkloadStopped.ObservedAt.Equal(have.WorkloadStopped.ObservedAt))
-		assert.Equal(t, *want.PreviousAssignment, *have.PreviousAssignment)
-		assert.Equal(t, want.ResourcesRemoved.Assignment, have.ResourcesRemoved.Assignment)
-		assert.True(t, want.ResourcesRemoved.ObservedAt.Equal(have.ResourcesRemoved.ObservedAt))
+		require.Len(t, have.CleanupObligations, len(want.CleanupObligations))
+		for i, w := range want.CleanupObligations {
+			h := have.CleanupObligations[i]
+			assert.Equal(t, w.Assignment, h.Assignment)
+			assert.True(t, w.ReleasedAt.Equal(h.ReleasedAt))
+			assert.Equal(t, w.ReleaseAuthorization, h.ReleaseAuthorization)
+			assert.Equal(t, w.Resolved(), h.Resolved())
+			if w.Resolved() {
+				assert.True(t, w.ResourcesRemoved.ObservedAt.Equal(h.ResourcesRemoved.ObservedAt))
+			}
+		}
 	}
 
 	t.Run("json", func(t *testing.T) {
@@ -93,9 +109,10 @@ func TestProjectRecoveryStatus_DeepCopyDoesNotAlias(t *testing.T) {
 	*cp.HealthySince = cp.HealthySince.Add(time.Hour)
 	cp.WorkloadStopped.Assignment.AssignmentGeneration = 99
 	cp.WorkloadStopped.ObservedAt = time.Time{}
-	cp.PreviousAssignment.NodeName = "node-z"
-	cp.ResourcesRemoved.Assignment.ProjectUID = "other"
-	cp.ResourcesRemoved.ObservedAt = time.Time{}
+	cp.CleanupObligations[0].Assignment.NodeName = "node-z"
+	cp.CleanupObligations[0].ResourcesRemoved.ObservedAt = time.Time{}
+	cp.CleanupObligations[1].ResourcesRemoved = &ResourcesRemovedEvidence{}
+	cp.CleanupObligations = append(cp.CleanupObligations, CleanupObligation{})
 
 	after, err := json.Marshal(src)
 	require.NoError(t, err)
@@ -111,6 +128,20 @@ func TestProjectRecoveryStatus_DeepCopyNil(t *testing.T) {
 	require.NotNil(t, cp)
 	assert.Nil(t, cp.LastAttemptAt)
 	assert.Nil(t, cp.WorkloadStopped)
-	assert.Nil(t, cp.PreviousAssignment)
-	assert.Nil(t, cp.ResourcesRemoved)
+	assert.Nil(t, cp.CleanupObligations)
+}
+
+func TestFindObligation(t *testing.T) {
+	r := fullRecoveryStatus()
+	got := r.FindObligation(AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 6})
+	require.NotNil(t, got)
+	assert.False(t, got.Resolved())
+
+	// The returned pointer is into the list, so resolving through it is seen.
+	got.ResourcesRemoved = &ResourcesRemovedEvidence{}
+	assert.True(t, r.CleanupObligations[1].Resolved())
+
+	assert.Nil(t, r.FindObligation(AssignmentIdentity{ProjectUID: "uid-2", NodeName: "node-a", AssignmentGeneration: 6}))
+	var none *ProjectRecoveryStatus
+	assert.Nil(t, none.FindObligation(AssignmentIdentity{}))
 }

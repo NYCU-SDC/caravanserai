@@ -305,16 +305,20 @@ func describeProject(w io.Writer, project *v1.Project) {
 			workloadStopped = formatEvidence(e.Assignment, e.ObservedAt)
 		}
 		printField(w, "  Workload Stopped", workloadStopped)
-		previous := "<none>"
-		if r.PreviousAssignment != nil {
-			previous = formatAssignment(*r.PreviousAssignment)
+		if len(r.CleanupObligations) == 0 {
+			printField(w, "  Cleanup Obligations", "<none>")
+		} else {
+			fmt.Fprintln(w, "  Cleanup Obligations:")
+			for _, o := range r.CleanupObligations {
+				state := "pending"
+				if o.ResourcesRemoved != nil {
+					state = "removed at " + formatTimestamp(o.ResourcesRemoved.ObservedAt)
+				}
+				fmt.Fprintf(w, "    - %s\n", formatAssignment(o.Assignment))
+				fmt.Fprintf(w, "      Released:   %s by %s\n", formatTimestamp(o.ReleasedAt), stringOrNone(string(o.ReleaseAuthorization)))
+				fmt.Fprintf(w, "      Resources:  %s\n", state)
+			}
 		}
-		printField(w, "  Previous Assignment", previous)
-		resourcesRemoved := "<none>"
-		if e := r.ResourcesRemoved; e != nil {
-			resourcesRemoved = formatEvidence(e.Assignment, e.ObservedAt)
-		}
-		printField(w, "  Resources Removed", resourcesRemoved)
 	}
 
 	// Conditions

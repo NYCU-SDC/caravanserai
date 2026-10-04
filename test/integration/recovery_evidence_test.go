@@ -122,45 +122,59 @@ func TestWorkloadStoppedEvidencePhaseGate(t *testing.T) {
 	})
 }
 
-// CARA-84: ResourcesRemoved is accepted from the current assignment or the
-// durable PreviousAssignment, and from nobody else.
+// CARA-84: ResourcesRemoved resolves exactly the cleanup obligation whose
+// assignment presented it, and nothing else. Holding the current assignment is
+// not by itself an obligation.
 func TestResourcesRemovedEvidence(t *testing.T) {
 	ctx := context.Background()
+	const name = "e2e-resources-removed"
+	uid, _ := createAssigned(t, name, "node-c", v1.ProjectPhaseRunning)
+	// Generation 3 on node-c, after generations 1 (node-a) and 2 (node-b)
+	// were released: every generation in the fixture is one a real history
+	// could produce.
+	const gen int64 = 3
+	require.NoError(t, suite.store.UpdateProjectStatusWithRetry(ctx, name, func(s *v1.ProjectStatus) error {
+		s.AssignmentGeneration = gen
+		return nil
+	}))
 
-	t.Run("recorded from the current assignment", func(t *testing.T) {
-		const name = "e2e-resources-removed-current"
-		uid, gen := createAssigned(t, name, "node-a", v1.ProjectPhaseRunning)
-		require.Equal(t, http.StatusNoContent, putEvidence(t, name, "resources-removed", evidenceBody(uid, "node-a", gen)))
-		rr := getProject(t, name).Status.Recovery.ResourcesRemoved
-		require.NotNil(t, rr)
-		assert.Equal(t, v1.AssignmentIdentity{ProjectUID: uid, NodeName: "node-a", AssignmentGeneration: gen}, rr.Assignment)
-	})
+	released := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	onA := v1.AssignmentIdentity{ProjectUID: uid, NodeName: "node-a", AssignmentGeneration: gen - 2}
+	onB := v1.AssignmentIdentity{ProjectUID: uid, NodeName: "node-b", AssignmentGeneration: gen - 1}
+	require.NoError(t, suite.store.UpdateProjectStatusWithRetry(ctx, name, func(s *v1.ProjectStatus) error {
+		s.Recovery = &v1.ProjectRecoveryStatus{CleanupObligations: []v1.CleanupObligation{
+			{Assignment: onA, ReleasedAt: released, ReleaseAuthorization: v1.ReleaseByWorkloadStopped},
+			{Assignment: onB, ReleasedAt: released.Add(time.Hour), ReleaseAuthorization: v1.ReleaseByWorkloadStopped},
+		}}
+		return nil
+	}))
 
-	t.Run("recorded from the durable previous assignment, refused from anyone else", func(t *testing.T) {
-		const name = "e2e-resources-removed-previous"
-		uid, gen := createAssigned(t, name, "node-b", v1.ProjectPhaseRunning)
-		previous := v1.AssignmentIdentity{ProjectUID: uid, NodeName: "node-a", AssignmentGeneration: gen - 1}
-		require.NoError(t, suite.store.UpdateProjectStatusWithRetry(ctx, name, func(s *v1.ProjectStatus) error {
-			s.Recovery = &v1.ProjectRecoveryStatus{PreviousAssignment: &previous}
-			return nil
-		}))
-
+	t.Run("refused from anyone without an obligation", func(t *testing.T) {
 		before := getProject(t, name).ObjectMeta.ResourceVersion
 		for _, body := range [][]byte{
-			evidenceBody(uid, "node-a", gen-2),         // older than the previous assignment
-			evidenceBody(uid, "node-c", gen-1),         // right generation, wrong Node
-			evidenceBody("other-uid", "node-a", gen-1), // another lifetime with the same Node and generation
+			evidenceBody(uid, "node-c", gen),           // the current assignment, which owes nothing yet
+			evidenceBody(uid, "node-b", gen-2),         // generation 1 belongs to node-a, not node-b
+			evidenceBody(uid, "node-c", gen-1),         // an obligation's generation on the wrong Node
+			evidenceBody("other-uid", "node-a", gen-2), // another lifetime with the same Node and generation
 		} {
 			assert.Equal(t, http.StatusConflict, putEvidence(t, name, "resources-removed", body))
 		}
 		assert.Equal(t, before, getProject(t, name).ObjectMeta.ResourceVersion, "a refused write bumped the version")
+	})
 
-		require.Equal(t, http.StatusNoContent, putEvidence(t, name, "resources-removed", evidenceBody(uid, "node-a", gen-1)))
+	t.Run("two obligations on different Nodes resolve independently", func(t *testing.T) {
+		require.Equal(t, http.StatusNoContent, putEvidence(t, name, "resources-removed", evidenceBody(uid, "node-b", gen-1)))
+		obligations := getProject(t, name).Status.Recovery.CleanupObligations
+		require.Len(t, obligations, 2)
+		assert.False(t, obligations[0].Resolved(), "resolving B also resolved A")
+		assert.True(t, obligations[1].Resolved())
+
+		require.Equal(t, http.StatusNoContent, putEvidence(t, name, "resources-removed", evidenceBody(uid, "node-a", gen-2)))
 		got := getProject(t, name)
-		assert.Equal(t, previous, got.Status.Recovery.ResourcesRemoved.Assignment)
+		assert.True(t, got.Status.Recovery.CleanupObligations[0].Resolved())
 
 		// Reassertion is a no-op.
-		require.Equal(t, http.StatusNoContent, putEvidence(t, name, "resources-removed", evidenceBody(uid, "node-a", gen-1)))
+		require.Equal(t, http.StatusNoContent, putEvidence(t, name, "resources-removed", evidenceBody(uid, "node-a", gen-2)))
 		assert.Equal(t, got.ObjectMeta.ResourceVersion, getProject(t, name).ObjectMeta.ResourceVersion)
 	})
 }

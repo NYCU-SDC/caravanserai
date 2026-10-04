@@ -285,7 +285,7 @@ All endpoints are under `/api/v1/`.
 | `DELETE` | `/api/v1/projects/{name}` | Delete a project |
 | `PATCH` | `/api/v1/projects/{name}/status` | Update project status (agent only) |
 | `PUT` | `/api/v1/projects/{name}/recovery/workload-stopped` | Record that every container is stopped (currently assigned agent only; requires the assignment fence) |
-| `PUT` | `/api/v1/projects/{name}/recovery/resources-removed` | Record that the assignment's resources are removed (current or previous assignment's agent only; requires the assignment fence) |
+| `PUT` | `/api/v1/projects/{name}/recovery/resources-removed` | Resolve a cleanup obligation after removing its runtime resources (the obligation's agent only; requires the assignment fence) |
 
 ### Overlay
 

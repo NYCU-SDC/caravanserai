@@ -955,9 +955,9 @@ func (h *Handler) putWorkloadStopped(w http.ResponseWriter, r *http.Request) {
 
 // putResourcesRemoved handles PUT /api/v1/projects/{name}/recovery/resources-removed.
 //
-// The cleanup owner — the current assignment or the durable
-// PreviousAssignment — calls it after removing every deletion-scoped resource
-// it held. Recording it grants no other authority.
+// The Agent of a cleanup obligation calls it after removing every
+// deletion-scoped runtime resource it held for that obligation's assignment.
+// It resolves that one obligation and grants no other authority.
 func (h *Handler) putResourcesRemoved(w http.ResponseWriter, r *http.Request) {
 	traceCtx, span := h.tracer.Start(r.Context(), "putResourcesRemoved")
 	defer span.End()

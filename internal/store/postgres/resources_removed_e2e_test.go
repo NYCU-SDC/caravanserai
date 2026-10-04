@@ -66,6 +66,22 @@ func createRunning(t *testing.T, s *pgstore.Store, name, node string, generation
 	return p
 }
 
+// owe adds a cleanup obligation for owner to the named Project.
+func owe(t *testing.T, s *pgstore.Store, name string, owner store.AssignmentRef) {
+	t.Helper()
+	require.NoError(t, s.UpdateProjectStatusWithRetry(context.Background(), name, func(st *v1.ProjectStatus) error {
+		if st.Recovery == nil {
+			st.Recovery = &v1.ProjectRecoveryStatus{}
+		}
+		st.Recovery.CleanupObligations = append(st.Recovery.CleanupObligations, v1.CleanupObligation{
+			Assignment:           v1.AssignmentIdentity{ProjectUID: owner.UID, NodeName: owner.NodeRef, AssignmentGeneration: owner.Generation},
+			ReleasedAt:           time.Now().UTC(),
+			ReleaseAuthorization: v1.ReleaseByWorkloadStopped,
+		})
+		return nil
+	}))
+}
+
 // bumpTo writes server-side status changes until the Project reaches version.
 func bumpTo(t *testing.T, s *pgstore.Store, name string, version int64) *v1.Project {
 	t.Helper()
@@ -96,9 +112,10 @@ func TestResourcesRemovedCannotLandOnRecreatedSameNameProject(t *testing.T) {
 	ctx := context.Background()
 	const name = "race"
 
-	u1 := createRunning(t, s, name, "node-a", 3)
-	u1 = bumpTo(t, s, name, u1.ObjectMeta.ResourceVersion+2)
+	u1 := createRunning(t, s, name, "node-b", 4)
 	owner := store.AssignmentRef{UID: u1.ObjectMeta.UID, NodeRef: "node-a", Generation: 3}
+	owe(t, s, name, owner)
+	u1 = bumpTo(t, s, name, u1.ObjectMeta.ResourceVersion+3)
 
 	events := bus.Subscribe(event.TopicProjectUpdated)
 	var u2 *v1.Project
@@ -120,7 +137,7 @@ func TestResourcesRemovedCannotLandOnRecreatedSameNameProject(t *testing.T) {
 	assert.Equal(t, u2.ObjectMeta.ResourceVersion, after.ObjectMeta.ResourceVersion, "the stale request wrote to the new lifetime")
 	assert.Equal(t, "node-b", after.Status.NodeRef)
 	assert.Equal(t, int64(1), after.Status.AssignmentGeneration)
-	assert.Nil(t, after.Status.Recovery.ResourcesRemoved)
+	assert.Empty(t, after.Status.Recovery.CleanupObligations, "the stale request wrote the old lifetime's obligations into the new one")
 	assert.Zero(t, drain(events), "a refused write published an event")
 }
 
@@ -131,8 +148,9 @@ func TestResourcesRemovedEventsOnlyOnWrite(t *testing.T) {
 	ctx := context.Background()
 	const name = "events"
 
-	p := createRunning(t, s, name, "node-a", 2)
-	owner := store.AssignmentRef{UID: p.ObjectMeta.UID, NodeRef: "node-a", Generation: 2}
+	p := createRunning(t, s, name, "node-b", 2)
+	owner := store.AssignmentRef{UID: p.ObjectMeta.UID, NodeRef: "node-a", Generation: 1}
+	owe(t, s, name, owner)
 	events := bus.Subscribe(event.TopicProjectUpdated)
 
 	require.NoError(t, s.RecordResourcesRemoved(ctx, name, owner, time.Now()))
@@ -141,7 +159,7 @@ func TestResourcesRemovedEventsOnlyOnWrite(t *testing.T) {
 	require.NoError(t, s.RecordResourcesRemoved(ctx, name, owner, time.Now()))
 	assert.Zero(t, drain(events), "reasserting identical evidence published an event")
 
-	stale := store.AssignmentRef{UID: p.ObjectMeta.UID, NodeRef: "node-a", Generation: 1}
+	stale := store.AssignmentRef{UID: p.ObjectMeta.UID, NodeRef: "node-a", Generation: 0}
 	assert.True(t, errors.Is(s.RecordResourcesRemoved(ctx, name, stale, time.Now()), store.ErrStaleAssignment))
 	assert.Zero(t, drain(events), "a refused write published an event")
 }

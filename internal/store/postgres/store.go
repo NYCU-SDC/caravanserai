@@ -1045,27 +1045,23 @@ func (s *Store) RecordWorkloadStopped(ctx context.Context, name string, ref stor
 	})
 }
 
-// isCleanupOwner reports whether owner may report ResourcesRemoved for p: it
-// must be p's lifetime, and either the current assignment or the durable
-// PreviousAssignment.
-func isCleanupOwner(owner store.AssignmentRef, p *v1.Project) bool {
+// cleanupObligationFor returns p's cleanup obligation for owner, or nil when
+// owner is not one of p's obligations. The UID must match p's lifetime: a
+// same-name successor never inherits its predecessor's obligations.
+func cleanupObligationFor(owner store.AssignmentRef, p *v1.Project) *v1.CleanupObligation {
 	if owner.UID != p.ObjectMeta.UID {
-		return false
+		return nil
 	}
-	if fenceMatches(owner, p) {
-		return true
-	}
-	r := p.Status.Recovery
-	return r != nil && r.PreviousAssignment != nil && *r.PreviousAssignment == assignmentIdentity(owner)
+	return p.Status.Recovery.FindObligation(assignmentIdentity(owner))
 }
 
 // RecordResourcesRemoved implements store.ProjectStore.
 //
-// The current-assignment fence cannot express "or the previous assignment", so
-// ownership is checked in Go on the snapshot the version-guarded swap is based
-// on. If PreviousAssignment or the assignment changes between the read and the
-// write, the version has changed too: the swap misses, the loop re-reads, and
-// the ownership check then fails on the new state.
+// The owner is any cleanup obligation in the list, which no single-row fence
+// can express, so ownership is checked in Go on the snapshot the swap is based
+// on. The swap is pinned to the UID and version that snapshot came from: if
+// the obligations or the Project change in between, the swap misses, the loop
+// re-reads, and the ownership check runs again on the new state.
 func (s *Store) RecordResourcesRemoved(ctx context.Context, name string, owner store.AssignmentRef, observedAt time.Time) error {
 	return s.recordResourcesRemoved(ctx, name, owner, observedAt, nil)
 }
@@ -1080,7 +1076,6 @@ func (s *Store) recordResourcesRemoved(
 	observedAt time.Time,
 	beforeSwap func(),
 ) error {
-	evidence := assignmentIdentity(owner)
 	var lastConflict error
 
 	for attempt := 0; attempt < maxStatusUpdateAttempts; attempt++ {
@@ -1091,18 +1086,18 @@ func (s *Store) recordResourcesRemoved(
 			}
 			return err
 		}
-		if !isCleanupOwner(owner, project) {
+		if cleanupObligationFor(owner, project) == nil {
 			return fmt.Errorf("%w: project %q", store.ErrStaleAssignment, name)
 		}
 
 		next := copyProjectStatus(project.Status)
-		if next.Recovery == nil {
-			next.Recovery = &v1.ProjectRecoveryStatus{}
-		}
-		if rr := next.Recovery.ResourcesRemoved; rr != nil && rr.Assignment == evidence {
+		obligation := next.Recovery.FindObligation(assignmentIdentity(owner))
+		// First evidence for an obligation wins: a retry or a restarted Agent
+		// reporting again changes nothing, not even ObservedAt.
+		if obligation.Resolved() {
 			return nil
 		}
-		next.Recovery.ResourcesRemoved = &v1.ResourcesRemovedEvidence{Assignment: evidence, ObservedAt: observedAt.UTC()}
+		obligation.ResourcesRemoved = &v1.ResourcesRemovedEvidence{ObservedAt: observedAt.UTC()}
 
 		if beforeSwap != nil {
 			beforeSwap()

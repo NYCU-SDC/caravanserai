@@ -33,6 +33,35 @@
       ],
       "description": "AssignmentIdentity names one assignment of one Project lifetime."
     },
+    "CleanupObligation": {
+      "properties": {
+        "assignment": {
+          "$ref": "#/$defs/AssignmentIdentity",
+          "description": "Assignment is the released assignment. Its Agent is the cleanup owner."
+        },
+        "releasedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ReleasedAt is when the assignment was given up."
+        },
+        "releaseAuthorization": {
+          "type": "string",
+          "description": "ReleaseAuthorization is what permitted giving the assignment up."
+        },
+        "resourcesRemoved": {
+          "$ref": "#/$defs/ResourcesRemovedEvidence",
+          "description": "ResourcesRemoved is the cleanup owner's evidence that every\ndeletion-scoped runtime resource it held for this assignment is gone.\nNil means the obligation is unresolved."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "assignment",
+        "releasedAt",
+        "releaseAuthorization"
+      ],
+      "description": "CleanupObligation is one released assignment whose Node may still hold the Project's runtime resources."
+    },
     "Condition": {
       "properties": {
         "type": {
@@ -298,13 +327,12 @@
           "$ref": "#/$defs/WorkloadStoppedEvidence",
           "description": "WorkloadStopped is the durable no-start latch for one assignment\ngeneration: the assigned Agent confirmed that every Project container is\nstopped. It is not proof that runtime resources were removed, and it\nalone never authorizes final deletion. Only a committed newer assignment\nclears it; time alone does not."
         },
-        "previousAssignment": {
-          "$ref": "#/$defs/AssignmentIdentity",
-          "description": "PreviousAssignment identifies an assignment whose Node may still hold\nthe Project's resources after nodeRef moved on. It is the durable cleanup\nowner: a new assignment cannot be committed while it is unresolved."
-        },
-        "resourcesRemoved": {
-          "$ref": "#/$defs/ResourcesRemovedEvidence",
-          "description": "ResourcesRemoved is evidence that the cleanup owner removed every\ndeletion-scoped resource it held for that assignment. Normal final\ndeletion requires it."
+        "cleanupObligations": {
+          "items": {
+            "$ref": "#/$defs/CleanupObligation"
+          },
+          "type": "array",
+          "description": "CleanupObligations lists every assignment this Project has given up\nwhose Node may still hold its runtime resources. An entry is appended in\nthe same write that releases an assignment or moves the Project to\nTerminating, so the list is the complete set of Nodes that may still\nhold resources. Final deletion requires every entry to be resolved."
         }
       },
       "additionalProperties": false,
@@ -387,9 +415,6 @@
     },
     "ResourcesRemovedEvidence": {
       "properties": {
-        "assignment": {
-          "$ref": "#/$defs/AssignmentIdentity"
-        },
         "observedAt": {
           "type": "string",
           "format": "date-time"
@@ -398,10 +423,9 @@
       "additionalProperties": false,
       "type": "object",
       "required": [
-        "assignment",
         "observedAt"
       ],
-      "description": "ResourcesRemovedEvidence records that the cleanup owner of Assignment removed every deletion-scoped resource it held for that assignment."
+      "description": "ResourcesRemovedEvidence records when the cleanup owner of an obligation finished removing every deletion-scoped runtime resource it held."
     },
     "SecretKeySelector": {
       "properties": {

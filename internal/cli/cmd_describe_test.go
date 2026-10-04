@@ -136,15 +136,10 @@ var describeProjectCoveredFields = newStringSet(
 	"Status.NodeRef",
 	"Status.AssignmentGeneration",
 	"Status.AssignmentHistory",
+	"Status.Recovery.CleanupObligations",
 	"Status.Recovery.HealthySinceGeneration",
 	"Status.Recovery.PreferredNode",
-	"Status.Recovery.PreviousAssignment.AssignmentGeneration",
-	"Status.Recovery.PreviousAssignment.NodeName",
-	"Status.Recovery.PreviousAssignment.ProjectUID",
 	"Status.Recovery.RescheduleAttempts",
-	"Status.Recovery.ResourcesRemoved.Assignment.AssignmentGeneration",
-	"Status.Recovery.ResourcesRemoved.Assignment.NodeName",
-	"Status.Recovery.ResourcesRemoved.Assignment.ProjectUID",
 	"Status.Recovery.WorkloadStopped.Assignment.AssignmentGeneration",
 	"Status.Recovery.WorkloadStopped.Assignment.NodeName",
 	"Status.Recovery.WorkloadStopped.Assignment.ProjectUID",
@@ -256,11 +251,19 @@ func TestDescribeProjectRecoverySection(t *testing.T) {
 			RescheduleAttempts:     2,
 			HealthySince:           &healthy,
 			HealthySinceGeneration: 6,
-			PreviousAssignment:     &prev,
+			CleanupObligations: []v1.CleanupObligation{
+				{Assignment: prev, ReleasedAt: healthy, ReleaseAuthorization: v1.ReleaseByWorkloadStopped},
+				{Assignment: v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-z", AssignmentGeneration: 5},
+					ReleasedAt: healthy, ReleaseAuthorization: v1.ReleaseByWorkloadStopped,
+					ResourcesRemoved: &v1.ResourcesRemovedEvidence{ObservedAt: healthy}},
+			},
 		},
 	}})
 	text := out.String()
 	assert.Contains(t, text, "Recovery:")
 	assert.Contains(t, text, "(stale: generation 6)")
 	assert.Contains(t, text, "node-a generation 6 (uid uid-1)")
+	assert.Contains(t, text, "by WorkloadStopped")
+	assert.Contains(t, text, "Resources:  pending")
+	assert.Contains(t, text, "Resources:  removed at")
 }
