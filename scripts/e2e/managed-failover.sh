@@ -195,7 +195,9 @@ print(m.get(sys.argv[2], ""))
 
 dind_image="${DIND_IMAGE:-docker:27-dind}"
 postgres_image="${POSTGRES_IMAGE:-postgres:16}"
-minio_image="${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z}"
+# Chainguard, pinned by digest, as docker-compose.yaml uses: MinIO's own Quay
+# repositories refuse anonymous pulls. The image ships mc alongside the server.
+minio_image="${MINIO_IMAGE:-cgr.dev/chainguard/minio:latest@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1}"
 bucket=cara-e2e
 
 data_root_a="$test_root/agent-a-data"
@@ -215,12 +217,15 @@ postgres_port="$(docker port "$postgres_name" 5432/tcp | head -1)"; postgres_por
 log "starting isolated MinIO ($minio_name)"
 docker run -d --name "$minio_name" \
 	-e MINIO_ROOT_USER=caraadmin -e MINIO_ROOT_PASSWORD=caraadmin123 \
+	-e MC_HOST_local=http://caraadmin:caraadmin123@127.0.0.1:9000 \
 	-p 127.0.0.1::9000 "$minio_image" server /data >/dev/null
 minio_port="$(docker port "$minio_name" 9000/tcp | head -1)"; minio_port="${minio_port##*:}"
 minio_endpoint="http://127.0.0.1:$minio_port"
 wait_until 90 "MinIO readiness" \
 	bash -c "curl -fsS '$minio_endpoint/minio/health/live' >/dev/null 2>&1"
-mc alias set local http://127.0.0.1:9000 caraadmin caraadmin123 >/dev/null
+# The local alias comes from MC_HOST_local on the container, not from mc's
+# config file: the image runs as a non-root user, and nothing guarantees it
+# can write one.
 mc mb --ignore-existing "local/$bucket" >/dev/null
 
 for name in "$dind_a_name:$data_root_a" "$dind_b_name:$data_root_b"; do
