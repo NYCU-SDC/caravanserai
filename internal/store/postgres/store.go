@@ -1031,28 +1031,15 @@ func (s *Store) RecordWorkloadStopped(ctx context.Context, name string, ref stor
 			return fmt.Errorf("%w: project %q is %s; workload-stopped evidence is accepted only while Scheduled, Running, Failed or Terminating",
 				store.ErrConflictState, name, status.Phase)
 		}
-		if status.Recovery == nil {
-			status.Recovery = &v1.ProjectRecoveryStatus{}
-		}
 		// First evidence for an assignment wins. A retry or a restarted Agent
 		// reporting the same stop again changes nothing, not even ObservedAt,
 		// so the reassertion is a no-op with no version or event.
-		if ws := status.Recovery.WorkloadStopped; ws != nil && ws.Assignment == evidence {
+		if status.Recovery.WorkloadStoppedFor(evidence) {
 			return nil
 		}
-		status.Recovery.WorkloadStopped = &v1.WorkloadStoppedEvidence{Assignment: evidence, ObservedAt: observedAt.UTC()}
+		status.EnsureRecovery().WorkloadStopped = &v1.WorkloadStoppedEvidence{Assignment: evidence, ObservedAt: observedAt.UTC()}
 		return nil
 	})
-}
-
-// cleanupObligationFor returns p's cleanup obligation for owner, or nil when
-// owner is not one of p's obligations. The UID must match p's lifetime: a
-// same-name successor never inherits its predecessor's obligations.
-func cleanupObligationFor(owner store.AssignmentRef, p *v1.Project) *v1.CleanupObligation {
-	if owner.UID != p.ObjectMeta.UID {
-		return nil
-	}
-	return p.Status.Recovery.FindObligation(assignmentIdentity(owner))
 }
 
 // RecordResourcesRemoved implements store.ProjectStore.
@@ -1061,7 +1048,9 @@ func cleanupObligationFor(owner store.AssignmentRef, p *v1.Project) *v1.CleanupO
 // can express, so ownership is checked in Go on the snapshot the swap is based
 // on. The swap is pinned to the UID and version that snapshot came from: if
 // the obligations or the Project change in between, the swap misses, the loop
-// re-reads, and the ownership check runs again on the new state.
+// re-reads, and the ownership check runs again on the new state. A same-name
+// successor never inherits its predecessor's obligations: the UID check fails
+// before the list is looked at.
 func (s *Store) RecordResourcesRemoved(ctx context.Context, name string, owner store.AssignmentRef, observedAt time.Time) error {
 	return s.recordResourcesRemoved(ctx, name, owner, observedAt, nil)
 }
@@ -1076,6 +1065,49 @@ func (s *Store) recordResourcesRemoved(
 	observedAt time.Time,
 	beforeSwap func(),
 ) error {
+	evidence := assignmentIdentity(owner)
+	return s.updateProjectStatusForUID(ctx, name, owner.UID, func(status *v1.ProjectStatus) error {
+		obligation := status.Recovery.FindObligation(evidence)
+		if obligation == nil {
+			return fmt.Errorf("%w: project %q", store.ErrStaleAssignment, name)
+		}
+		// First evidence for an obligation wins: a retry or a restarted Agent
+		// reporting again changes nothing, not even ObservedAt.
+		if obligation.Resolved() {
+			return nil
+		}
+		obligation.ResourcesRemoved = &v1.ResourcesRemovedEvidence{ObservedAt: observedAt.UTC()}
+		return nil
+	}, beforeSwap)
+}
+
+// UpdateProjectStatusForUID implements store.ProjectStore.
+func (s *Store) UpdateProjectStatusForUID(
+	ctx context.Context,
+	name, uid string,
+	mutate func(*v1.ProjectStatus) error,
+) error {
+	return s.updateProjectStatusForUID(ctx, name, uid, mutate, nil)
+}
+
+// updateProjectStatusForUID is the read-mutate-swap loop of
+// UpdateProjectStatusWithRetry pinned to one Project lifetime.
+//
+// The swap carries the UID as well as the version. Version alone is not
+// enough: a same-name Project created after the read starts its own version
+// count and can reach the same number, and a version-only swap would then
+// write the old lifetime's status — nodeRef, generation and all — over the new
+// one. A read that already finds another lifetime under the name fails before
+// mutate runs, so mutate only ever sees status of the lifetime it was asked
+// about.
+//
+// beforeSwap runs between the read and the swap; production passes nil.
+func (s *Store) updateProjectStatusForUID(
+	ctx context.Context,
+	name, uid string,
+	mutate func(*v1.ProjectStatus) error,
+	beforeSwap func(),
+) error {
 	var lastConflict error
 
 	for attempt := 0; attempt < maxStatusUpdateAttempts; attempt++ {
@@ -1086,28 +1118,26 @@ func (s *Store) recordResourcesRemoved(
 			}
 			return err
 		}
-		if cleanupObligationFor(owner, project) == nil {
-			return fmt.Errorf("%w: project %q", store.ErrStaleAssignment, name)
+		if project.ObjectMeta.UID != uid {
+			return fmt.Errorf("%w: project %q is no longer lifetime %s", store.ErrStaleAssignment, name, uid)
 		}
 
 		next := copyProjectStatus(project.Status)
-		obligation := next.Recovery.FindObligation(assignmentIdentity(owner))
-		// First evidence for an obligation wins: a retry or a restarted Agent
-		// reporting again changes nothing, not even ObservedAt.
-		if obligation.Resolved() {
+		if err := mutate(&next); err != nil {
+			return err
+		}
+		unchanged, err := statusEqual(project.Status, next)
+		if err != nil {
+			return fmt.Errorf("postgres: compare project status %q: %w", name, err)
+		}
+		if unchanged {
 			return nil
 		}
-		obligation.ResourcesRemoved = &v1.ResourcesRemovedEvidence{ObservedAt: observedAt.UTC()}
 
 		if beforeSwap != nil {
 			beforeSwap()
 		}
-		// The swap carries the UID as well as the version. Version alone is not
-		// enough: a same-name Project created after this read starts its own
-		// version count and can reach the same number, and a version-only swap
-		// would then write the old lifetime's status — nodeRef, generation and
-		// all — over the new one.
-		err = s.swapProjectStatusForUID(ctx, name, project.ObjectMeta.ResourceVersion, owner.UID, next)
+		err = s.swapProjectStatusForUID(ctx, name, project.ObjectMeta.ResourceVersion, uid, next)
 		switch {
 		case err == nil:
 			s.publish(event.TopicProjectUpdated, name)

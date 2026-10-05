@@ -540,15 +540,42 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 		//
 		// The phase is set on whatever status the store read, not on the copy
 		// fetched above: a controller may have written NodeRef or a condition
-		// in between, and replacing the whole status would discard it.
-		err := h.store.UpdateProjectStatusWithRetry(traceCtx, name, func(status *v1.ProjectStatus) error {
+		// in between, and replacing the whole status would discard it. The
+		// write is pinned to the UID fetched above, so the Project the caller
+		// asked to delete is the one that terminates, never a same-name
+		// successor created in between.
+		now := time.Now().UTC()
+		uid := project.ObjectMeta.UID
+		err := h.store.UpdateProjectStatusForUID(traceCtx, name, uid, func(status *v1.ProjectStatus) error {
+			if status.Phase == v1.ProjectPhaseTerminating {
+				return nil
+			}
 			status.Phase = v1.ProjectPhaseTerminating
+			// The assigned Node now owes the removal of everything it holds
+			// for this assignment. Recorded in the same write as the phase,
+			// so the obligation list stays the complete set of Nodes that
+			// may hold resources. A Project with no nodeRef has no current
+			// assignment; any earlier Node is already in the list from its
+			// release.
+			if status.NodeRef != "" {
+				status.EnsureRecovery().AddObligation(v1.AssignmentIdentity{
+					ProjectUID:           uid,
+					NodeName:             status.NodeRef,
+					AssignmentGeneration: status.AssignmentGeneration,
+				}, now, v1.ReleaseByDeletion)
+			}
 			return nil
 		})
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				h.problemWriter.WriteError(traceCtx, w,
 					fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+				return
+			}
+			if errors.Is(err, store.ErrStaleAssignment) {
+				h.problemWriter.WriteError(traceCtx, w,
+					fmt.Errorf("project %s was deleted and recreated during this request; retry to delete the new one: %w",
+						name, store.ErrConflictState), logger)
 				return
 			}
 			logger.Error("Marking project Terminating failed", zap.String("name", name), zap.Error(err))

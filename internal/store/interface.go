@@ -251,6 +251,15 @@ type ProjectStore interface {
 	// version, publishes no event, and returns nil.
 	UpdateProjectStatusWithRetry(ctx context.Context, name string, mutate func(*v1.ProjectStatus) error) error
 
+	// UpdateProjectStatusForUID is UpdateProjectStatusWithRetry pinned to one
+	// Project lifetime: the read must find uid under name, and the swap
+	// matches uid as well as the version read. Use it when the caller decided
+	// what to write from an earlier read of a specific lifetime, so a
+	// delete-and-recreate in between cannot redirect the write to a same-name
+	// successor. Returns ErrStaleAssignment when name now holds another
+	// lifetime, and ErrNotFound when it holds none.
+	UpdateProjectStatusForUID(ctx context.Context, name, uid string, mutate func(*v1.ProjectStatus) error) error
+
 	// PatchProjectCondition replaces exactly one named condition inside a
 	// Project's status.conditions, leaving phase and every other status field
 	// untouched.  Used by the agent to publish Maintenance while controllers

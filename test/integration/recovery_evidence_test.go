@@ -12,6 +12,7 @@ import (
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/server/adapter"
+	"NYCU-SDC/caravanserai/test/integration/testhelper"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -227,7 +228,7 @@ func TestNewAssignmentClearsLatchAndHealthyWindow(t *testing.T) {
 	require.NotNil(t, r.HealthySince)
 
 	// A real new assignment clears both.
-	require.NoError(t, sched.SetProjectPending(ctx, name))
+	testhelper.ReleaseCleanly(t, suite.store, name)
 	require.NoError(t, sched.SetProjectScheduled(ctx, name, "node-b"))
 	p := getProject(t, name)
 	assert.Equal(t, gen+1, p.Status.AssignmentGeneration)

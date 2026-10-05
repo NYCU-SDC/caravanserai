@@ -6,10 +6,12 @@ package adapter
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/server/controller"
+	"NYCU-SDC/caravanserai/internal/store"
 	pgstore "NYCU-SDC/caravanserai/internal/store/postgres"
 )
 
@@ -52,25 +54,53 @@ func (a *ProjectStoreAdapter) GetProjectPhase(ctx context.Context, name string) 
 	return project.Status.Phase, project.Status.NodeRef, nil
 }
 
+// SetProjectScheduled satisfies controller.SchedulerProjectStore.
+//
+// Only a Pending Project may receive a new assignment, and only a Scheduled
+// Project already on nodeRef may have it re-asserted (a no-op). Everything
+// else is refused with ErrConflictState, writing nothing. The phase is checked
+// on the snapshot the swap is versioned on, because the scheduler decided to
+// act on an earlier read: in between, the Project can be deleted into
+// Terminating — and writing Scheduled then would undo the deletion — or be
+// assigned elsewhere, and silently moving a Scheduled Project to another Node
+// would change its Node without a new generation, a release or a cleanup
+// obligation.
 func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nodeRef string) error {
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
-		// Bump the assignment generation exactly once per real transition into
-		// Scheduled. The guard is "was not already Scheduled": a scheduler retry
-		// or a semantic no-op that re-asserts an existing Scheduled assignment
-		// re-reads phase=Scheduled and skips the bump, so generation never
-		// advances twice for one grant of ownership. Under OCC the phase read
-		// here reflects the committed row and only the winning attempt persists,
-		// so the increment is exactly-once even across retries.
+		switch {
+		case status.Phase == v1.ProjectPhaseScheduled && status.NodeRef == nodeRef:
+			// A scheduler retry re-asserting the assignment it already made.
+			// Not a new grant: the generation must not advance twice for one
+			// grant of ownership.
+			return nil
+		case status.Phase != v1.ProjectPhasePending:
+			return fmt.Errorf("%w: project %q is %s on node %q; only a Pending project can be assigned",
+				store.ErrConflictState, name, status.Phase, status.NodeRef)
+		}
+
+		// Refused for every Node, the previous one included: a Node still
+		// owing cleanup for an older generation must not be handed a new one
+		// by an ordinary assignment, or its cleanup would remove the new
+		// generation's resources. Same-Node takeover goes through its own
+		// handoff mutation instead. Checked on the same snapshot as the
+		// phase, so an obligation appended after the read turns the swap into
+		// a retry that sees it.
+		if o := status.Recovery.BlockingObligation(); o != nil {
+			return fmt.Errorf("%w: node %s has not removed the resources of generation %d (released by %s)",
+				store.ErrConflictState, o.Assignment.NodeName, o.Assignment.AssignmentGeneration, o.ReleaseAuthorization)
+		}
+
+		// One increment per real grant. Under OCC the phase read here is the
+		// committed row and only the winning attempt persists, so the
+		// increment is exactly-once even across retries.
 		//
 		// A grant of ownership is always Known history, whatever the row
 		// migrated in as: the counter it now carries is a trustworthy fence.
-		if status.Phase != v1.ProjectPhaseScheduled {
-			status.AssignmentGeneration++
-			status.AssignmentHistory = v1.AssignmentHistoryKnown
-			// The new generation consumes the old one's no-start latch and
-			// healthy window, in the same swap that commits it.
-			status.Recovery.ClearForNewAssignment()
-		}
+		status.AssignmentGeneration++
+		status.AssignmentHistory = v1.AssignmentHistoryKnown
+		// The new generation consumes the old one's no-start latch and
+		// healthy window, in the same swap that commits it.
+		status.Recovery.ClearForNewAssignment()
 		status.Phase = v1.ProjectPhaseScheduled
 		status.NodeRef = nodeRef
 		return nil
@@ -120,21 +150,61 @@ func (a *ProjectStoreAdapter) ListProjectsByNodeRef(ctx context.Context, nodeRef
 			}
 		}
 		snapshots[i] = &controller.ProjectSnapshot{
-			Name:       p.Name,
-			Phase:      p.Status.Phase,
-			NodeRef:    p.Status.NodeRef,
-			Conditions: conditions,
+			Name:                 p.Name,
+			UID:                  p.ObjectMeta.UID,
+			Phase:                p.Status.Phase,
+			NodeRef:              p.Status.NodeRef,
+			AssignmentGeneration: p.Status.AssignmentGeneration,
+			Conditions:           conditions,
 		}
 	}
 	return snapshots, nil
 }
 
-// SetProjectPending satisfies controller.ReschedulerProjectStore.
-// Clears nodeRef, sets phase=Pending, and records a Phase condition with
-// reason=NodeNotReady.
-func (a *ProjectStoreAdapter) SetProjectPending(ctx context.Context, name string) error {
+// releasablePhases are the phases the rescheduler releases from. Terminating
+// is handled by its own timeout and is never handed to another Node.
+var releasablePhases = map[v1.ProjectPhase]bool{
+	v1.ProjectPhaseScheduled: true,
+	v1.ProjectPhaseRunning:   true,
+}
+
+// ReleaseAssignment satisfies controller.ReschedulerProjectStore.
+//
+// The gate and the release are one compare-and-swap pinned to the snapshot's
+// UID: the WorkloadStopped evidence, the assignment and the phase are all
+// checked on the status the swap is versioned on. Releasing first and checking
+// afterwards would leave a window in which the Project is Pending, schedulable
+// elsewhere, while its old containers may still run.
+func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controller.ProjectSnapshot) (bool, error) {
 	now := time.Now().UTC()
-	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+	assignment := v1.AssignmentIdentity{ProjectUID: p.UID, NodeName: p.NodeRef, AssignmentGeneration: p.AssignmentGeneration}
+
+	var released bool
+	err := a.s.UpdateProjectStatusForUID(ctx, p.Name, p.UID, func(status *v1.ProjectStatus) error {
+		if status.NodeRef != p.NodeRef || status.AssignmentGeneration != p.AssignmentGeneration {
+			return fmt.Errorf("%w: project %q no longer holds node %s generation %d",
+				store.ErrStaleAssignment, p.Name, p.NodeRef, p.AssignmentGeneration)
+		}
+		if !releasablePhases[status.Phase] {
+			return fmt.Errorf("%w: project %q is %s", store.ErrConflictState, p.Name, status.Phase)
+		}
+
+		// Assigned on every attempt: the closure may run more than once, and
+		// only the last run's decision is the one committed.
+		released = status.Recovery.WorkloadStoppedFor(assignment)
+		if !released {
+			status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+				Type:   v1.ConditionTypeTakeoverRequired,
+				Status: v1.ConditionTrue,
+				Reason: "WorkloadStopUnconfirmed",
+				Message: fmt.Sprintf("Node %s is NotReady and has not confirmed generation %d stopped; "+
+					"the project stays assigned to it until the node returns or the takeover is authorized",
+					p.NodeRef, p.AssignmentGeneration),
+				LastTransitionTime: now,
+			}, false)
+			return nil
+		}
+
 		transitioned := status.Phase != v1.ProjectPhasePending
 		status.Phase = v1.ProjectPhasePending
 		// Clearing nodeRef revokes the current assignment but must not reset the
@@ -144,27 +214,36 @@ func (a *ProjectStoreAdapter) SetProjectPending(ctx context.Context, name string
 		// as-is (it was assigned, so it is Known) — releasing ownership never
 		// makes a Project look never-assigned.
 		status.NodeRef = ""
+		// The released Node still holds the stopped containers. Recording
+		// that in the same write is what makes the obligation list complete:
+		// no reader can see the assignment gone without its debt recorded.
+		status.EnsureRecovery().AddObligation(assignment, now, v1.ReleaseByWorkloadStopped)
 		// The incident is over for this Project: it is leaving the node that
-		// went NotReady. Both clocks are scoped to that outage, so they go with
-		// it — carried to the next node they would be read as the start of
-		// that node's first failure, which by then is already past every
-		// timeout.
+		// went NotReady. The outage conditions are scoped to that outage, so
+		// they go with it — carried to the next node, a clock would be read as
+		// the start of that node's first failure, which by then is already
+		// past every timeout.
 		status.Conditions = v1.RemoveConditions(status.Conditions,
-			v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt)
+			v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt, v1.ConditionTypeTakeoverRequired)
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypePhase,
 			Status:             v1.ConditionTrue,
 			Reason:             "NodeNotReady",
-			Message:            "Node went NotReady; project reset to Pending for rescheduling",
+			Message:            "Node went NotReady and confirmed the workload stopped; project released for rescheduling",
 			LastTransitionTime: now,
 		}, transitioned)
 		return nil
 	})
+	if err != nil {
+		return false, err
+	}
+	return released, nil
 }
 
 // ClearRescheduleClocks satisfies controller.ReschedulerProjectStore.
-// Removes the NotReadyAt and TerminatingAt conditions from a Project still
-// assigned to nodeRef, ending the reschedule clocks without touching the phase.
+// Removes the outage conditions (NotReadyAt, TerminatingAt, TakeoverRequired)
+// from a Project still assigned to nodeRef, ending the reschedule clocks
+// without touching the phase.
 //
 // This is the other way an incident ends: the node came back before either
 // clock expired, so the Project never moved and its phase never changed. The
@@ -198,8 +277,7 @@ func (a *ProjectStoreAdapter) ClearRescheduleClocks(
 
 		kept := make([]v1.Condition, 0, len(status.Conditions))
 		for _, c := range status.Conditions {
-			isClock := c.Type == v1.ConditionTypeNotReadyAt || c.Type == v1.ConditionTypeTerminatingAt
-			if isClock && !c.LastTransitionTime.After(notAfter) {
+			if controller.IsOutageCondition(c.Type) && !c.LastTransitionTime.After(notAfter) {
 				continue
 			}
 			kept = append(kept, c)

@@ -94,6 +94,37 @@ func TestClearRescheduleClocksGuards(t *testing.T) {
 			conditionTypes(t, name))
 	})
 
+	// A refused release leaves TakeoverRequired, which belongs to the same
+	// outage as the clocks and must go with them when the node recovers — a
+	// Scheduled Project carries it with no clock at all.
+	t.Run("TakeoverRequired follows the same guard as the clocks", func(t *testing.T) {
+		takeover := func(at time.Time) v1.Condition {
+			return v1.Condition{
+				Type:               v1.ConditionTypeTakeoverRequired,
+				Status:             v1.ConditionTrue,
+				Reason:             "WorkloadStopUnconfirmed",
+				LastTransitionTime: at,
+			}
+		}
+		stale := create(t, "clk-takeover-stale", "node-a", recoveryBeat.Add(-time.Minute))
+		fresh := create(t, "clk-takeover-fresh", "node-a", recoveryBeat.Add(-time.Minute))
+		for name, at := range map[string]time.Time{
+			stale: recoveryBeat.Add(-time.Minute),
+			fresh: recoveryBeat.Add(2 * time.Minute),
+		} {
+			require.NoError(t, s.Store.UpdateProjectStatusWithRetry(ctx, name, func(st *v1.ProjectStatus) error {
+				st.Conditions = append(st.Conditions, takeover(at))
+				return nil
+			}))
+			require.NoError(t, projects.ClearRescheduleClocks(ctx, name, "node-a", recoveryBeat))
+		}
+
+		assert.Equal(t, []v1.ConditionType{v1.ConditionTypePhase}, conditionTypes(t, stale))
+		assert.Equal(t,
+			[]v1.ConditionType{v1.ConditionTypePhase, v1.ConditionTypeTakeoverRequired},
+			conditionTypes(t, fresh))
+	})
+
 	t.Run("a Project that has moved to another node is untouched", func(t *testing.T) {
 		name := create(t, "clk-moved", "node-b", recoveryBeat.Add(-time.Minute))
 

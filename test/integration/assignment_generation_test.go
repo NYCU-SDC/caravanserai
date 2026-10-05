@@ -11,6 +11,7 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/server/adapter"
 	"NYCU-SDC/caravanserai/internal/store"
+	"NYCU-SDC/caravanserai/test/integration/testhelper"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -61,7 +62,7 @@ func TestAssignmentGenerationFencing(t *testing.T) {
 		"re-asserting an existing assignment must not bump the generation")
 
 	// Releasing ownership preserves the counter.
-	require.NoError(t, sched.SetProjectPending(ctx, name))
+	testhelper.ReleaseCleanly(t, suite.store, name)
 	p = getProject(t, name)
 	require.Equal(t, int64(1), p.Status.AssignmentGeneration, "clearing nodeRef preserves the generation counter")
 	require.Empty(t, p.Status.NodeRef)
@@ -70,7 +71,7 @@ func TestAssignmentGenerationFencing(t *testing.T) {
 	// returns to node-a but the generation never repeats.
 	require.NoError(t, sched.SetProjectScheduled(ctx, name, "node-b"))
 	require.Equal(t, int64(2), getProject(t, name).Status.AssignmentGeneration)
-	require.NoError(t, sched.SetProjectPending(ctx, name))
+	testhelper.ReleaseCleanly(t, suite.store, name)
 	require.NoError(t, sched.SetProjectScheduled(ctx, name, "node-a"))
 	current := getProject(t, name)
 	require.Equal(t, int64(3), current.Status.AssignmentGeneration, "returning to node-a is a new generation, not a repeat")

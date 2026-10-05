@@ -54,9 +54,12 @@ type deleteProjectCall struct {
 	Name string
 }
 
-// setProjectPendingCall records a single invocation of SetProjectPending.
-type setProjectPendingCall struct {
-	Name string
+// releaseAssignmentCall records a single invocation of ReleaseAssignment.
+type releaseAssignmentCall struct {
+	Name                 string
+	NodeRef              string
+	AssignmentGeneration int64
+	Released             bool
 }
 
 // setTerminatingAtCall records a single invocation of SetTerminatingAt.
@@ -156,6 +159,10 @@ type fakeSchedulerProjectStore struct {
 	projects map[string]schedulerProjectRecord
 	errs     map[string]error
 
+	// scheduleErrs fails only SetProjectScheduled, as the adapter does when a
+	// cleanup obligation refuses the assignment; reads still succeed.
+	scheduleErrs map[string]error
+
 	SetProjectScheduledCalls []setProjectScheduledCall
 }
 
@@ -168,8 +175,9 @@ var _ SchedulerProjectStore = (*fakeSchedulerProjectStore)(nil)
 
 func newFakeSchedulerProjectStore() *fakeSchedulerProjectStore {
 	return &fakeSchedulerProjectStore{
-		projects: make(map[string]schedulerProjectRecord),
-		errs:     make(map[string]error),
+		projects:     make(map[string]schedulerProjectRecord),
+		errs:         make(map[string]error),
+		scheduleErrs: make(map[string]error),
 	}
 }
 
@@ -205,6 +213,9 @@ func (f *fakeSchedulerProjectStore) SetProjectScheduled(_ context.Context, name,
 	defer f.mu.Unlock()
 
 	if err, ok := f.errs[name]; ok {
+		return err
+	}
+	if err, ok := f.scheduleErrs[name]; ok {
 		return err
 	}
 
@@ -324,11 +335,16 @@ type fakeReschedulerProjectStore struct {
 	projects map[string]*ProjectSnapshot
 	errs     map[string]error
 
-	SetProjectPendingCalls    []setProjectPendingCall
+	ReleaseAssignmentCalls    []releaseAssignmentCall
 	SetTerminatingAtCalls     []setTerminatingAtCall
 	SetNotReadyAtCalls        []setNotReadyAtCall
 	ForceTerminatedCalls      []forceTerminatedCall
 	ClearRescheduleClockCalls []clearRescheduleClocksCall
+
+	// unconfirmed names Projects whose release the fake refuses, as the
+	// adapter does when no WorkloadStopped evidence matches the assignment.
+	// Every other Project is released.
+	unconfirmed map[string]bool
 
 	// onList runs after ListProjectsByNodeRef has built its result and
 	// released the lock, so a test can change the store in the window between
@@ -341,8 +357,9 @@ var _ ReschedulerProjectStore = (*fakeReschedulerProjectStore)(nil)
 
 func newFakeReschedulerProjectStore() *fakeReschedulerProjectStore {
 	return &fakeReschedulerProjectStore{
-		projects: make(map[string]*ProjectSnapshot),
-		errs:     make(map[string]error),
+		projects:    make(map[string]*ProjectSnapshot),
+		errs:        make(map[string]error),
+		unconfirmed: make(map[string]bool),
 	}
 }
 
@@ -412,8 +429,7 @@ func (f *fakeReschedulerProjectStore) ClearRescheduleClocks(
 
 	kept := make([]ConditionSnapshot, 0, len(p.Conditions))
 	for _, c := range p.Conditions {
-		isClock := c.Type == v1.ConditionTypeNotReadyAt || c.Type == v1.ConditionTypeTerminatingAt
-		if isClock && !c.LastTransitionTime.After(notAfter) {
+		if IsOutageCondition(c.Type) && !c.LastTransitionTime.After(notAfter) {
 			continue
 		}
 		kept = append(kept, c)
@@ -422,21 +438,38 @@ func (f *fakeReschedulerProjectStore) ClearRescheduleClocks(
 	return nil
 }
 
-func (f *fakeReschedulerProjectStore) SetProjectPending(_ context.Context, name string) error {
+// ReleaseAssignment mirrors the adapter's outcomes, not its gate: whether a
+// release is authorized is decided by unconfirmed, and the gate itself is
+// tested against the real adapter. A Project that has moved off the
+// snapshot's assignment is stale, as in the adapter.
+func (f *fakeReschedulerProjectStore) ReleaseAssignment(_ context.Context, snap *ProjectSnapshot) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if err, ok := f.errs[name]; ok {
-		return err
+	if err, ok := f.errs[snap.Name]; ok {
+		return false, err
 	}
 
-	f.SetProjectPendingCalls = append(f.SetProjectPendingCalls, setProjectPendingCall{Name: name})
+	p, ok := f.projects[snap.Name]
+	if !ok {
+		return false, store.ErrNotFound
+	}
+	if p.NodeRef != snap.NodeRef || p.AssignmentGeneration != snap.AssignmentGeneration {
+		return false, store.ErrStaleAssignment
+	}
 
-	if p, ok := f.projects[name]; ok {
+	released := !f.unconfirmed[snap.Name]
+	f.ReleaseAssignmentCalls = append(f.ReleaseAssignmentCalls, releaseAssignmentCall{
+		Name:                 snap.Name,
+		NodeRef:              snap.NodeRef,
+		AssignmentGeneration: snap.AssignmentGeneration,
+		Released:             released,
+	})
+	if released {
 		p.Phase = v1.ProjectPhasePending
 		p.NodeRef = ""
 	}
-	return nil
+	return released, nil
 }
 
 func (f *fakeReschedulerProjectStore) SetTerminatingAt(_ context.Context, name string, at time.Time) error {

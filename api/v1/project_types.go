@@ -450,6 +450,74 @@ func (r *ProjectRecoveryStatus) FindObligation(assignment AssignmentIdentity) *C
 	return nil
 }
 
+// AddObligation records that assignment was given up under authorization and
+// its Node now owes cleanup. An assignment already in the list keeps its
+// original entry: an obligation records the first release, and re-releasing
+// the same assignment must not reset its evidence.
+func (r *ProjectRecoveryStatus) AddObligation(assignment AssignmentIdentity, releasedAt time.Time, authorization ReleaseAuthorizationKind) {
+	if r.FindObligation(assignment) != nil {
+		return
+	}
+	r.CleanupObligations = append(r.CleanupObligations, CleanupObligation{
+		Assignment:           assignment,
+		ReleasedAt:           releasedAt,
+		ReleaseAuthorization: authorization,
+	})
+}
+
+// PermitsAssignment reports whether this obligation lets the Project be
+// assigned again. A resolved obligation does. An unresolved one does only when
+// its release was authorized by evidence that the old Node can no longer run
+// the workload — provider fencing or an audited operator override. A
+// WorkloadStopped release does not: the containers are stopped but still
+// present, and a restarted Agent or Docker restart policy could bring them back
+// while the new assignment runs.
+//
+// LeaseExpired is refused only because no lease is implemented yet and nothing
+// can record that kind. It is not a decision: the lease design separates
+// "another Node may take over" from "the old Node still owes cleanup", so its
+// answer here is to be set when the lease itself is implemented.
+func (o CleanupObligation) PermitsAssignment() bool {
+	if o.Resolved() {
+		return true
+	}
+	switch o.ReleaseAuthorization {
+	case ReleaseByProviderFencing, ReleaseByOperatorOverride:
+		return true
+	default:
+		return false
+	}
+}
+
+// BlockingObligation returns the first obligation that forbids assigning the
+// Project, or nil when none does.
+func (r *ProjectRecoveryStatus) BlockingObligation() *CleanupObligation {
+	if r == nil {
+		return nil
+	}
+	for i := range r.CleanupObligations {
+		if !r.CleanupObligations[i].PermitsAssignment() {
+			return &r.CleanupObligations[i]
+		}
+	}
+	return nil
+}
+
+// WorkloadStoppedFor reports whether WorkloadStopped evidence is recorded for
+// exactly assignment. Evidence for any other generation, Node or lifetime says
+// nothing about this one.
+func (r *ProjectRecoveryStatus) WorkloadStoppedFor(assignment AssignmentIdentity) bool {
+	return r != nil && r.WorkloadStopped != nil && r.WorkloadStopped.Assignment == assignment
+}
+
+// EnsureRecovery returns s.Recovery, allocating it first if needed.
+func (s *ProjectStatus) EnsureRecovery() *ProjectRecoveryStatus {
+	if s.Recovery == nil {
+		s.Recovery = &ProjectRecoveryStatus{}
+	}
+	return s.Recovery
+}
+
 // AssignmentIdentity names one assignment of one Project lifetime. All three
 // parts are needed: UID separates lifetimes that share a name, and the
 // generation separates assignments that reuse a Node (A→B→A).

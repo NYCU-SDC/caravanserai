@@ -145,3 +145,72 @@ func TestFindObligation(t *testing.T) {
 	var none *ProjectRecoveryStatus
 	assert.Nil(t, none.FindObligation(AssignmentIdentity{}))
 }
+
+// An obligation records the first release of an assignment; releasing the same
+// assignment again must not reset its time, authorization or evidence.
+func TestAddObligationKeepsTheFirstEntry(t *testing.T) {
+	r := fullRecoveryStatus()
+	first := r.CleanupObligations[0]
+
+	r.AddObligation(first.Assignment, first.ReleasedAt.Add(time.Hour), ReleaseByDeletion)
+	require.Len(t, r.CleanupObligations, 2)
+	assert.Equal(t, first, r.CleanupObligations[0])
+
+	added := AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-b", AssignmentGeneration: 7}
+	r.AddObligation(added, first.ReleasedAt, ReleaseByDeletion)
+	require.Len(t, r.CleanupObligations, 3)
+	assert.Equal(t, CleanupObligation{Assignment: added, ReleasedAt: first.ReleasedAt, ReleaseAuthorization: ReleaseByDeletion},
+		r.CleanupObligations[2])
+}
+
+// Only cleanup, provider fencing or an operator override lets a Project be
+// assigned past an obligation. Stopped workload and deletion are teardown
+// facts, never evidence that the old Node can no longer run the workload.
+//
+// LeaseExpired is deliberately not listed: no lease exists yet, and its policy
+// is decided with the lease, not pinned here.
+func TestObligationPermitsAssignment(t *testing.T) {
+	permits := map[ReleaseAuthorizationKind]bool{
+		ReleaseByWorkloadStopped:  false,
+		ReleaseByDeletion:         false,
+		ReleaseByProviderFencing:  true,
+		ReleaseByOperatorOverride: true,
+	}
+	for kind, want := range permits {
+		o := CleanupObligation{ReleaseAuthorization: kind}
+		assert.Equal(t, want, o.PermitsAssignment(), "unresolved %s", kind)
+		o.ResourcesRemoved = &ResourcesRemovedEvidence{}
+		assert.True(t, o.PermitsAssignment(), "resolved %s", kind)
+	}
+}
+
+func TestBlockingObligation(t *testing.T) {
+	var none *ProjectRecoveryStatus
+	assert.Nil(t, none.BlockingObligation())
+
+	r := fullRecoveryStatus()
+	got := r.BlockingObligation()
+	require.NotNil(t, got, "the unresolved WorkloadStopped obligation must block")
+	assert.Equal(t, int64(6), got.Assignment.AssignmentGeneration)
+
+	got.ResourcesRemoved = &ResourcesRemovedEvidence{}
+	assert.Nil(t, r.BlockingObligation())
+}
+
+func TestWorkloadStoppedFor(t *testing.T) {
+	r := fullRecoveryStatus()
+	current := r.WorkloadStopped.Assignment
+	assert.True(t, r.WorkloadStoppedFor(current))
+
+	for _, other := range []AssignmentIdentity{
+		{ProjectUID: current.ProjectUID, NodeName: current.NodeName, AssignmentGeneration: current.AssignmentGeneration + 1},
+		{ProjectUID: current.ProjectUID, NodeName: "node-b", AssignmentGeneration: current.AssignmentGeneration},
+		{ProjectUID: "uid-2", NodeName: current.NodeName, AssignmentGeneration: current.AssignmentGeneration},
+	} {
+		assert.False(t, r.WorkloadStoppedFor(other), "%+v", other)
+	}
+
+	var none *ProjectRecoveryStatus
+	assert.False(t, none.WorkloadStoppedFor(current))
+	assert.False(t, (&ProjectRecoveryStatus{}).WorkloadStoppedFor(current))
+}
