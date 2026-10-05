@@ -582,6 +582,29 @@ func (s *Store) ListProjectsByNodeRef(ctx context.Context, nodeRef string, phase
 	return scanProjects(rows)
 }
 
+// ListProjectsOwingCleanup implements store.ProjectStore.
+//
+// The JSONB containment test selects every Project whose obligation list has
+// an entry for nodeName, resolved or not; deciding which entries are tasks is
+// left to the caller, so the rule lives in one place (Project.CleanupTasksFor)
+// rather than being split between SQL and Go.
+func (s *Store) ListProjectsOwingCleanup(ctx context.Context, nodeName string) ([]*v1.Project, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
+		FROM resources
+		WHERE kind = $1 AND namespace = $2
+		  AND status->'recovery'->'cleanupObligations' @> jsonb_build_array(
+		        jsonb_build_object('assignment', jsonb_build_object('nodeName', $3::text)))`,
+		kindProject, defaultNamespace, nodeName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list projects owing cleanup on %q: %w", nodeName, err)
+	}
+	defer rows.Close()
+
+	return scanProjects(rows)
+}
+
 // UpdateProject implements store.ProjectStore.
 func (s *Store) UpdateProject(ctx context.Context, project *v1.Project) error {
 	project.ObjectMeta.UpdatedAt = time.Now().UTC()

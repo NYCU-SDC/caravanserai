@@ -330,6 +330,12 @@ type ProjectStore interface {
 	// ProjectReschedulerController to find work that needs to be moved or
 	// force-terminated when a node goes NotReady.
 	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*v1.Project, error)
+
+	// ListProjectsOwingCleanup returns every Project whose cleanup obligation
+	// list has an entry for nodeName, resolved or not, in any phase. Use
+	// Project.CleanupTasksFor to pick the entries that are tasks for that
+	// Node.
+	ListProjectsOwingCleanup(ctx context.Context, nodeName string) ([]*v1.Project, error)
 }
 
 // ============================================================

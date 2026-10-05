@@ -46,6 +46,7 @@ type Handler struct {
 
 type ProjectLister interface {
 	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*v1.Project, error)
+	ListProjectsOwingCleanup(ctx context.Context, nodeName string) ([]*v1.Project, error)
 }
 
 // overlayOfflineThreshold is the heartbeat age beyond which a Node is reported
@@ -108,6 +109,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("DELETE /api/v1/nodes/{name}", mid.HandlerFunc(h.deleteNode))
 	mux.HandleFunc("POST /api/v1/nodes/{name}/heartbeat", mid.HandlerFunc(h.heartbeat))
 	mux.HandleFunc("POST /api/v1/nodes/{name}/probe", mid.HandlerFunc(h.probe))
+	mux.HandleFunc("GET /api/v1/nodes/{name}/cleanup-obligations", mid.HandlerFunc(h.listCleanupObligations))
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
@@ -258,6 +260,37 @@ func (h *Handler) getNode(w http.ResponseWriter, r *http.Request) {
 	}
 	setOverlayStatus(node, time.Now())
 	handlerutil.WriteJSONResponse(w, http.StatusOK, node)
+}
+
+// listCleanupObligations returns the cleanup tasks the named Node's Agent owes:
+// unresolved obligations for assignments that Node gave up, across every
+// Project that still records one.
+//
+// The Node record is not consulted. The obligation list is what says a Node
+// may still hold resources, and it stays authoritative even for a Node whose
+// record is gone; refusing the listing then would leave the resources with no
+// one told to remove them.
+func (h *Handler) listCleanupObligations(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "listCleanupObligations")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
+	name := r.PathValue("name")
+	projects, err := h.projectStore.ListProjectsOwingCleanup(traceCtx, name)
+	if err != nil {
+		logger.Error("ListProjectsOwingCleanup failed", zap.String("node", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	list := v1.CleanupTaskList{
+		TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "CleanupTaskList"},
+		Items:    []v1.CleanupTask{},
+	}
+	for _, p := range projects {
+		list.Items = append(list.Items, p.CleanupTasksFor(name)...)
+	}
+	handlerutil.WriteJSONResponse(w, http.StatusOK, list)
 }
 
 func (h *Handler) deleteNode(w http.ResponseWriter, r *http.Request) {

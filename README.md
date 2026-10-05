@@ -274,6 +274,7 @@ All endpoints are under `/api/v1/`.
 | `DELETE` | `/api/v1/nodes/{name}` | Delete a node |
 | `POST` | `/api/v1/nodes/{name}/heartbeat` | Send a heartbeat |
 | `POST` | `/api/v1/nodes/{name}/probe` | Server-side reachability probe — server dials the agent's `/healthz` via the agent dialer (see `internal/server/agentdialer/`) and reports latency + status. When the server is joined to the overlay (see below) the dialer routes this over the agent's overlay IP via a tsnet-backed transport; otherwise it uses the default transport. Also surfaced as `caractl node probe <name>`. |
+| `GET` | `/api/v1/nodes/{name}/cleanup-obligations` | Unresolved cleanup obligations this node owes for assignments it gave up — the cleanup tasks its agent runs (excludes Projects the node is still assigned) |
 
 ### Projects
 

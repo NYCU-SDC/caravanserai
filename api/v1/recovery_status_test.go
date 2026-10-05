@@ -214,3 +214,47 @@ func TestWorkloadStoppedFor(t *testing.T) {
 	assert.False(t, none.WorkloadStoppedFor(current))
 	assert.False(t, (&ProjectRecoveryStatus{}).WorkloadStoppedFor(current))
 }
+
+// A Node is handed a task only for its own unresolved obligations, and none at
+// all while it holds the Project's current assignment.
+func TestCleanupTasksFor(t *testing.T) {
+	project := func() *Project {
+		return &Project{
+			ObjectMeta: ObjectMeta{Name: "web", UID: "uid-1"},
+			Status: ProjectStatus{
+				Phase: ProjectPhasePending,
+				Recovery: &ProjectRecoveryStatus{CleanupObligations: []CleanupObligation{
+					{Assignment: AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 1}, ReleaseAuthorization: ReleaseByWorkloadStopped},
+					{Assignment: AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-b", AssignmentGeneration: 2}, ReleaseAuthorization: ReleaseByWorkloadStopped},
+					{Assignment: AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 3}, ReleaseAuthorization: ReleaseByOperatorOverride},
+					{Assignment: AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 4}, ReleaseAuthorization: ReleaseByWorkloadStopped,
+						ResourcesRemoved: &ResourcesRemovedEvidence{}},
+					{Assignment: AssignmentIdentity{ProjectUID: "uid-0", NodeName: "node-a", AssignmentGeneration: 5}, ReleaseAuthorization: ReleaseByWorkloadStopped},
+				}},
+			},
+		}
+	}
+
+	t.Run("unresolved obligations of this node and lifetime only", func(t *testing.T) {
+		tasks := project().CleanupTasksFor("node-a")
+		require.Len(t, tasks, 2)
+		for i, gen := range []int64{1, 3} {
+			assert.Equal(t, DefaultNamespace, tasks[i].Namespace)
+			assert.Equal(t, "web", tasks[i].ProjectName)
+			assert.Equal(t, AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: gen}, tasks[i].Assignment)
+		}
+		assert.Equal(t, ReleaseByOperatorOverride, tasks[1].ReleaseAuthorization)
+	})
+
+	t.Run("none while the node holds the current assignment", func(t *testing.T) {
+		p := project()
+		p.Status.Phase = ProjectPhaseTerminating
+		p.Status.NodeRef = "node-a"
+		assert.Empty(t, p.CleanupTasksFor("node-a"))
+		assert.Len(t, p.CleanupTasksFor("node-b"), 1, "another node's tasks are unaffected")
+	})
+
+	t.Run("none without recovery status", func(t *testing.T) {
+		assert.Empty(t, (&Project{ObjectMeta: ObjectMeta{Name: "web", UID: "uid-1"}}).CleanupTasksFor("node-a"))
+	})
+}

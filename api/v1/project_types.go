@@ -631,3 +631,55 @@ type ProjectList struct {
 	TypeMeta `json:",inline"  yaml:",inline"`
 	Items    []Project `json:"items" yaml:"items"`
 }
+
+// CleanupTask is one unresolved cleanup obligation, addressed to the Agent of
+// the Node that owes it. It authorizes that Agent to stop and remove the
+// runtime resources of exactly Assignment and to report ResourcesRemoved for
+// it; it grants no status-write or workload-start authority.
+type CleanupTask struct {
+	Namespace            string                   `json:"namespace" yaml:"namespace"`
+	ProjectName          string                   `json:"projectName" yaml:"projectName"`
+	Assignment           AssignmentIdentity       `json:"assignment" yaml:"assignment"`
+	ReleaseAuthorization ReleaseAuthorizationKind `json:"releaseAuthorization" yaml:"releaseAuthorization"`
+}
+
+// CleanupTaskList is the response of the Node cleanup-obligation listing.
+type CleanupTaskList struct {
+	TypeMeta `json:",inline" yaml:",inline"`
+	Items    []CleanupTask `json:"items" yaml:"items"`
+}
+
+// CleanupTasksFor returns p's unresolved cleanup obligations owed by node, as
+// tasks for that Node's Agent.
+//
+// None is returned while node holds p's current assignment. That Node's Agent
+// is acting on the Project under its assignment — tearing it down if it is
+// Terminating — and a cleanup task running beside it could remove what the
+// assignment is still using. The Deletion obligation of a Terminating Project
+// is resolved by the teardown itself, not by a task.
+//
+// An obligation for another lifetime cannot be in p's list (the UID check
+// guards every write to it), but the UID is compared anyway: a task is only
+// ever about the lifetime it names.
+func (p *Project) CleanupTasksFor(node string) []CleanupTask {
+	if p.Status.Recovery == nil || p.Status.NodeRef == node {
+		return nil
+	}
+	namespace := p.Namespace
+	if namespace == "" {
+		namespace = DefaultNamespace
+	}
+	var tasks []CleanupTask
+	for _, o := range p.Status.Recovery.CleanupObligations {
+		if o.Resolved() || o.Assignment.NodeName != node || o.Assignment.ProjectUID != p.ObjectMeta.UID {
+			continue
+		}
+		tasks = append(tasks, CleanupTask{
+			Namespace:            namespace,
+			ProjectName:          p.Name,
+			Assignment:           o.Assignment,
+			ReleaseAuthorization: o.ReleaseAuthorization,
+		})
+	}
+	return tasks
+}
