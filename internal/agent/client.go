@@ -317,6 +317,81 @@ func (c *Client) GetProject(ctx context.Context, name string) (*v1.Project, erro
 	return &project, nil
 }
 
+// ListCleanupTasks returns the cleanup obligations this node owes for
+// assignments it has given up. The list is candidates only: each must be
+// revalidated under the Project's claim before anything is removed.
+func (c *Client) ListCleanupTasks(ctx context.Context) ([]v1.CleanupTask, error) {
+	url := fmt.Sprintf("%s/api/v1/nodes/%s/cleanup-obligations", c.serverURL, c.nodeName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build list cleanup obligations request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list cleanup obligations request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list cleanup obligations: unexpected status %s", resp.Status)
+	}
+
+	var list v1.CleanupTaskList
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, fmt.Errorf("decode cleanup obligations: %w", err)
+	}
+	return list.Items, nil
+}
+
+// evidenceRequest is the body of the recovery evidence endpoints: the
+// assignment the evidence is about.
+type evidenceRequest struct {
+	UID                  string `json:"uid"`
+	NodeRef              string `json:"nodeRef"`
+	AssignmentGeneration *int64 `json:"assignmentGeneration"`
+}
+
+// ReportResourcesRemoved resolves the cleanup obligation for assignment, after
+// every deletion-scoped resource this node held for it is confirmed gone. A
+// 409 comes back as ErrStaleAssignment and a 404 as ErrProjectNotFound.
+//
+// The server sends 409 both when no such unresolved obligation exists for this
+// node and lifetime and when its compare-and-swap lost every retry. A caller
+// that must not drop the report reads the Project again to tell them apart
+// (obligationStands).
+func (c *Client) ReportResourcesRemoved(ctx context.Context, projectName string, assignment v1.AssignmentIdentity) error {
+	gen := assignment.AssignmentGeneration
+	body, err := json.Marshal(evidenceRequest{UID: assignment.ProjectUID, NodeRef: assignment.NodeName, AssignmentGeneration: &gen})
+	if err != nil {
+		return fmt.Errorf("marshal resources-removed request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/projects/%s/recovery/resources-removed", c.serverURL, projectName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build resources-removed request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("resources-removed request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("report resources removed: unexpected status %s", resp.Status)
+	}
+}
+
 // conditionPatchRequest is the body sent to
 // PATCH /api/v1/projects/{name}/conditions/{type}. The uid/nodeRef/generation
 // triple is the assignment fence the server validates atomically.

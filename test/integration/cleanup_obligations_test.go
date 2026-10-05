@@ -9,10 +9,12 @@ import (
 	"testing"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/agent"
 	"NYCU-SDC/caravanserai/internal/server/adapter"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 func listCleanupTasks(t *testing.T, node string) []v1.CleanupTask {
@@ -86,4 +88,36 @@ func TestCleanupObligationListingSkipsCurrentAssignment(t *testing.T) {
 // not the Node record.
 func TestCleanupObligationListingUnknownNode(t *testing.T) {
 	assert.Empty(t, listCleanupTasks(t, "e2e-no-such-node"))
+}
+
+// The Agent's own client against the real server: the listing it decodes and
+// the evidence it sends are the wire format the server serves and accepts.
+func TestAgentClientResolvesCleanupObligation(t *testing.T) {
+	const name = "e2e-cleanup-agent-client"
+	ctx := context.Background()
+	uid, gen := createAssigned(t, name, "node-a", v1.ProjectPhaseRunning)
+	require.Equal(t, http.StatusNoContent,
+		putEvidence(t, name, "workload-stopped", evidenceBody(uid, "node-a", gen)))
+	released, err := adapter.NewProjectStoreAdapter(suite.store).ReleaseAssignment(ctx, snapshotOf(getProject(t, name)))
+	require.NoError(t, err)
+	require.True(t, released)
+
+	client := agent.NewClient(zap.NewNop(), suite.serverURL, "node-a")
+	tasks, err := client.ListCleanupTasks(ctx)
+	require.NoError(t, err)
+	tasks = tasksFor(tasks, name)
+	require.Len(t, tasks, 1)
+
+	require.NoError(t, client.ReportResourcesRemoved(ctx, name, tasks[0].Assignment))
+	o := getProject(t, name).Status.Recovery.FindObligation(tasks[0].Assignment)
+	require.NotNil(t, o)
+	assert.True(t, o.Resolved())
+
+	// Another node reporting the same assignment is refused, and a project
+	// that does not exist is reported as such.
+	other := agent.NewClient(zap.NewNop(), suite.serverURL, "node-b")
+	stale := tasks[0].Assignment
+	stale.NodeName = "node-b"
+	assert.ErrorIs(t, other.ReportResourcesRemoved(ctx, name, stale), agent.ErrStaleAssignment)
+	assert.ErrorIs(t, client.ReportResourcesRemoved(ctx, "e2e-no-such-project", tasks[0].Assignment), agent.ErrProjectNotFound)
 }

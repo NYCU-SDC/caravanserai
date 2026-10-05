@@ -123,7 +123,7 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 
 	// 2. Ensure all volumes exist: Ephemeral as Docker named volumes, Managed
 	//    as agent-owned host bind directories.
-	if err := r.ensureVolumes(ctx, project.Namespace, project.Name, project.Spec.Volumes); err != nil {
+	if err := r.ensureVolumes(ctx, ProjectIdentity{Namespace: project.Namespace, Name: project.Name, UID: project.ObjectMeta.UID}, project.Spec.Volumes); err != nil {
 		r.rollback(ctx, project, log)
 		return fmt.Errorf("ensure volumes: %w", err)
 	}
@@ -341,8 +341,15 @@ func (r *DockerRuntime) removeProjectResources(ctx context.Context, namespace, p
 		}
 	}
 
-	// Remove the bridge network.
-	if err := r.removeOwnedNetwork(ctx, identity); err != nil {
+	// Remove the bridge network. A rollback removes only one carrying its own
+	// UID: the network may be a predecessor lifetime's, the very reason the
+	// reconcile being rolled back failed, and it is that lifetime's cleanup to
+	// remove it.
+	if owner != nil {
+		if err := r.removeNetworkOfLifetime(ctx, identity, owner.UID, log); err != nil {
+			errs = append(errs, err)
+		}
+	} else if err := r.removeOwnedNetwork(ctx, identity); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -356,6 +363,17 @@ func (r *DockerRuntime) removeProjectResources(ctx context.Context, namespace, p
 		log.Warn("Failed to derive managed volume host path; its data may be orphaned on disk", zap.Error(pathErr))
 	}
 	for _, vName := range plan.removeNamedVolumes {
+		if owner != nil {
+			mine, err := r.volumeOfLifetime(ctx, vName, owner.UID)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if !mine {
+				log.Info("Leaving volume that belongs to another lifetime", zap.String("volume", vName))
+				continue
+			}
+		}
 		if err := r.client.VolumeRemove(ctx, vName, false); err != nil {
 			if !isNotFound(err) {
 				errs = append(errs, fmt.Errorf("remove named volume %s: %w", vName, err))
@@ -512,6 +530,39 @@ func (r *DockerRuntime) RemoveOrphanProject(ctx context.Context, project Project
 	return nil
 }
 
+// removeNetworkOfLifetime removes the Project's network only if it carries uid.
+// An absent network, or one of another lifetime, is left alone without error.
+func (r *DockerRuntime) removeNetworkOfLifetime(ctx context.Context, identity ProjectIdentity, uid string, log *zap.Logger) error {
+	netName := NetworkName(identity.Name)
+	net, err := r.client.NetworkInspect(ctx, netName, network.InspectOptions{})
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect network %q: %w", netName, err)
+	}
+	if net.Labels[labelProject] != identity.Name || net.Labels[labelUID] != uid {
+		log.Info("Leaving network that belongs to another lifetime", zap.String("network", netName))
+		return nil
+	}
+	if err := r.client.NetworkRemove(ctx, net.ID); err != nil && !isNotFound(err) {
+		return fmt.Errorf("remove network %q: %w", netName, err)
+	}
+	return nil
+}
+
+// volumeOfLifetime reports whether the named volume exists and carries uid.
+func (r *DockerRuntime) volumeOfLifetime(ctx context.Context, name, uid string) (bool, error) {
+	vol, err := r.client.VolumeInspect(ctx, name)
+	if err != nil {
+		if isNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect volume %q: %w", name, err)
+	}
+	return vol.Labels[labelUID] == uid, nil
+}
+
 // removeOwnedNetwork inspects the deterministic network name before removal.
 // A same-named foreign network is never removed.
 func (r *DockerRuntime) removeOwnedNetwork(ctx context.Context, project ProjectIdentity) error {
@@ -533,21 +584,28 @@ func (r *DockerRuntime) removeOwnedNetwork(ctx context.Context, project ProjectI
 }
 
 func (r *DockerRuntime) validateNetworkOwnership(netName string, labels map[string]string, project ProjectIdentity) error {
+	return r.validateOwnership("network", netName, labels, project)
+}
+
+// validateOwnership is the rule a pre-existing, deterministically named
+// resource must pass before a Project adopts it: kind and name only label the
+// error.
+func (r *DockerRuntime) validateOwnership(kind, name string, labels map[string]string, project ProjectIdentity) error {
 	if labels[labelProject] != project.Name {
-		return fmt.Errorf("network %q: Cara project ownership label does not match", netName)
+		return fmt.Errorf("%s %q: Cara project ownership label does not match", kind, name)
 	}
-	// Legacy Cara networks predate the namespace label. Accept an absent
+	// Legacy Cara resources predate the namespace label. Accept an absent
 	// namespace, but reject a conflicting one.
 	if namespace := labels[labelNamespace]; namespace != "" && namespace != project.Namespace {
-		return fmt.Errorf("network %q: namespace ownership label does not match", netName)
+		return fmt.Errorf("%s %q: namespace ownership label does not match", kind, name)
 	}
-	// UID fencing (CARA-82): when enforcing, an existing network must carry the
-	// current Project's UID. A different value is a previous lifetime; an empty
-	// value is a pre-UID (legacy) network. Neither may be adopted. When not
-	// enforcing, UID is ignored so mixed-rollout networks keep working.
+	// UID fencing (CARA-82): when enforcing, an existing resource must carry
+	// the current Project's UID. A different value is a previous lifetime; an
+	// empty value is a pre-UID (legacy) resource. Neither may be adopted. When
+	// not enforcing, UID is ignored so mixed-rollout resources keep working.
 	if r.enforceUID && project.UID != "" && labels[labelUID] != project.UID {
-		return fmt.Errorf("network %q: UID ownership label %q does not match current Project UID %q",
-			netName, labels[labelUID], project.UID)
+		return fmt.Errorf("%s %q: UID ownership label %q does not match current Project UID %q",
+			kind, name, labels[labelUID], project.UID)
 	}
 	return nil
 }
@@ -700,15 +758,15 @@ func (r *DockerRuntime) ensureNetwork(ctx context.Context, namespace, projectNam
 // volume whose directory cannot be created or is not writable is a hard error
 // so the caller can fail the project rather than start containers against a
 // missing mount.
-func (r *DockerRuntime) ensureVolumes(ctx context.Context, namespace, projectName string, vols []v1.VolumeDef) error {
+func (r *DockerRuntime) ensureVolumes(ctx context.Context, identity ProjectIdentity, vols []v1.VolumeDef) error {
 	for _, vol := range vols {
 		switch vol.Type {
 		case v1.VolumeTypeManaged:
-			if err := r.ensureManagedDir(namespace, projectName, vol.Name); err != nil {
+			if err := r.ensureManagedDir(identity.Namespace, identity.Name, vol.Name); err != nil {
 				return err
 			}
 		case v1.VolumeTypeEphemeral:
-			if err := r.ensureEphemeralVolume(ctx, namespace, projectName, vol.Name); err != nil {
+			if err := r.ensureEphemeralVolume(ctx, identity, vol.Name); err != nil {
 				return err
 			}
 		default:
@@ -749,10 +807,20 @@ func (r *DockerRuntime) ensureManagedDir(namespace, projectName, volumeName stri
 
 // ensureEphemeralVolume creates the Docker named volume for an Ephemeral volume
 // if it does not already exist.
-func (r *DockerRuntime) ensureEphemeralVolume(ctx context.Context, namespace, projectName, volumeName string) error {
+//
+// The volume's name is derived from the Project and volume names alone, so a
+// same-name Project recreated under a new UID finds its predecessor's volume
+// under the name it would create. Adopting it would hand the new lifetime the
+// old one's data; the same ownership rule as the network refuses it instead,
+// and the volume is left for the cleanup of the lifetime it belongs to.
+func (r *DockerRuntime) ensureEphemeralVolume(ctx context.Context, identity ProjectIdentity, volumeName string) error {
+	namespace, projectName := identity.Namespace, identity.Name
 	vName := VolumeName(projectName, volumeName)
-	_, err := r.client.VolumeInspect(ctx, vName)
+	existing, err := r.client.VolumeInspect(ctx, vName)
 	if err == nil {
+		if err := r.validateOwnership("volume", vName, existing.Labels, identity); err != nil {
+			return fmt.Errorf("existing volume ownership: %w", err)
+		}
 		r.logger.Debug("Volume already exists", zap.String("volume", vName))
 		return nil
 	}
@@ -765,6 +833,7 @@ func (r *DockerRuntime) ensureEphemeralVolume(ctx context.Context, namespace, pr
 		Labels: map[string]string{
 			labelProject:    projectName,
 			labelNamespace:  namespace,
+			labelUID:        identity.UID,
 			labelVolume:     volumeName,
 			labelVolumeType: string(v1.VolumeTypeEphemeral),
 		},
