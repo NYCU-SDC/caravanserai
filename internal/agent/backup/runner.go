@@ -19,7 +19,7 @@ import (
 
 // ContainerController stops and starts a Project's containers without
 // destroying them. Backup needs the volumes quiesced but the containers
-// intact, which neither ReconcileProject nor RemoveProject provides.
+// intact, which neither reconciling nor tearing a Project down provides.
 type ContainerController interface {
 	StopProject(ctx context.Context, project *v1.Project) error
 	StartProject(ctx context.Context, project *v1.Project) error

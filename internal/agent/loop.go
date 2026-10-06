@@ -702,11 +702,20 @@ func resolveSecretsFor(ctx context.Context, client *Client, p *v1.Project, inclu
 	return resolved, nil
 }
 
-// terminateOne tears down all Docker resources for a Terminating project and
-// reports Terminated back to the server.  The ProjectTerminationController on
-// the server will then perform the final store deletion.
+// terminateOne tears down a Terminating Project's resources on this node and,
+// once nothing is left, resolves the node's cleanup obligations for it and
+// reports Terminated. The ProjectTerminationController on the server then
+// performs the final store deletion.
 //
-// Proxy routes are removed after successful teardown.
+// The teardown is bounded by the Project's UID. Every generation of this
+// lifetime goes — whichever assignment left a container here, it is deleted
+// with the Project — but a same-name Project of another lifetime is not this
+// deletion's to touch; it is found by its own cleanup or by the orphan sweep.
+//
+// Any step that does not finish leaves the Project Terminating, and the next
+// poll repeats the whole teardown, which is idempotent. Reporting Failed
+// instead would end the retries: Failed is terminal for the poll loop.
+// Managed volume data is retained, as on every deletion.
 func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, busy busyChecker, cleaner *assignmentCleaner, p *v1.Project, logger *zap.Logger) {
 	log := logger.With(zap.String("project", p.Name))
 
@@ -727,24 +736,38 @@ func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 		defer release()
 	}
 
-	log.Info("Removing Docker resources for Terminating project")
-
-	if err := runtime.RemoveProject(ctx, p.Namespace, p.Name, p.Spec); err != nil {
-		log.Error("Failed to remove project resources", zap.Error(err))
-		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p),
-			v1.ProjectPhaseFailed,
-			"RemoveError",
-			err.Error(),
-		)
+	if cleaner == nil {
+		log.Error("No cleaner configured; cannot tear the project down by its ownership, leaving it Terminating")
 		return
 	}
 
-	if routes != nil {
-		routes.Remove(p.Name)
-		log.Info("Removed proxy routes for project")
+	lifetime := docker.Assignment{Namespace: p.Namespace, Project: p.Name, UID: p.ObjectMeta.UID, AllGenerations: true}
+	if lifetime.Namespace == "" {
+		lifetime.Namespace = v1.DefaultNamespace
+	}
+	log.Info("Removing resources for Terminating project", zap.String("scope", lifetime.String()))
+
+	if err := cleaner.removeAll(ctx, lifetime); err != nil {
+		log.Warn("Teardown incomplete, will retry next poll", zap.Error(err))
+		return
+	}
+	left, err := cleaner.remaining(ctx, lifetime)
+	if err != nil {
+		log.Warn("Could not confirm teardown, will retry next poll", zap.Error(err))
+		return
+	}
+	if len(left) > 0 {
+		log.Warn("Resources still present after teardown, will retry next poll",
+			zap.String("remaining", strings.Join(left, ", ")))
+		return
+	}
+	for _, vol := range p.Spec.Volumes {
+		if vol.Type == v1.VolumeTypeManaged {
+			log.Info("Retaining Managed volume data on host", zap.String("volume", vol.Name))
+		}
 	}
 
-	if !resolveDeletionObligation(ctx, client, cleaner, p, log) {
+	if !resolveOwnObligations(ctx, client, p, log) {
 		return
 	}
 
@@ -1487,56 +1510,64 @@ func updateProxyRoutes(ctx context.Context, runtime docker.Runtime, routes Route
 	log.Info("Updated proxy routes for project")
 }
 
-// resolveDeletionObligation reports ResourcesRemoved for the assignment being
-// torn down, once every registered resource kind is confirmed gone, and
-// reports whether termination may go on to report Terminated.
+// resolveOwnObligations reports ResourcesRemoved for every unresolved
+// obligation this node holds for the Project's lifetime — the Deletion
+// obligation of the assignment being torn down, and any earlier one of this
+// node's that is still open — and reports whether termination may go on to
+// report Terminated. The caller has already confirmed that nothing of the
+// lifetime is left here, which is the evidence each of them needs.
 //
-// It comes before Terminated: final deletion of the record waits for every
-// obligation to be resolved, so reporting Terminated first would leave a
-// Terminated Project that can never be finalized if this report then failed.
-// A failure here keeps the Project Terminating and the next poll repeats the
-// whole teardown, which is idempotent.
+// The earlier ones matter because a node that holds a Project's current
+// assignment is never handed a cleanup task for it, so no one else would
+// resolve them before the Project is finalized.
 //
-// A 409 is ambiguous: the server returns it when it holds no Deletion
-// obligation for this assignment — which no retry fixes, and the Terminated
-// report that follows is fenced on its own — and also when its
-// compare-and-swap lost every retry, with the obligation still unresolved. The
-// Project is read again to tell them apart; termination goes on only when the
-// obligation is confirmed not to stand.
-func resolveDeletionObligation(ctx context.Context, client *Client, cleaner *assignmentCleaner, p *v1.Project, log *zap.Logger) bool {
-	if cleaner == nil {
-		log.Warn("No cleaner configured; terminating without reporting ResourcesRemoved")
-		return true
-	}
+// The reports come before Terminated: final deletion of the record waits for
+// every obligation to be resolved, so reporting Terminated first would leave a
+// Terminated Project that can never be finalized if a report then failed. A
+// failure keeps the Project Terminating and the next poll repeats the
+// teardown.
+func resolveOwnObligations(ctx context.Context, client *Client, p *v1.Project, log *zap.Logger) bool {
 	fence := fenceForProject(p)
-	identity := v1.AssignmentIdentity{ProjectUID: fence.UID, NodeName: fence.NodeRef, AssignmentGeneration: fence.Generation}
-	a := assignmentOf(p.Namespace, p.Name, identity)
-
-	if err := cleaner.removeAll(ctx, a); err != nil {
-		log.Warn("Teardown incomplete, will retry next poll", zap.Error(err))
-		return false
+	owed := []v1.AssignmentIdentity{{ProjectUID: fence.UID, NodeName: fence.NodeRef, AssignmentGeneration: fence.Generation}}
+	if p.Status.Recovery != nil {
+		for _, o := range p.Status.Recovery.CleanupObligations {
+			if o.Resolved() || o.Assignment == owed[0] {
+				continue
+			}
+			if o.Assignment.NodeName == fence.NodeRef && o.Assignment.ProjectUID == fence.UID {
+				owed = append(owed, o.Assignment)
+			}
+		}
 	}
-	left, err := cleaner.remaining(ctx, a)
-	if err != nil {
-		log.Warn("Could not confirm teardown, will retry next poll", zap.Error(err))
-		return false
-	}
-	if len(left) > 0 {
-		log.Warn("Resources still present after teardown, will retry next poll",
-			zap.String("remaining", strings.Join(left, ", ")))
-		return false
-	}
-
-	switch err := client.ReportResourcesRemoved(ctx, p.Name, identity); {
-	case err == nil:
-		log.Info("Deletion obligation resolved")
-		return true
-	case errors.Is(err, ErrStaleAssignment):
-		if obligationStands(ctx, client, p.Name, identity) {
-			log.Warn("ResourcesRemoved conflicted and the deletion obligation still stands, will retry next poll", zap.Error(err))
+	for _, identity := range owed {
+		if !reportRemoved(ctx, client, p.Name, identity, log) {
 			return false
 		}
-		log.Info("No deletion obligation to resolve for this assignment", zap.Error(err))
+	}
+	return true
+}
+
+// reportRemoved reports ResourcesRemoved for one obligation and reports
+// whether termination may proceed past it.
+//
+// A 409 is ambiguous: the server returns it when it holds no such unresolved
+// obligation — which no retry fixes, and the Terminated report that follows
+// is fenced on its own — and also when its compare-and-swap lost every retry,
+// with the obligation still unresolved. The Project is read again to tell
+// them apart; termination goes on only when the obligation is confirmed not
+// to stand.
+func reportRemoved(ctx context.Context, client *Client, project string, identity v1.AssignmentIdentity, log *zap.Logger) bool {
+	log = log.With(zap.Int64("assignmentGeneration", identity.AssignmentGeneration))
+	switch err := client.ReportResourcesRemoved(ctx, project, identity); {
+	case err == nil:
+		log.Info("Cleanup obligation resolved")
+		return true
+	case errors.Is(err, ErrStaleAssignment):
+		if obligationStands(ctx, client, project, identity) {
+			log.Warn("ResourcesRemoved conflicted and the obligation still stands, will retry next poll", zap.Error(err))
+			return false
+		}
+		log.Info("No obligation to resolve for this assignment", zap.Error(err))
 		return true
 	case errors.Is(err, ErrProjectNotFound):
 		log.Info("Project already gone")

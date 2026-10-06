@@ -221,9 +221,18 @@ func TestCleanupTaskReportsOnlyWhenNothingRemains(t *testing.T) {
 // GET returns for the Project; nil answers 500.
 func terminationServer(t *testing.T, resourcesRemovedStatus int, current *v1.Project) (*Client, *[]string) {
 	t.Helper()
+	client, writes, _ := terminationServerWithEvidence(t, resourcesRemovedStatus, current)
+	return client, writes
+}
+
+// terminationServerWithEvidence is terminationServer that also returns the
+// generations each ResourcesRemoved report was for, in order.
+func terminationServerWithEvidence(t *testing.T, resourcesRemovedStatus int, current *v1.Project) (*Client, *[]string, *[]int64) {
+	t.Helper()
 	var (
-		mu     sync.Mutex
-		writes []string
+		mu          sync.Mutex
+		writes      []string
+		generations []int64
 	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/resources-removed", func(w http.ResponseWriter, r *http.Request) {
@@ -231,6 +240,9 @@ func terminationServer(t *testing.T, resourcesRemovedStatus int, current *v1.Pro
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 		mu.Lock()
 		writes = append(writes, "ResourcesRemoved")
+		if req.AssignmentGeneration != nil {
+			generations = append(generations, *req.AssignmentGeneration)
+		}
 		mu.Unlock()
 		w.WriteHeader(resourcesRemovedStatus)
 	})
@@ -252,11 +264,11 @@ func terminationServer(t *testing.T, resourcesRemovedStatus int, current *v1.Pro
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
-	return NewClient(zap.NewNop(), server.URL, "test-node"), &writes
+	return NewClient(zap.NewNop(), server.URL, "test-node"), &writes, &generations
 }
 
 func teardownRuntime() *mockRuntime {
-	return &mockRuntime{removeFn: func(context.Context, string, string, v1.ProjectSpec) error { return nil }}
+	return &mockRuntime{}
 }
 
 // The Deletion obligation is resolved before Terminated is reported, so a
@@ -341,4 +353,48 @@ func TestTerminateRetriesWhenTheConflictLeavesTheObligation(t *testing.T) {
 			assert.Equal(t, []string{"ResourcesRemoved"}, *writes, "Terminated reported with the deletion obligation unresolved")
 		})
 	}
+}
+
+// A teardown that fails leaves the Project Terminating for the next poll to
+// retry. Reporting Failed would end the retries: Failed is terminal for the
+// poll loop.
+func TestTerminateKeepsTerminatingWhenTeardownFails(t *testing.T) {
+	client, writes := terminationServer(t, http.StatusNoContent, nil)
+	res := &fakeResource{removeErr: errors.New("daemon busy")}
+
+	terminateOne(context.Background(), client, teardownRuntime(), nil, nil, newAssignmentCleaner(res), owedTermination(false), zap.NewNop())
+
+	assert.Empty(t, *writes, "a failed teardown reported something; it must stay Terminating")
+}
+
+// The teardown covers the whole lifetime: every generation of this UID, and
+// nothing of any other.
+func TestTerminateTearsDownTheWholeLifetime(t *testing.T) {
+	client, _ := terminationServer(t, http.StatusNoContent, nil)
+	res := &fakeResource{}
+
+	terminateOne(context.Background(), client, teardownRuntime(), nil, nil, newAssignmentCleaner(res), owedTermination(false), zap.NewNop())
+
+	require.Len(t, res.removed, 1)
+	assert.Equal(t, docker.Assignment{Namespace: "default", Project: "blog", UID: "uid-1", AllGenerations: true}, res.removed[0])
+}
+
+// A node holding a Project's current assignment is never handed a cleanup task
+// for it, so an earlier obligation of the same node and lifetime would never
+// be resolved by anyone else. With the whole lifetime confirmed gone, the
+// teardown resolves it too — and leaves other nodes' and lifetimes' alone.
+func TestTerminateResolvesEarlierObligationsOfThisNode(t *testing.T) {
+	client, writes, generations := terminationServerWithEvidence(t, http.StatusNoContent, nil)
+	p := owedTermination(false)
+	p.Status.Recovery.CleanupObligations = append(p.Status.Recovery.CleanupObligations,
+		v1.CleanupObligation{Assignment: v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "test-node", AssignmentGeneration: 1}},
+		v1.CleanupObligation{Assignment: v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "other-node", AssignmentGeneration: 1}},
+		v1.CleanupObligation{Assignment: v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "test-node", AssignmentGeneration: 0},
+			ResourcesRemoved: &v1.ResourcesRemovedEvidence{}},
+	)
+
+	terminateOne(context.Background(), client, teardownRuntime(), nil, nil, newAssignmentCleaner(&fakeResource{}), p, zap.NewNop())
+
+	assert.Equal(t, []int64{2, 1}, *generations, "the current assignment first, then this node's open earlier one only")
+	assert.Equal(t, string(v1.ProjectPhaseTerminated), (*writes)[len(*writes)-1])
 }

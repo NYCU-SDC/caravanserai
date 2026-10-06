@@ -497,6 +497,9 @@ func TestPreflightRecoveryMutatesNothing(t *testing.T) {
 	f := newRecoverFixture(t, v1.VolumeTypeEphemeral)
 	f.container("db", "exited")
 	f.docker.volumes[VolumeName("blog", "db-data")] = true
+	f.docker.volumeLabels[VolumeName("blog", "db-data")] = map[string]string{
+		labelProject: "blog", labelNamespace: "default", labelUID: f.project.UID,
+	}
 
 	require.NoError(t, f.runtime.PreflightRecovery(t.Context(), f.project, []string{"db"}))
 	assert.Empty(t, f.docker.mutations)
@@ -787,4 +790,23 @@ func TestEnsureContainerUsesTheSharedOwnershipRule(t *testing.T) {
 		require.ErrorIs(t, ensure(f), ErrContainerNotOwned)
 		assert.Empty(t, f.docker.mutations)
 	})
+}
+
+// An Ephemeral volume under the right name but of a same-name predecessor
+// lifetime is not this Project's data. Recovery must not recreate a container
+// against it; it is reported unavailable, as a missing one is, and nothing is
+// touched.
+func TestRecoverServicesRefusesAPredecessorsEphemeralVolume(t *testing.T) {
+	f := newRecoverFixture(t, v1.VolumeTypeEphemeral)
+	f.runtime.enforceUID = true
+	f.docker.volumes[VolumeName("blog", "db-data")] = true
+	f.docker.volumeLabels[VolumeName("blog", "db-data")] = map[string]string{
+		labelProject: "blog", labelNamespace: "default", labelUID: "uid-previous-lifetime",
+	}
+
+	err := f.runtime.RecoverServices(t.Context(), f.project, []string{"db"})
+
+	require.ErrorIs(t, err, ErrRecoveryVolumeUnavailable)
+	assert.ErrorContains(t, err, "another Project lifetime")
+	assert.Empty(t, f.docker.mutations)
 }

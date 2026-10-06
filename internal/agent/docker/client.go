@@ -26,7 +26,7 @@ import (
 
 const (
 	// labelProject is attached to every container/network/volume created by
-	// the agent so that RemoveProject can find them reliably.
+	// the agent so that deletion and cleanup can find them reliably.
 	labelProject = "cara.project"
 	// labelService tags each container with its ServiceDef name.
 	labelService = "cara.service"
@@ -159,11 +159,11 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 // rollback removes the Docker resources a failed ReconcileProject may have
 // partially created. It tolerates missing resources.
 //
-// It is not RemoveProject. RemoveProject selects every container labelled for
-// the Project, whichever lifetime or grant created it — right for deleting a
-// Project, whose earlier generations' leftovers should go with it. A rollback
-// is narrower: it undoes this assignment's attempt, so it removes only
-// containers that belong to this assignment. A container left by an earlier
+// It is not the deletion teardown. Deleting a Project removes every generation
+// of its lifetime (RemoveAssignment with AllGenerations) — its earlier
+// generations' leftovers go with it. A rollback is narrower: it undoes this
+// assignment's attempt, so it removes only containers that belong to this
+// assignment, and only a network and volumes that carry its UID. A container left by an earlier
 // grant under a service name the spec no longer has is invisible to the
 // ownership check in step 0, and must survive a rollback it had no part in.
 func (r *DockerRuntime) rollback(ctx context.Context, project *v1.Project, log *zap.Logger) {
@@ -252,7 +252,7 @@ func (r *DockerRuntime) checkExistingOwnership(ctx context.Context, project *v1.
 	return nil
 }
 
-// volumeRemovalPlan describes what RemoveProject does with a project's volumes:
+// volumeRemovalPlan describes what a rollback does with a project's volumes:
 // which Docker named volumes to delete, and which Managed host directories are
 // kept (their paths logged for the operator).
 type volumeRemovalPlan struct {
@@ -295,15 +295,10 @@ func planVolumeRemoval(dataRoot, namespace, projectName string, vols []v1.Volume
 	return plan
 }
 
-// RemoveProject implements Runtime.
-func (r *DockerRuntime) RemoveProject(ctx context.Context, namespace, projectName string, spec v1.ProjectSpec) error {
-	return r.removeProjectResources(ctx, namespace, projectName, spec, nil)
-}
-
-// removeProjectResources is RemoveProject, optionally restricted to the
-// containers owner owns. A nil owner removes every container labelled for the
-// Project, which is what deleting it requires; rollback passes the current
-// assignment so it cannot remove a container another grant left behind.
+// removeProjectResources undoes a failed ReconcileProject for owner: the
+// containers, network and Ephemeral volumes that belong to that assignment.
+// Deleting a Project goes through RemoveAssignment over its whole lifetime
+// instead.
 func (r *DockerRuntime) removeProjectResources(ctx context.Context, namespace, projectName string, spec v1.ProjectSpec, owner *containerOwner) error {
 	log := r.logger.With(zap.String("project", projectName))
 	var errs []error
@@ -1113,10 +1108,10 @@ func isNotFound(err error) bool {
 // RecoverServices implements Runtime.
 //
 // The contract that matters is what it does NOT do: no rollback, ever. See the
-// interface comment — ReconcileProject's rollback calls RemoveProject, which
-// on a Project that is still serving traffic would delete the healthy
-// containers and their Ephemeral volumes because one other container could not
-// be recreated.
+// interface comment — ReconcileProject's rollback removes the assignment's
+// containers, network and Ephemeral volumes, which on a Project that is still
+// serving traffic would delete the healthy containers and their data because
+// one other container could not be recreated.
 // recoveryTargets picks the named services out of the spec, in spec order.
 //
 // Spec order, not the caller's order: a service is started after whatever it
@@ -1290,12 +1285,22 @@ func (r *DockerRuntime) preflightVolumes(ctx context.Context, project *v1.Projec
 
 		case v1.VolumeTypeEphemeral:
 			vName := VolumeName(project.Name, vm.Name)
-			if _, err := r.client.VolumeInspect(ctx, vName); err != nil {
+			existing, err := r.client.VolumeInspect(ctx, vName)
+			if err != nil {
 				if isNotFound(err) {
 					return &VolumeUnavailableError{Service: svc.Name, Volume: vm.Name, Type: vol.Type,
 						Detail: fmt.Sprintf("docker volume %s no longer exists, recovery will not create it empty", vName)}
 				}
 				return fmt.Errorf("inspect ephemeral volume %s: %w", vName, err)
+			}
+			// The name is derived from the Project and volume names alone, so
+			// the volume found may be a same-name predecessor's. Recreating a
+			// container against it would hand this lifetime that one's data —
+			// the same rule ensureEphemeralVolume applies before adopting it.
+			identity := ProjectIdentity{Namespace: project.Namespace, Name: project.Name, UID: project.ObjectMeta.UID}
+			if oErr := r.validateOwnership("volume", vName, existing.Labels, identity); oErr != nil {
+				return &VolumeUnavailableError{Service: svc.Name, Volume: vm.Name, Type: vol.Type,
+					Detail: fmt.Sprintf("docker volume %s belongs to another Project lifetime, recovery will not mount it: %v", vName, oErr)}
 			}
 
 		default:

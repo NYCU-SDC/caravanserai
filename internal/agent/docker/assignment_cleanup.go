@@ -14,14 +14,23 @@ import (
 
 // Assignment names one assignment of one Project lifetime, as the Docker
 // resources created for it are labelled.
+//
+// AllGenerations widens it to every assignment of the lifetime this daemon
+// holds anything for, and Generation is then ignored. Deleting a Project uses
+// it: whichever generation left a container here, it goes with the Project —
+// but a same-name Project of another lifetime is never touched.
 type Assignment struct {
-	Namespace  string
-	Project    string
-	UID        string
-	Generation int64
+	Namespace      string
+	Project        string
+	UID            string
+	Generation     int64
+	AllGenerations bool
 }
 
 func (a Assignment) String() string {
+	if a.AllGenerations {
+		return fmt.Sprintf("%s/%s (uid %s, every generation)", a.Namespace, a.Project, a.UID)
+	}
 	return fmt.Sprintf("%s/%s (uid %s, generation %d)", a.Namespace, a.Project, a.UID, a.Generation)
 }
 
@@ -47,7 +56,7 @@ func (r *DockerRuntime) RemoveAssignment(ctx context.Context, a Assignment) erro
 		return fmt.Errorf("remove assignment %s: no UID to match resources by", a)
 	}
 	log := r.logger.With(zap.String("namespace", a.Namespace), zap.String("project", a.Project),
-		zap.String("uid", a.UID), zap.Int64("generation", a.Generation))
+		zap.String("assignment", a.String()))
 
 	containers, err := r.client.ContainerList(ctx, container.ListOptions{All: true, Filters: assignmentContainerFilters(a)})
 	if err != nil {
@@ -146,13 +155,19 @@ func (r *DockerRuntime) AssignmentRemaining(ctx context.Context, a Assignment) (
 
 func assignmentContainerFilters(a Assignment) filters.Args {
 	args := containerOwnershipFilters(ProjectIdentity{Namespace: a.Namespace, Name: a.Project, UID: a.UID})
-	args.Add("label", labelGeneration+"="+generationLabel(a.Generation))
+	if !a.AllGenerations {
+		args.Add("label", labelGeneration+"="+generationLabel(a.Generation))
+	}
 	return args
 }
 
 // lifetimeHasContainers reports whether any container of a's lifetime, of a
-// generation other than a's, is on this daemon.
+// generation other than a's, is on this daemon. With AllGenerations there is
+// no other generation: every container of the lifetime is a's own.
 func (r *DockerRuntime) lifetimeHasContainers(ctx context.Context, a Assignment) (bool, error) {
+	if a.AllGenerations {
+		return false, nil
+	}
 	containers, err := r.client.ContainerList(ctx, container.ListOptions{
 		All:     true,
 		Filters: containerOwnershipFilters(ProjectIdentity{Namespace: a.Namespace, Name: a.Project, UID: a.UID}),

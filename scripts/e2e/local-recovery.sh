@@ -489,4 +489,59 @@ if dind inspect "$dropped-web" >/dev/null 2>&1; then
 fi
 log "G: PASS — a container for a dropped service still blocks the new assignment"
 
-log "PASS: stop and remove recovered; missing data blocked visibly and recovered on restore; crash loop exhausted; stale containers blocked on the Running and Scheduled paths, including one whose service the spec no longer declares"
+# ── H. Deleting a Project takes its whole lifetime, and nothing else ─────────
+#
+# recover-target still has generation 1's container running beside the
+# generation-2 assignment E and F left it with. Deleting the Project must take
+# every generation of its lifetime — the network and the Ephemeral volume
+# too — keep the Managed data, and leave alone a container that carries the
+# same Project name under another lifetime's UID: that one is not this
+# deletion's to remove.
+
+foreign_container="$project-sidecar"
+scratch_volume="cara-$project-scratch"
+
+log "H: planting a container under $project's name for another lifetime"
+dind run -d --name "$foreign_container" \
+	--label "cara.project=$project" --label cara.namespace=default \
+	--label cara.service=sidecar --label cara.uid=uid-of-another-lifetime \
+	--label cara.generation=1 \
+	nginx:alpine >/dev/null
+foreign_id="$(container_id "$foreign_container")"
+[[ -n "$foreign_id" ]] || fail "H: could not create the other lifetime's container"
+
+container_running "$container" || fail "H: setup expected generation $label_generation's container to be running"
+dind volume inspect "$scratch_volume" >/dev/null || fail "H: setup expected the Ephemeral volume $scratch_volume"
+
+log "H: deleting $project"
+delete_status="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$server_url/api/v1/projects/$project")"
+[[ "$delete_status" == "202" ]] || fail "H: delete returned $delete_status, want 202"
+
+project_gone() { [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$server_url/api/v1/projects/$project")" == "404" ]]; }
+wait_until 90 "H: $project finalized" project_gone
+
+# A failed listing is not an absent resource: the helpers below return non-zero
+# when the daemon cannot be asked, so wait_until keeps waiting and fails.
+lifetime_containers() {
+	listed="$(dind ps -a --filter "label=cara.project=$project" --format '{{.Names}}')" || return 1
+	grep -vxF -- "$foreign_container" <<<"$listed" | grep -c . || true
+}
+no_lifetime_containers() { n="$(lifetime_containers)" || return 1; [[ "$n" == "0" ]]; }
+volume_absent() {
+	listed="$(dind volume ls --format '{{.Name}}')" || return 1
+	! grep -qxF -- "$1" <<<"$listed"
+}
+network_absent() {
+	listed="$(dind network ls --format '{{.Name}}')" || return 1
+	! grep -qxF -- "$1" <<<"$listed"
+}
+
+wait_until 30 "H: every generation's container removed" no_lifetime_containers
+wait_until 30 "H: Ephemeral volume removed" volume_absent "$scratch_volume"
+wait_until 30 "H: network removed" network_absent "cara-$project"
+[[ -f "$managed_dir/marker.txt" ]] || fail "H: Managed data was removed with the Project"
+[[ "$(container_id "$foreign_container")" == "$foreign_id" ]] ||
+	fail "H: the other lifetime's container was removed by this Project's deletion"
+log "H: PASS — every generation removed, network and Ephemeral volume gone, Managed data kept, other lifetime untouched"
+
+log "PASS: stop and remove recovered; missing data blocked visibly and recovered on restore; crash loop exhausted; stale containers blocked on the Running and Scheduled paths, including one whose service the spec no longer declares; deletion removed every generation of the lifetime and nothing of another"
