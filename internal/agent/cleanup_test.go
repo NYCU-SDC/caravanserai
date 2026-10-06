@@ -229,6 +229,13 @@ func terminationServer(t *testing.T, resourcesRemovedStatus int, current *v1.Pro
 // generations each ResourcesRemoved report was for, in order.
 func terminationServerWithEvidence(t *testing.T, resourcesRemovedStatus int, current *v1.Project) (*Client, *[]string, *[]int64) {
 	t.Helper()
+	return terminationServerWith(t, resourcesRemovedStatus, http.StatusNoContent, current)
+}
+
+// terminationServerWith is the full form: clearStatus is what a condition
+// DELETE answers.
+func terminationServerWith(t *testing.T, resourcesRemovedStatus, clearStatus int, current *v1.Project) (*Client, *[]string, *[]int64) {
+	t.Helper()
 	var (
 		mu          sync.Mutex
 		writes      []string
@@ -245,6 +252,20 @@ func terminationServerWithEvidence(t *testing.T, resourcesRemovedStatus int, cur
 		}
 		mu.Unlock()
 		w.WriteHeader(resourcesRemovedStatus)
+	})
+	mux.HandleFunc("PATCH /api/v1/projects/{name}/conditions/{type}", func(w http.ResponseWriter, r *http.Request) {
+		var req conditionPatchRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		mu.Lock()
+		writes = append(writes, r.PathValue("type")+":"+req.Reason+":"+req.Message)
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("DELETE /api/v1/projects/{name}/conditions/{type}", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		writes = append(writes, "clear "+r.PathValue("type"))
+		mu.Unlock()
+		w.WriteHeader(clearStatus)
 	})
 	mux.HandleFunc("GET /api/v1/projects/{name}", func(w http.ResponseWriter, _ *http.Request) {
 		if current == nil {
@@ -289,7 +310,8 @@ func TestTerminateWaitsForResourcesToGo(t *testing.T) {
 
 	terminateOne(context.Background(), client, teardownRuntime(), nil, nil, newAssignmentCleaner(res), terminatingProject("blog"), zap.NewNop())
 
-	assert.Empty(t, *writes, "reported while resources remained")
+	assert.Equal(t, []string{"TeardownBlocked:ResourcesRemain:still present: volume cara-blog-cache"}, *writes,
+		"only the block may be reported while resources remain — no ResourcesRemoved, no Terminated")
 }
 
 func TestTerminateRetriesWhenTheReportFails(t *testing.T) {
@@ -364,7 +386,66 @@ func TestTerminateKeepsTerminatingWhenTeardownFails(t *testing.T) {
 
 	terminateOne(context.Background(), client, teardownRuntime(), nil, nil, newAssignmentCleaner(res), owedTermination(false), zap.NewNop())
 
-	assert.Empty(t, *writes, "a failed teardown reported something; it must stay Terminating")
+	assert.Equal(t, []string{"TeardownBlocked:RemoveFailed:fake: daemon busy"}, *writes,
+		"a failed teardown must stay Terminating, visibly")
+}
+
+// Each way a teardown can stop short is reported with its own reason, so the
+// API shows why a deletion is stuck rather than only that it is.
+func TestTerminateReportsWhyTheTeardownIsBlocked(t *testing.T) {
+	cases := map[string]struct {
+		res  *fakeResource
+		want string
+	}{
+		"what is left cannot be read": {&fakeResource{readErr: errors.New("daemon unreachable")},
+			"TeardownBlocked:InspectFailed:fake: daemon unreachable"},
+		"something survived, listed in a stable order": {&fakeResource{held: []string{"volume b", "container a"}, stuck: true},
+			"TeardownBlocked:ResourcesRemain:still present: container a, volume b"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			client, writes := terminationServer(t, http.StatusNoContent, nil)
+			terminateOne(context.Background(), client, teardownRuntime(), nil, nil, newAssignmentCleaner(tc.res), owedTermination(false), zap.NewNop())
+			assert.Equal(t, []string{tc.want}, *writes)
+		})
+	}
+
+	t.Run("no cleaner", func(t *testing.T) {
+		client, writes := terminationServer(t, http.StatusNoContent, nil)
+		terminateOne(context.Background(), client, teardownRuntime(), nil, nil, nil, owedTermination(false), zap.NewNop())
+		require.Len(t, *writes, 1)
+		assert.Contains(t, (*writes)[0], "TeardownBlocked:CleanerUnavailable:")
+	})
+}
+
+// The teardown is retried every poll; reporting the same block again must not
+// write, or a stuck deletion becomes a stream of writes.
+func TestTerminateDoesNotRereportAnUnchangedBlock(t *testing.T) {
+	client, writes := terminationServer(t, http.StatusNoContent, nil)
+	p := owedTermination(false)
+	p.Status.Conditions = append(p.Status.Conditions, v1.Condition{
+		Type: v1.ConditionTypeTeardownBlocked, Status: v1.ConditionTrue,
+		Reason: "RemoveFailed", Message: "fake: daemon busy",
+	})
+
+	terminateOne(context.Background(), client, teardownRuntime(), nil, nil,
+		newAssignmentCleaner(&fakeResource{removeErr: errors.New("daemon busy")}), p, zap.NewNop())
+
+	assert.Empty(t, *writes)
+}
+
+// A teardown that completes clears the block before the obligations are
+// reported; one that never had a block writes no clear.
+func TestTerminateClearsTheBlockOnceTheTeardownCompletes(t *testing.T) {
+	client, writes := terminationServer(t, http.StatusNoContent, nil)
+	p := owedTermination(false)
+	p.Status.Conditions = append(p.Status.Conditions, v1.Condition{
+		Type: v1.ConditionTypeTeardownBlocked, Status: v1.ConditionTrue, Reason: "RemoveFailed",
+	})
+
+	terminateOne(context.Background(), client, teardownRuntime(), nil, nil, newAssignmentCleaner(&fakeResource{}), p, zap.NewNop())
+
+	assert.Equal(t, []string{"clear TeardownBlocked", "ResourcesRemoved", string(v1.ProjectPhaseTerminated)}, *writes)
 }
 
 // The teardown covers the whole lifetime: every generation of this UID, and
@@ -397,4 +478,19 @@ func TestTerminateResolvesEarlierObligationsOfThisNode(t *testing.T) {
 
 	assert.Equal(t, []int64{2, 1}, *generations, "the current assignment first, then this node's open earlier one only")
 	assert.Equal(t, string(v1.ProjectPhaseTerminated), (*writes)[len(*writes)-1])
+}
+
+// Clearing the block is not a precondition of termination: the condition
+// describes the teardown, which is done. A clear that fails is logged, and the
+// obligations and Terminated are reported as usual.
+func TestTerminateProceedsWhenTheClearFails(t *testing.T) {
+	client, writes, _ := terminationServerWith(t, http.StatusNoContent, http.StatusInternalServerError, nil)
+	p := owedTermination(false)
+	p.Status.Conditions = append(p.Status.Conditions, v1.Condition{
+		Type: v1.ConditionTypeTeardownBlocked, Status: v1.ConditionTrue, Reason: "RemoveFailed",
+	})
+
+	terminateOne(context.Background(), client, teardownRuntime(), nil, nil, newAssignmentCleaner(&fakeResource{}), p, zap.NewNop())
+
+	assert.Equal(t, []string{"clear TeardownBlocked", "ResourcesRemoved", string(v1.ProjectPhaseTerminated)}, *writes)
 }

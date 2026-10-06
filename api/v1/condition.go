@@ -44,6 +44,9 @@
 //	  ConditionTypeRecoveryBlocked — set by the agent when it has refused to
 //	  recover a Project's containers because doing so would be unsafe, and
 //	  cleared once the reason is gone.
+//
+//	  ConditionTypeTeardownBlocked — set by the agent while it cannot finish
+//	  removing a Terminating Project's resources, and cleared once it has.
 package v1
 
 import "time"
@@ -109,6 +112,17 @@ const (
 	// cara will bring it back — this condition is how that becomes visible
 	// without logging into the node.
 	ConditionTypeRecoveryBlocked ConditionType = "RecoveryBlocked"
+
+	// ConditionTypeTeardownBlocked indicates that the assigned agent is
+	// tearing down a Terminating Project and cannot finish: a removal failed,
+	// what is left could not be read, or something survived the removal.
+	// Reason says which, and Message carries the detail.
+	//
+	// The phase stays Terminating, not Failed: the agent retries the whole
+	// teardown every poll, and Failed would end those retries. Without this
+	// condition a stuck deletion would look exactly like one still in
+	// progress. It is cleared once the teardown completes. Agent-owned.
+	ConditionTypeTeardownBlocked ConditionType = "TeardownBlocked"
 
 	// ConditionTypeRecovering indicates that the server is moving the Project
 	// to another Node. Server-owned: agents cannot write it.

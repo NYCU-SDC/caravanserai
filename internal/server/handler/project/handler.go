@@ -740,6 +740,7 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 var agentWritableConditions = map[v1.ConditionType]bool{
 	v1.ConditionTypeMaintenance:     true,
 	v1.ConditionTypeRecoveryBlocked: true,
+	v1.ConditionTypeTeardownBlocked: true,
 }
 
 // conditionPatchRequest is the body sent to

@@ -121,3 +121,32 @@ func TestAgentClientResolvesCleanupObligation(t *testing.T) {
 	assert.ErrorIs(t, other.ReportResourcesRemoved(ctx, name, stale), agent.ErrStaleAssignment)
 	assert.ErrorIs(t, client.ReportResourcesRemoved(ctx, "e2e-no-such-project", tasks[0].Assignment), agent.ErrProjectNotFound)
 }
+
+// TeardownBlocked is the agent's to write while it tears a Terminating Project
+// down: the server accepts it under the current assignment's fence, refuses it
+// under a stale one, and the agent can clear it again.
+func TestTeardownBlockedConditionIsAgentWritable(t *testing.T) {
+	const name = "e2e-teardown-blocked"
+	ctx := context.Background()
+	uid, gen := createAssigned(t, name, "node-a", v1.ProjectPhaseRunning)
+	resp := doRequest(t, http.MethodDelete, "/api/v1/projects/"+name, nil)
+	drainBody(resp)
+	require.Equal(t, http.StatusAccepted, resp.StatusCode)
+
+	client := agent.NewClient(zap.NewNop(), suite.serverURL, "node-a")
+	fence := agent.AssignmentFence{UID: uid, NodeRef: "node-a", Generation: gen}
+
+	stale := fence
+	stale.Generation--
+	assert.ErrorIs(t, client.PatchProjectCondition(ctx, name, stale, v1.ConditionTypeTeardownBlocked,
+		v1.ConditionTrue, "RemoveFailed", "daemon busy"), agent.ErrStaleAssignment)
+
+	require.NoError(t, client.PatchProjectCondition(ctx, name, fence, v1.ConditionTypeTeardownBlocked,
+		v1.ConditionTrue, "RemoveFailed", "daemon busy"))
+	p := getProject(t, name)
+	require.Equal(t, v1.ProjectPhaseTerminating, p.Status.Phase)
+	require.True(t, hasProjectCondition(p, v1.ConditionTypeTeardownBlocked))
+
+	require.NoError(t, client.ClearProjectCondition(ctx, name, fence, v1.ConditionTypeTeardownBlocked))
+	assert.False(t, hasProjectCondition(getProject(t, name), v1.ConditionTypeTeardownBlocked))
+}

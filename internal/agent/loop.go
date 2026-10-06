@@ -738,6 +738,8 @@ func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 
 	if cleaner == nil {
 		log.Error("No cleaner configured; cannot tear the project down by its ownership, leaving it Terminating")
+		reportTeardownBlocked(ctx, client, p, teardownBlockedNoCleaner,
+			"this agent cannot remove resources by Project lifetime", log)
 		return
 	}
 
@@ -749,18 +751,25 @@ func terminateOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 
 	if err := cleaner.removeAll(ctx, lifetime); err != nil {
 		log.Warn("Teardown incomplete, will retry next poll", zap.Error(err))
+		reportTeardownBlocked(ctx, client, p, teardownBlockedRemoveFailed, err.Error(), log)
 		return
 	}
 	left, err := cleaner.remaining(ctx, lifetime)
 	if err != nil {
 		log.Warn("Could not confirm teardown, will retry next poll", zap.Error(err))
+		reportTeardownBlocked(ctx, client, p, teardownBlockedInspectFailed, err.Error(), log)
 		return
 	}
 	if len(left) > 0 {
-		log.Warn("Resources still present after teardown, will retry next poll",
-			zap.String("remaining", strings.Join(left, ", ")))
+		// Sorted so the same leftovers make the same message on every poll,
+		// and an unchanged report writes nothing.
+		slices.Sort(left)
+		detail := strings.Join(left, ", ")
+		log.Warn("Resources still present after teardown, will retry next poll", zap.String("remaining", detail))
+		reportTeardownBlocked(ctx, client, p, teardownBlockedResourcesRemain, "still present: "+detail, log)
 		return
 	}
+	clearTeardownBlocked(ctx, client, p, log)
 	for _, vol := range p.Spec.Volumes {
 		if vol.Type == v1.VolumeTypeManaged {
 			log.Info("Retaining Managed volume data on host", zap.String("volume", vol.Name))
@@ -1310,6 +1319,47 @@ func clearRecoveryBlocked(ctx context.Context, client *Client, p *v1.Project, lo
 	if err := client.ClearProjectCondition(ctx, p.Name, fenceForProject(p),
 		v1.ConditionTypeRecoveryBlocked); err != nil {
 		log.Warn("Failed to clear RecoveryBlocked condition", zap.Error(err))
+	}
+}
+
+// Reasons for TeardownBlocked.
+const (
+	teardownBlockedNoCleaner       = "CleanerUnavailable"
+	teardownBlockedRemoveFailed    = "RemoveFailed"
+	teardownBlockedInspectFailed   = "InspectFailed"
+	teardownBlockedResourcesRemain = "ResourcesRemain"
+)
+
+// reportTeardownBlocked records why a Terminating Project's teardown did not
+// finish, so a stuck deletion is visible from the API rather than only in this
+// agent's log. It does not write when the poll's snapshot already carries the
+// same Status, Reason and Message: the teardown is retried every poll, and an
+// identical report each time would turn a stuck deletion into a stream of
+// writes. That is a check against the snapshot, not an idempotence the server
+// guarantees — a repeated patch would still move the condition's time, the
+// version and publish an event. A failed write is left for the next poll, like
+// the teardown.
+func reportTeardownBlocked(ctx context.Context, client *Client, p *v1.Project, reason, message string, log *zap.Logger) {
+	if c, ok := projectCondition(p, v1.ConditionTypeTeardownBlocked); ok &&
+		c.Status == v1.ConditionTrue && c.Reason == reason && c.Message == message {
+		return
+	}
+	if err := client.PatchProjectCondition(ctx, p.Name, fenceForProject(p),
+		v1.ConditionTypeTeardownBlocked, v1.ConditionTrue, reason, message); err != nil {
+		log.Warn("Failed to report TeardownBlocked condition", zap.Error(err))
+	}
+}
+
+// clearTeardownBlocked removes TeardownBlocked once the teardown has completed,
+// if p carries it. A failed clear is not a reason to hold termination back:
+// the condition describes the teardown, which is done.
+func clearTeardownBlocked(ctx context.Context, client *Client, p *v1.Project, log *zap.Logger) {
+	if _, ok := projectCondition(p, v1.ConditionTypeTeardownBlocked); !ok {
+		return
+	}
+	if err := client.ClearProjectCondition(ctx, p.Name, fenceForProject(p),
+		v1.ConditionTypeTeardownBlocked); err != nil {
+		log.Warn("Failed to clear TeardownBlocked condition", zap.Error(err))
 	}
 }
 
