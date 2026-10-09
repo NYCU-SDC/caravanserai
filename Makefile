@@ -177,6 +177,12 @@ build-cara-postgres-image:
 		&& echo -e "==> $(BLUE)Image built$(NC)" \
 		|| (echo -e "==> $(RED)Image build failed$(NC)" && exit 1)
 
+test-cara-postgres-image: build-cara-postgres-image
+	@echo -e ":: $(GREEN)Running the cara-postgres image smoke test (about 2 minutes)...$(NC)"
+	@CARA_POSTGRES_IMAGE=$(CARA_POSTGRES_IMAGE) ./scripts/image/cara-postgres-smoke.sh \
+		&& echo -e "==> $(BLUE)Image smoke test passed$(NC)" \
+		|| (echo -e "==> $(RED)Image smoke test failed$(NC)" && exit 1)
+
 install-hooks:
 	@echo -e ":: $(GREEN)Installing git hooks...$(NC)"
 	@git config core.hooksPath .githooks \
@@ -186,4 +192,4 @@ install-hooks:
 .PHONY: all prepare build run-server run-agent run-cli test test-integration test-orphan-e2e test-recovery-e2e test-managed-failover-e2e schemas
 .PHONY: dev-up dev-down dev-reset dev-server dev-logs install-hooks
 .PHONY: walg-backup walg-restore walg-verify
-.PHONY: build-cara-postgres-image
+.PHONY: build-cara-postgres-image test-cara-postgres-image
