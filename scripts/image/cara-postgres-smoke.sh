@@ -49,19 +49,37 @@ cleanup() {
 			fi
 		done
 	fi
+	# Removal is best effort; what decides the result is the check after it,
+	# which must get a successful answer from Docker. "Could not ask" is a
+	# failure, never "nothing left".
 	for c in "$db" "$async_init" "$async_control" "$repohost"; do
 		remove_container "$c" || true
 	done
-	docker volume rm -f "$tls_volume" >/dev/null 2>&1 || true
-	for v in "${anon_volumes[@]}"; do
-		if docker volume inspect "$v" >/dev/null 2>&1; then
-			docker volume rm -f "$v" >/dev/null 2>&1 || true
-		fi
-		if docker volume inspect "$v" >/dev/null 2>&1; then
-			log "FAIL: volume $v created by this run is still present"
-			status=1
-		fi
-	done
+	docker volume rm -f "$tls_volume" "${anon_volumes[@]}" >/dev/null 2>&1 || true
+
+	local containers volumes leftover
+	if ! containers="$(docker ps -a --format '{{.Names}}')"; then
+		log "FAIL: cannot list containers to confirm cleanup"
+		status=1
+	else
+		for c in "$db" "$async_init" "$async_control" "$repohost"; do
+			if grep -qxF "$c" <<<"$containers"; then
+				log "FAIL: container $c created by this run is still present"
+				status=1
+			fi
+		done
+	fi
+	if ! volumes="$(docker volume ls -q)"; then
+		log "FAIL: cannot list volumes to confirm cleanup"
+		status=1
+	else
+		for leftover in "$tls_volume" "${anon_volumes[@]}"; do
+			if grep -qxF "$leftover" <<<"$volumes"; then
+				log "FAIL: volume $leftover created by this run is still present"
+				status=1
+			fi
+		done
+	fi
 	case "$(basename "$work")" in
 		cara-postgres-smoke.*) rm -rf -- "$work" ;;
 		*) log "refusing to remove unexpected temp path: $work" ;;
@@ -308,13 +326,17 @@ pg1-path=/var/lib/postgresql/data
 EOF
 chmod 0644 "$work/async.conf"
 
-async_orphan_pid() {
+# kill_async_orphan name — finds an async archiver already reparented to PID 1
+# and kills it in the same shell, so it cannot exit on its own between being
+# found and being killed. Prints the PID; exits 1 if there is none yet.
+kill_async_orphan() {
 	docker exec "$1" sh -c '
 		for d in /proc/[0-9]*; do
 			cmd=$(tr "\0" " " <"$d/cmdline" 2>/dev/null) || continue
 			case "$cmd" in *archive-push:async*) ;; *) continue ;; esac
 			ppid=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
-			[ "$ppid" = 1 ] && { echo "${d#/proc/}"; exit 0; }
+			[ "$ppid" = 1 ] || continue
+			kill -9 "${d#/proc/}" 2>/dev/null && { echo "${d#/proc/}"; exit 0; }
 		done
 		exit 1'
 }
@@ -329,10 +351,11 @@ run_async_case() {
 	before="$(postmaster_pid "$name")"
 	psql_in "$name" 'CREATE TABLE churn AS SELECT generate_series(1, 10000) AS id'
 	psql_in "$name" 'SELECT pg_switch_wal()' >/dev/null
-	wait_until 60 "an orphaned async archiver in $name" async_orphan_pid "$name"
-	local orphan logs restarted=no
-	orphan="$(async_orphan_pid "$name")" || fail "$name: lost the async archiver"
-	docker exec "$name" sh -c "kill -9 $orphan" || fail "$name: cannot kill PID $orphan"
+	local orphan="" logs restarted=no deadline=$((SECONDS + 60))
+	until orphan="$(kill_async_orphan "$name")"; do
+		(( SECONDS < deadline )) || fail "timed out waiting for an orphaned async archiver in $name"
+		sleep 1
+	done
 	sleep 8
 	logs="$(docker logs "$name" 2>&1)" || fail "$name: cannot read the container log"
 	# The startup banner is always there; without it the log is not the one
