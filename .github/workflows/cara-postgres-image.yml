@@ -3,18 +3,21 @@ name: cara-postgres image
 # Separate from CI so the image is built and checked only when something it
 # depends on changes; the smoke test pulls a base image and starts several
 # PostgreSQL containers, which every Go-only change would otherwise pay for.
+# Makefile is included because the job runs the test through it.
 on:
   push:
     branches: [main]
     paths:
       - deploy/images/cara-postgres/**
       - scripts/image/cara-postgres-smoke.sh
+      - Makefile
       - .github/workflows/cara-postgres-image.yml
   pull_request:
     branches: [main]
     paths:
       - deploy/images/cara-postgres/**
       - scripts/image/cara-postgres-smoke.sh
+      - Makefile
       - .github/workflows/cara-postgres-image.yml
 
 jobs:
