@@ -25,7 +25,7 @@ const (
 	reschedulerResyncInterval = 30 * time.Second
 
 	// runningGracePeriod is the maximum time a Running project on a NotReady
-	// node is allowed before the rescheduler resets it to Pending.  This gives
+	// node is allowed before the rescheduler tries to release it.  This gives
 	// transient network issues time to resolve before the project is moved to
 	// another node, avoiding unnecessary churn and split-brain risk for
 	// stateful workloads.  Set to 3× the 90-second heartbeat timeout.
@@ -35,10 +35,12 @@ const (
 // ProjectSnapshot is the minimal view of a Project needed by
 // ProjectReschedulerController and CapacityLedger.
 type ProjectSnapshot struct {
-	Name    string
-	Phase   v1.ProjectPhase
-	NodeRef string
-	Size    v1.ProjectSize
+	Name                 string
+	UID                  string
+	Phase                v1.ProjectPhase
+	NodeRef              string
+	AssignmentGeneration int64
+	Size                 v1.ProjectSize
 	// FailedNodes are the Nodes the Project has been moved off after Failed.
 	FailedNodes []string
 	Conditions  []ConditionSnapshot
@@ -59,9 +61,21 @@ type ReschedulerProjectStore interface {
 	// phase is one of phases.
 	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*ProjectSnapshot, error)
 
-	// SetProjectPending clears the nodeRef, sets phase=Pending, and records a
-	// Phase condition with reason=NodeNotReady.
-	SetProjectPending(ctx context.Context, name string) error
+	// ReleaseAssignment gives up p's assignment — the UID, nodeRef and
+	// generation in the snapshot — so the Project can be scheduled again, but
+	// only with an accepted release authorization. Today that is WorkloadStopped
+	// evidence for exactly that assignment.
+	//
+	// With it, one write clears nodeRef, sets phase=Pending with a Phase
+	// condition of reason=NodeNotReady, and appends the assignment's cleanup
+	// obligation; released is true. Without it, the Project keeps its nodeRef
+	// and phase and is marked TakeoverRequired=True; released is false.
+	// Re-marking an already marked Project writes nothing.
+	//
+	// Returns ErrStaleAssignment when the Project no longer holds the snapshot's
+	// assignment, ErrConflictState when it is no longer Scheduled or Running,
+	// and ErrNotFound when it is gone.
+	ReleaseAssignment(ctx context.Context, p *ProjectSnapshot) (released bool, err error)
 
 	// SetTerminatingAt writes (or replaces) a TerminatingAt condition on the
 	// Project to record when the rescheduler first observed the node as
@@ -72,7 +86,7 @@ type ReschedulerProjectStore interface {
 	// SetNotReadyAt writes (or replaces) a NotReadyAt condition on the
 	// Project to record when the rescheduler first observed the node as
 	// NotReady while the project was Running.  This timestamp is used to
-	// calculate the running grace period before resetting to Pending.
+	// calculate the running grace period before trying to release it.
 	SetNotReadyAt(ctx context.Context, name string, at time.Time) error
 
 	// ForceTerminated transitions the Project to Terminated phase and records a
@@ -80,11 +94,11 @@ type ReschedulerProjectStore interface {
 	// ProjectTerminationController will delete the record shortly after.
 	ForceTerminated(ctx context.Context, name string) error
 
-	// ClearRescheduleClocks removes the NotReadyAt and TerminatingAt
-	// conditions from the Project without touching its phase.  Called when the
-	// node recovers before either clock expires.
+	// ClearRescheduleClocks removes the NotReadyAt, TerminatingAt and
+	// TakeoverRequired conditions from the Project without touching its
+	// phase.  Called when the node recovers before the Project was released.
 	//
-	// It must ignore a Project no longer assigned to nodeRef, and a clock
+	// It must ignore a Project no longer assigned to nodeRef, and a condition
 	// stamped after notAfter — that one belongs to an outage which began after
 	// this cleanup was decided on, and deleting it would restart a timeout
 	// that is legitimately running.
@@ -105,8 +119,10 @@ type ReschedulerNodeStore interface {
 // or force-terminates the Projects that were running on them.
 //
 // For Scheduled/Running projects:
-//   - Reset to Pending so the ProjectSchedulerController can place them on a
-//     healthy node.
+//   - Release the assignment so the ProjectSchedulerController can place them
+//     on a healthy node — but only when the release is authorized (ADR-0017).
+//     Without authorization the Project stays on the NotReady node, marked
+//     TakeoverRequired, and the release is retried on later reconciles.
 //
 // For Terminating projects (node died mid-teardown):
 //   - First observation: record TerminatingAt condition to start the clock.
@@ -203,17 +219,9 @@ func (c *ProjectReschedulerController) Reconcile(ctx context.Context, name strin
 	for _, p := range projects {
 		switch p.Phase {
 		case v1.ProjectPhaseScheduled:
-			log.Info("Resetting scheduled project to Pending due to NotReady node",
-				zap.String("project", p.Name),
-			)
-			if err := c.projects.SetProjectPending(ctx, p.Name); err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					log.Debug("Project disappeared before reset, skipping", zap.String("project", p.Name))
-					continue
-				}
+			if err := c.release(ctx, log, p); err != nil {
 				return Result{}, err
 			}
-			log.Info("Scheduled project reset to Pending", zap.String("project", p.Name))
 
 		case v1.ProjectPhaseRunning:
 			requeue, err := c.handleRunning(ctx, log, p, snap.LastHeartbeat)
@@ -304,14 +312,32 @@ func (c *ProjectReschedulerController) clearRescheduleClocks(
 	return firstErr
 }
 
-// hasRescheduleClock reports whether p carries either reschedule clock.
+// hasRescheduleClock reports whether p carries any outage condition.
 func hasRescheduleClock(p *ProjectSnapshot) bool {
 	for _, cond := range p.Conditions {
-		if cond.Type == v1.ConditionTypeNotReadyAt || cond.Type == v1.ConditionTypeTerminatingAt {
+		if IsOutageCondition(cond.Type) {
 			return true
 		}
 	}
 	return false
+}
+
+// IsOutageCondition reports whether t is one of the conditions this controller
+// writes for a single Node outage: the two reschedule clocks, and the
+// TakeoverRequired mark left by a refused release. All three describe that
+// outage only, so a Node that recovers before its Projects were released takes
+// all three with it.
+//
+// TakeoverRequired is listed even though it is not a clock: a Scheduled
+// Project is released on first sight with no clock at all, and without this it
+// would keep reporting a takeover that is no longer needed.
+func IsOutageCondition(t v1.ConditionType) bool {
+	switch t {
+	case v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt, v1.ConditionTypeTakeoverRequired:
+		return true
+	default:
+		return false
+	}
 }
 
 // incidentClock finds the clock condition of type t and reports whether it is
@@ -457,20 +483,45 @@ func (c *ProjectReschedulerController) handleRunning(
 		return true, nil
 	}
 
-	// Grace period exceeded — reset to Pending.
-	log.Info("Running grace period exceeded, resetting project to Pending",
+	// Grace period exceeded — release the assignment if that is authorized.
+	log.Info("Running grace period exceeded, releasing project",
 		zap.Duration("elapsed", elapsed),
 		zap.Duration("gracePeriod", runningGracePeriod),
 	)
-	if err := c.projects.SetProjectPending(ctx, p.Name); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			log.Debug("Project disappeared before SetProjectPending, skipping")
-			return false, nil
-		}
-		return false, err
+	return false, c.release(ctx, log, p)
+}
+
+// release asks the store to give up p's assignment and logs which way the
+// release gate went.
+//
+// A refused release is not retried here. The Project keeps its nodeRef, so the
+// periodic resync of NotReady nodes lists it again and calls release again;
+// the store makes the repeated TakeoverRequired mark a no-op. Requeueing would
+// only spin: the authorization it waits for has to come from the Node's own
+// Agent, or from features that do not exist yet.
+//
+// A snapshot that went stale between the list and this write is skipped: the
+// Project was deleted, reassigned, or moved to a phase this controller does
+// not release, and in each case there is nothing left to release.
+func (c *ProjectReschedulerController) release(ctx context.Context, log *zap.Logger, p *ProjectSnapshot) error {
+	log = log.With(zap.String("project", p.Name), zap.Int64("assignmentGeneration", p.AssignmentGeneration))
+
+	released, err := c.projects.ReleaseAssignment(ctx, p)
+	switch {
+	case errors.Is(err, store.ErrNotFound),
+		errors.Is(err, store.ErrStaleAssignment),
+		errors.Is(err, store.ErrConflictState):
+		log.Debug("Project changed before release, skipping", zap.Error(err))
+		return nil
+	case err != nil:
+		return err
+	case released:
+		log.Info("Project released for rescheduling", zap.String("phase", string(p.Phase)))
+	default:
+		log.Warn("Release refused: the NotReady node has not confirmed this assignment stopped; project marked TakeoverRequired",
+			zap.String("phase", string(p.Phase)))
 	}
-	log.Info("Running project reset to Pending", zap.String("project", p.Name))
-	return false, nil
+	return nil
 }
 
 // Seed implements controller.Seeder.

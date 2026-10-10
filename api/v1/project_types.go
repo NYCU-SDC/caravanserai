@@ -419,6 +419,265 @@ type ProjectStatus struct {
 
 	// Conditions is a list of granular observable states.
 	Conditions []Condition `json:"conditions,omitempty" yaml:"conditions,omitempty"`
+
+	// Recovery is the durable state of cross-Node recovery: retry bookkeeping
+	// and the evidence that lets an assignment be released or a record be
+	// deleted. It lives here rather than in Condition messages because it must
+	// survive server restarts and duplicate controller events, and because code
+	// must never recover a counter or an identity by parsing a message.
+	//
+	// Server-owned; not a user manifest field. Nil until recovery first records
+	// something.
+	Recovery *ProjectRecoveryStatus `json:"recovery,omitempty" yaml:"recovery,omitempty"`
+}
+
+// ProjectRecoveryStatus is the structured recovery state of a Project.
+//
+// The retry, backoff, preference and healthy-window fields are written only by
+// server-side controllers. The evidence fields are written only through
+// dedicated guarded mutations that validate the reporting Agent's identity; an
+// ordinary Agent status report can set or clear none of them.
+type ProjectRecoveryStatus struct {
+	// RescheduleAttempts counts cross-Node reschedules in the current incident.
+	RescheduleAttempts int `json:"rescheduleAttempts,omitempty" yaml:"rescheduleAttempts,omitempty"`
+
+	// LastAttemptAt is when the most recent reschedule was attempted. Backoff
+	// is computed from it.
+	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty" yaml:"lastAttemptAt,omitempty"`
+
+	// HealthySince is when the Project was last seen continuously healthy. It
+	// is meaningful only while HealthySinceGeneration equals the current
+	// assignment generation: a window observed under an older assignment says
+	// nothing about the current one.
+	HealthySince *time.Time `json:"healthySince,omitempty" yaml:"healthySince,omitempty"`
+
+	// HealthySinceGeneration is the assignment generation HealthySince was
+	// observed under.
+	HealthySinceGeneration int64 `json:"healthySinceGeneration,omitempty" yaml:"healthySinceGeneration,omitempty"`
+
+	// PreferredNode is a scheduler hint only. Status.NodeRef remains the
+	// authoritative assignment.
+	PreferredNode string `json:"preferredNode,omitempty" yaml:"preferredNode,omitempty"`
+
+	// WorkloadStopped is the durable no-start latch for one assignment
+	// generation: the assigned Agent confirmed that every Project container is
+	// stopped. It is not proof that runtime resources were removed, and it
+	// alone never authorizes final deletion. Only a committed newer assignment
+	// clears it; time alone does not.
+	WorkloadStopped *WorkloadStoppedEvidence `json:"workloadStopped,omitempty" yaml:"workloadStopped,omitempty"`
+
+	// CleanupObligations lists every assignment this Project has given up
+	// whose Node may still hold its runtime resources. An entry is appended in
+	// the same write that releases an assignment or moves the Project to
+	// Terminating, so the list is the complete set of Nodes that may still
+	// hold resources. Final deletion requires every entry to be resolved.
+	CleanupObligations []CleanupObligation `json:"cleanupObligations,omitempty" yaml:"cleanupObligations,omitempty"`
+}
+
+// ReleaseAuthorizationKind records what permitted an assignment to be given
+// up. It answers "why could another Node take over", never "has this Node
+// cleaned up" — that is ResourcesRemoved, recorded separately.
+type ReleaseAuthorizationKind string
+
+const (
+	// ReleaseByWorkloadStopped: the assigned Agent confirmed every container
+	// of that generation stopped.
+	ReleaseByWorkloadStopped ReleaseAuthorizationKind = "WorkloadStopped"
+	// ReleaseByDeletion: the Project entered Terminating; the assignment's
+	// runtime resources are to be removed, not handed to another Node.
+	ReleaseByDeletion ReleaseAuthorizationKind = "Deletion"
+	// ReleaseByProviderFencing: a provider API proved the Node powered off or
+	// isolated. Not implemented yet.
+	ReleaseByProviderFencing ReleaseAuthorizationKind = "ProviderFencing"
+	// ReleaseByOperatorOverride: an operator accepted the risk of takeover
+	// without machine evidence. Not implemented yet; never fencing evidence.
+	ReleaseByOperatorOverride ReleaseAuthorizationKind = "OperatorOverride"
+	// ReleaseByLeaseExpired: the Node's lease expired under the self-fencing
+	// contract proposed in ADR-0023. Not implemented yet; never cleanup
+	// evidence.
+	ReleaseByLeaseExpired ReleaseAuthorizationKind = "LeaseExpired"
+)
+
+// CleanupObligation is one released assignment whose Node may still hold the
+// Project's runtime resources.
+type CleanupObligation struct {
+	// Assignment is the released assignment. Its Agent is the cleanup owner.
+	Assignment AssignmentIdentity `json:"assignment" yaml:"assignment"`
+
+	// ReleasedAt is when the assignment was given up.
+	ReleasedAt time.Time `json:"releasedAt" yaml:"releasedAt"`
+
+	// ReleaseAuthorization is what permitted giving the assignment up.
+	ReleaseAuthorization ReleaseAuthorizationKind `json:"releaseAuthorization" yaml:"releaseAuthorization"`
+
+	// ResourcesRemoved is the cleanup owner's evidence that every
+	// deletion-scoped runtime resource it held for this assignment is gone.
+	// Nil means the obligation is unresolved.
+	ResourcesRemoved *ResourcesRemovedEvidence `json:"resourcesRemoved,omitempty" yaml:"resourcesRemoved,omitempty"`
+}
+
+// Resolved reports whether the cleanup owner has reported ResourcesRemoved.
+func (o CleanupObligation) Resolved() bool {
+	return o.ResourcesRemoved != nil
+}
+
+// FindObligation returns the obligation for assignment, or nil.
+func (r *ProjectRecoveryStatus) FindObligation(assignment AssignmentIdentity) *CleanupObligation {
+	if r == nil {
+		return nil
+	}
+	for i := range r.CleanupObligations {
+		if r.CleanupObligations[i].Assignment == assignment {
+			return &r.CleanupObligations[i]
+		}
+	}
+	return nil
+}
+
+// AddObligation records that assignment was given up under authorization and
+// its Node now owes cleanup. An assignment already in the list keeps its
+// original entry: an obligation records the first release, and re-releasing
+// the same assignment must not reset its evidence.
+func (r *ProjectRecoveryStatus) AddObligation(assignment AssignmentIdentity, releasedAt time.Time, authorization ReleaseAuthorizationKind) {
+	if r.FindObligation(assignment) != nil {
+		return
+	}
+	r.CleanupObligations = append(r.CleanupObligations, CleanupObligation{
+		Assignment:           assignment,
+		ReleasedAt:           releasedAt,
+		ReleaseAuthorization: authorization,
+	})
+}
+
+// PermitsAssignment reports whether this obligation lets the Project be
+// assigned again. A resolved obligation does. An unresolved one does only when
+// its release was authorized by evidence that the old Node can no longer run
+// the workload — provider fencing or an audited operator override. A
+// WorkloadStopped release does not: the containers are stopped but still
+// present, and a restarted Agent or Docker restart policy could bring them back
+// while the new assignment runs.
+//
+// LeaseExpired is refused only because no lease is implemented yet and nothing
+// can record that kind. It is not a decision: the lease design separates
+// "another Node may take over" from "the old Node still owes cleanup", so its
+// answer here is to be set when the lease itself is implemented.
+func (o CleanupObligation) PermitsAssignment() bool {
+	if o.Resolved() {
+		return true
+	}
+	switch o.ReleaseAuthorization {
+	case ReleaseByProviderFencing, ReleaseByOperatorOverride:
+		return true
+	default:
+		return false
+	}
+}
+
+// BlockingObligation returns the first obligation that forbids assigning the
+// Project, or nil when none does.
+func (r *ProjectRecoveryStatus) BlockingObligation() *CleanupObligation {
+	if r == nil {
+		return nil
+	}
+	for i := range r.CleanupObligations {
+		if !r.CleanupObligations[i].PermitsAssignment() {
+			return &r.CleanupObligations[i]
+		}
+	}
+	return nil
+}
+
+// WorkloadStoppedFor reports whether WorkloadStopped evidence is recorded for
+// exactly assignment. Evidence for any other generation, Node or lifetime says
+// nothing about this one.
+func (r *ProjectRecoveryStatus) WorkloadStoppedFor(assignment AssignmentIdentity) bool {
+	return r != nil && r.WorkloadStopped != nil && r.WorkloadStopped.Assignment == assignment
+}
+
+// EnsureRecovery returns s.Recovery, allocating it first if needed.
+func (s *ProjectStatus) EnsureRecovery() *ProjectRecoveryStatus {
+	if s.Recovery == nil {
+		s.Recovery = &ProjectRecoveryStatus{}
+	}
+	return s.Recovery
+}
+
+// AssignmentIdentity names one assignment of one Project lifetime. All three
+// parts are needed: UID separates lifetimes that share a name, and the
+// generation separates assignments that reuse a Node (A→B→A).
+type AssignmentIdentity struct {
+	ProjectUID           string `json:"projectUID" yaml:"projectUID"`
+	NodeName             string `json:"nodeName" yaml:"nodeName"`
+	AssignmentGeneration int64  `json:"assignmentGeneration" yaml:"assignmentGeneration"`
+}
+
+// WorkloadStoppedEvidence records that the Agent of Assignment confirmed every
+// Project container stopped. ObservedAt is when that verification completed.
+type WorkloadStoppedEvidence struct {
+	Assignment AssignmentIdentity `json:"assignment" yaml:"assignment"`
+	ObservedAt time.Time          `json:"observedAt" yaml:"observedAt"`
+}
+
+// ResourcesRemovedEvidence records when the cleanup owner of an obligation
+// finished removing every deletion-scoped runtime resource it held. The
+// assignment it is about is the obligation's own.
+type ResourcesRemovedEvidence struct {
+	ObservedAt time.Time `json:"observedAt" yaml:"observedAt"`
+}
+
+// ClearForNewAssignment drops the state a newly committed assignment
+// invalidates: the previous generation's no-start latch and its healthy
+// window. It is the only operation that clears WorkloadStopped, and it must run
+// inside the same compare-and-swap that commits the new assignment.
+func (r *ProjectRecoveryStatus) ClearForNewAssignment() {
+	if r == nil {
+		return
+	}
+	r.WorkloadStopped = nil
+	r.ClearHealthyWindow()
+}
+
+// ClearHealthyWindow forgets the current healthy window, as any new failure or
+// assignment must.
+func (r *ProjectRecoveryStatus) ClearHealthyWindow() {
+	if r == nil {
+		return
+	}
+	r.HealthySince = nil
+	r.HealthySinceGeneration = 0
+}
+
+// DeepCopy returns a ProjectRecoveryStatus sharing no pointer with r.
+func (r *ProjectRecoveryStatus) DeepCopy() *ProjectRecoveryStatus {
+	if r == nil {
+		return nil
+	}
+	out := *r
+	out.LastAttemptAt = copyTime(r.LastAttemptAt)
+	out.HealthySince = copyTime(r.HealthySince)
+	if r.WorkloadStopped != nil {
+		ws := *r.WorkloadStopped
+		out.WorkloadStopped = &ws
+	}
+	if r.CleanupObligations != nil {
+		out.CleanupObligations = make([]CleanupObligation, len(r.CleanupObligations))
+		for i, o := range r.CleanupObligations {
+			if o.ResourcesRemoved != nil {
+				rr := *o.ResourcesRemoved
+				o.ResourcesRemoved = &rr
+			}
+			out.CleanupObligations[i] = o
+		}
+	}
+	return &out
+}
+
+func copyTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	return &c
 }
 
 // Project is the central workload resource. It groups one or more containers
@@ -455,4 +714,56 @@ func (Project) JSONSchemaExtend(s *jsonschema.Schema) {
 type ProjectList struct {
 	TypeMeta `json:",inline"  yaml:",inline"`
 	Items    []Project `json:"items" yaml:"items"`
+}
+
+// CleanupTask is one unresolved cleanup obligation, addressed to the Agent of
+// the Node that owes it. It authorizes that Agent to stop and remove the
+// runtime resources of exactly Assignment and to report ResourcesRemoved for
+// it; it grants no status-write or workload-start authority.
+type CleanupTask struct {
+	Namespace            string                   `json:"namespace" yaml:"namespace"`
+	ProjectName          string                   `json:"projectName" yaml:"projectName"`
+	Assignment           AssignmentIdentity       `json:"assignment" yaml:"assignment"`
+	ReleaseAuthorization ReleaseAuthorizationKind `json:"releaseAuthorization" yaml:"releaseAuthorization"`
+}
+
+// CleanupTaskList is the response of the Node cleanup-obligation listing.
+type CleanupTaskList struct {
+	TypeMeta `json:",inline" yaml:",inline"`
+	Items    []CleanupTask `json:"items" yaml:"items"`
+}
+
+// CleanupTasksFor returns p's unresolved cleanup obligations owed by node, as
+// tasks for that Node's Agent.
+//
+// None is returned while node holds p's current assignment. That Node's Agent
+// is acting on the Project under its assignment — tearing it down if it is
+// Terminating — and a cleanup task running beside it could remove what the
+// assignment is still using. The Deletion obligation of a Terminating Project
+// is resolved by the teardown itself, not by a task.
+//
+// An obligation for another lifetime cannot be in p's list (the UID check
+// guards every write to it), but the UID is compared anyway: a task is only
+// ever about the lifetime it names.
+func (p *Project) CleanupTasksFor(node string) []CleanupTask {
+	if p.Status.Recovery == nil || p.Status.NodeRef == node {
+		return nil
+	}
+	namespace := p.Namespace
+	if namespace == "" {
+		namespace = DefaultNamespace
+	}
+	var tasks []CleanupTask
+	for _, o := range p.Status.Recovery.CleanupObligations {
+		if o.Resolved() || o.Assignment.NodeName != node || o.Assignment.ProjectUID != p.ObjectMeta.UID {
+			continue
+		}
+		tasks = append(tasks, CleanupTask{
+			Namespace:            namespace,
+			ProjectName:          p.Name,
+			Assignment:           o.Assignment,
+			ReleaseAuthorization: o.ReleaseAuthorization,
+		})
+	}
+	return tasks
 }

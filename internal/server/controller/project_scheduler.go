@@ -34,7 +34,10 @@ type SchedulerProjectStore interface {
 	CapacityProjectStore
 
 	// SetProjectScheduled writes the nodeRef and transitions the Project to
-	// Scheduled phase atomically.
+	// Scheduled phase atomically. Only a Pending Project is assigned;
+	// re-asserting the same Node on a Scheduled Project is a no-op. It returns
+	// ErrConflictState, writing nothing, for any other phase or Node, and
+	// while a cleanup obligation forbids a new assignment.
 	SetProjectScheduled(ctx context.Context, name, nodeRef string) error
 }
 
@@ -186,6 +189,14 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		zap.Int("candidates", len(candidates)))
 
 	if err := c.projects.SetProjectScheduled(ctx, name, target); err != nil {
+		// Refused, not failed: a previous Node still owes cleanup, or the
+		// Project left Pending after it was read. Neither clears by retrying
+		// now; the periodic resync of Pending Projects tries again later, and
+		// a Project no longer Pending is not listed by it.
+		if errors.Is(err, store.ErrConflictState) {
+			log.Info("Project not schedulable yet", zap.Error(err))
+			return Result{}, nil
+		}
 		return Result{}, err
 	}
 

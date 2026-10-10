@@ -14,6 +14,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/server/adapter"
 	"NYCU-SDC/caravanserai/internal/store"
 	pgstore "NYCU-SDC/caravanserai/internal/store/postgres"
+	"NYCU-SDC/caravanserai/test/integration/testhelper"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -354,7 +355,8 @@ func TestScheduledThenPendingRecordsANewTransition(t *testing.T) {
 	ctx := context.Background()
 	projects := adapter.NewProjectStoreAdapter(f.store)
 
-	require.NoError(t, projects.SetProjectPending(ctx, f.name))
+	require.NoError(t, projects.SetProjectScheduled(ctx, f.name, "node-a"))
+	testhelper.ReleaseCleanly(t, f.store, f.name)
 	first := f.phaseCondition(t)
 	require.False(t, first.LastTransitionTime.IsZero(), "the first reschedule must stamp a time")
 
@@ -370,7 +372,7 @@ func TestScheduledThenPendingRecordsANewTransition(t *testing.T) {
 	time.Sleep(2 * time.Millisecond)
 
 	// The node flaps before the agent reports Running.
-	require.NoError(t, projects.SetProjectPending(ctx, f.name))
+	testhelper.ReleaseCleanly(t, f.store, f.name)
 	second := f.phaseCondition(t)
 
 	require.Equal(t, first.Reason, second.Reason,

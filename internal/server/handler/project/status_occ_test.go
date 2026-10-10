@@ -64,6 +64,15 @@ func (f *fakeProjectStore) UpdateProjectStatusWithRetry(
 	return nil
 }
 
+// UpdateProjectStatusForUID ignores the UID: these tests have one lifetime.
+func (f *fakeProjectStore) UpdateProjectStatusForUID(
+	ctx context.Context,
+	name, _ string,
+	mutate func(*v1.ProjectStatus) error,
+) error {
+	return f.UpdateProjectStatusWithRetry(ctx, name, mutate)
+}
+
 func newTestHandler(s store.ProjectStore) *Handler {
 	return NewHandler(
 		zap.NewNop(),

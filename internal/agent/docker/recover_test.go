@@ -38,6 +38,9 @@ type fakeDocker struct {
 	containers map[string]types.ContainerJSON
 	// volumes is the set of Docker named volumes that exist.
 	volumes map[string]bool
+	// volumeLabels holds the labels of volumes that have any, for
+	// VolumeInspect and the label filters of VolumeList.
+	volumeLabels map[string]map[string]string
 	// networks maps network name → its labels, for NetworkInspect.
 	networks map[string]map[string]string
 
@@ -59,9 +62,10 @@ type fakeDocker struct {
 
 func newFakeDocker() *fakeDocker {
 	return &fakeDocker{
-		containers: map[string]types.ContainerJSON{},
-		volumes:    map[string]bool{},
-		networks:   map[string]map[string]string{},
+		containers:   map[string]types.ContainerJSON{},
+		volumes:      map[string]bool{},
+		volumeLabels: map[string]map[string]string{},
+		networks:     map[string]map[string]string{},
 	}
 }
 
@@ -145,17 +149,20 @@ func (f *fakeDocker) VolumeInspect(_ context.Context, volumeID string) (volume.V
 	if !f.volumes[volumeID] {
 		return volume.Volume{}, errFakeNotFound
 	}
-	return volume.Volume{Name: volumeID}, nil
+	return volume.Volume{Name: volumeID, Labels: f.volumeLabels[volumeID]}, nil
 }
 
 func (f *fakeDocker) VolumeCreate(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
 	f.record("VolumeCreate:" + options.Name)
 	f.volumes[options.Name] = true
-	return volume.Volume{Name: options.Name}, nil
+	f.volumeLabels[options.Name] = options.Labels
+	return volume.Volume{Name: options.Name, Labels: options.Labels}, nil
 }
 
 func (f *fakeDocker) VolumeRemove(_ context.Context, volumeID string, _ bool) error {
 	f.record("VolumeRemove:" + volumeID)
+	delete(f.volumes, volumeID)
+	delete(f.volumeLabels, volumeID)
 	return nil
 }
 
@@ -164,17 +171,22 @@ func (f *fakeDocker) NetworkInspect(_ context.Context, networkID string, _ netwo
 	if !ok {
 		return network.Inspect{}, errFakeNotFound
 	}
-	return network.Inspect{Name: networkID, Labels: labels}, nil
+	return network.Inspect{ID: "net-" + networkID, Name: networkID, Labels: labels}, nil
 }
 
-func (f *fakeDocker) NetworkCreate(_ context.Context, name string, _ network.CreateOptions) (network.CreateResponse, error) {
+func (f *fakeDocker) NetworkCreate(_ context.Context, name string, options network.CreateOptions) (network.CreateResponse, error) {
 	f.record("NetworkCreate:" + name)
-	f.networks[name] = map[string]string{}
+	labels := options.Labels
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	f.networks[name] = labels
 	return network.CreateResponse{ID: "net-" + name}, nil
 }
 
 func (f *fakeDocker) NetworkRemove(_ context.Context, networkID string) error {
 	f.record("NetworkRemove:" + networkID)
+	delete(f.networks, strings.TrimPrefix(networkID, "net-"))
 	return nil
 }
 
@@ -218,8 +230,16 @@ func (f *fakeDocker) ContainerLogs(context.Context, string, container.LogsOption
 	return io.NopCloser(strings.NewReader("")), nil
 }
 
-func (f *fakeDocker) VolumeList(context.Context, volume.ListOptions) (volume.ListResponse, error) {
-	return volume.ListResponse{}, nil
+func (f *fakeDocker) VolumeList(_ context.Context, opts volume.ListOptions) (volume.ListResponse, error) {
+	var out volume.ListResponse
+	for name := range f.volumes {
+		labels := f.volumeLabels[name]
+		if !matchesLabelFilters(labels, opts.Filters.Get("label")) {
+			continue
+		}
+		out.Volumes = append(out.Volumes, &volume.Volume{Name: name, Labels: labels})
+	}
+	return out, nil
 }
 
 func (f *fakeDocker) Info(context.Context) (system.Info, error) {
@@ -486,6 +506,9 @@ func TestPreflightRecoveryMutatesNothing(t *testing.T) {
 	f := newRecoverFixture(t, v1.VolumeTypeEphemeral)
 	f.container("db", "exited")
 	f.docker.volumes[VolumeName("blog", "db-data")] = true
+	f.docker.volumeLabels[VolumeName("blog", "db-data")] = map[string]string{
+		labelProject: "blog", labelNamespace: "default", labelUID: f.project.UID,
+	}
 
 	require.NoError(t, f.runtime.PreflightRecovery(t.Context(), f.project, []string{"db"}))
 	assert.Empty(t, f.docker.mutations)
@@ -776,4 +799,23 @@ func TestEnsureContainerUsesTheSharedOwnershipRule(t *testing.T) {
 		require.ErrorIs(t, ensure(f), ErrContainerNotOwned)
 		assert.Empty(t, f.docker.mutations)
 	})
+}
+
+// An Ephemeral volume under the right name but of a same-name predecessor
+// lifetime is not this Project's data. Recovery must not recreate a container
+// against it; it is reported unavailable, as a missing one is, and nothing is
+// touched.
+func TestRecoverServicesRefusesAPredecessorsEphemeralVolume(t *testing.T) {
+	f := newRecoverFixture(t, v1.VolumeTypeEphemeral)
+	f.runtime.enforceUID = true
+	f.docker.volumes[VolumeName("blog", "db-data")] = true
+	f.docker.volumeLabels[VolumeName("blog", "db-data")] = map[string]string{
+		labelProject: "blog", labelNamespace: "default", labelUID: "uid-previous-lifetime",
+	}
+
+	err := f.runtime.RecoverServices(t.Context(), f.project, []string{"db"})
+
+	require.ErrorIs(t, err, ErrRecoveryVolumeUnavailable)
+	assert.ErrorContains(t, err, "another Project lifetime")
+	assert.Empty(t, f.docker.mutations)
 }

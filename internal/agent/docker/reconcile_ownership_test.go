@@ -63,17 +63,24 @@ func TestReconcileRollbackLeavesAnotherAssignmentsContainer(t *testing.T) {
 	assert.Contains(t, f.docker.containers, ContainerName("blog", "worker"))
 }
 
-// Deleting a Project is broader than a rollback: every container labelled for
-// it goes, whichever generation left it. RemoveProject keeps that.
-func TestRemoveProjectStillRemovesEarlierGenerations(t *testing.T) {
+// Deleting a Project is broader than a rollback: every container of its
+// lifetime goes, whichever generation left it — but not a same-name
+// predecessor's, which is another lifetime's to clean up.
+func TestDeletingAProjectRemovesEveryGenerationOfItsLifetime(t *testing.T) {
 	f := newStrictFixture(t)
 	f.container("db", "running")
 	f.staleContainer("worker", "exited", labelGeneration, "6")
+	f.staleContainer("cache", "exited", labelUID, "uid-previous-lifetime")
 
-	require.NoError(t, f.runtime.RemoveProject(t.Context(), f.project.Namespace, f.project.Name, f.project.Spec))
+	lifetime := Assignment{Namespace: f.project.Namespace, Project: f.project.Name, UID: f.project.UID, AllGenerations: true}
+	require.NoError(t, f.runtime.RemoveAssignment(t.Context(), lifetime))
 
 	assert.True(t, removed(f, "blog-db"))
 	assert.True(t, removed(f, "blog-worker"), "a deleted Project takes its earlier generations' containers with it")
+	assert.False(t, removed(f, "blog-cache"), "a deleted Project took a predecessor lifetime's container")
+	left, err := f.runtime.AssignmentRemaining(t.Context(), lifetime)
+	require.NoError(t, err)
+	assert.Empty(t, left)
 }
 
 // Compatibility mode keeps its contract: a container without UID and

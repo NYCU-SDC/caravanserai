@@ -10,6 +10,8 @@
 //	PATCH  /api/v1/projects/{name}/status    — Agent reports observed phase (Running / Failed / Terminated)
 //	PATCH  /api/v1/projects/{name}/conditions/{type}  — Agent sets one condition without touching phase
 //	DELETE /api/v1/projects/{name}/conditions/{type}  — Agent clears one condition
+//	PUT    /api/v1/projects/{name}/recovery/workload-stopped   — assigned Agent records that every container is stopped
+//	PUT    /api/v1/projects/{name}/recovery/resources-removed  — cleanup owner records that its resources are removed
 package project
 
 import (
@@ -71,6 +73,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("PATCH /api/v1/projects/{name}/status", mid.HandlerFunc(h.patchStatus))
 	mux.HandleFunc("PATCH /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.patchCondition))
 	mux.HandleFunc("DELETE /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.deleteCondition))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/workload-stopped", mid.HandlerFunc(h.putWorkloadStopped))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/resources-removed", mid.HandlerFunc(h.putResourcesRemoved))
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
@@ -268,6 +272,11 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 	// directly, while a migrated Unknown row cannot.
 	project.Status.AssignmentGeneration = 0
 	project.Status.AssignmentHistory = v1.AssignmentHistoryNeverAssigned
+
+	// Recovery is server-owned for the same reason: recovery controllers read
+	// its retry counters and evidence as fact, so a value a client injected at
+	// creation would later be acted on as if the server had recorded it.
+	project.Status.Recovery = nil
 
 	if err := h.store.CreateProject(traceCtx, &project); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
@@ -535,15 +544,42 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 		//
 		// The phase is set on whatever status the store read, not on the copy
 		// fetched above: a controller may have written NodeRef or a condition
-		// in between, and replacing the whole status would discard it.
-		err := h.store.UpdateProjectStatusWithRetry(traceCtx, name, func(status *v1.ProjectStatus) error {
+		// in between, and replacing the whole status would discard it. The
+		// write is pinned to the UID fetched above, so the Project the caller
+		// asked to delete is the one that terminates, never a same-name
+		// successor created in between.
+		now := time.Now().UTC()
+		uid := project.ObjectMeta.UID
+		err := h.store.UpdateProjectStatusForUID(traceCtx, name, uid, func(status *v1.ProjectStatus) error {
+			if status.Phase == v1.ProjectPhaseTerminating {
+				return nil
+			}
 			status.Phase = v1.ProjectPhaseTerminating
+			// The assigned Node now owes the removal of everything it holds
+			// for this assignment. Recorded in the same write as the phase,
+			// so the obligation list stays the complete set of Nodes that
+			// may hold resources. A Project with no nodeRef has no current
+			// assignment; any earlier Node is already in the list from its
+			// release.
+			if status.NodeRef != "" {
+				status.EnsureRecovery().AddObligation(v1.AssignmentIdentity{
+					ProjectUID:           uid,
+					NodeName:             status.NodeRef,
+					AssignmentGeneration: status.AssignmentGeneration,
+				}, now, v1.ReleaseByDeletion)
+			}
 			return nil
 		})
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				h.problemWriter.WriteError(traceCtx, w,
 					fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+				return
+			}
+			if errors.Is(err, store.ErrStaleAssignment) {
+				h.problemWriter.WriteError(traceCtx, w,
+					fmt.Errorf("project %s was deleted and recreated during this request; retry to delete the new one: %w",
+						name, store.ErrConflictState), logger)
 				return
 			}
 			logger.Error("Marking project Terminating failed", zap.String("name", name), zap.Error(err))
@@ -647,6 +683,12 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 	mutate := func(status *v1.ProjectStatus) error {
 		transitioned := status.Phase != req.Phase
 		status.Phase = req.Phase
+		// A reported failure ends the healthy window in the same write. This
+		// is the one recovery field an Agent report may change, and only to
+		// clear it.
+		if req.Phase == v1.ProjectPhaseFailed {
+			status.Recovery.ClearHealthyWindow()
+		}
 
 		if req.Reason == "" && req.Message == "" {
 			return nil
@@ -702,6 +744,7 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 var agentWritableConditions = map[v1.ConditionType]bool{
 	v1.ConditionTypeMaintenance:     true,
 	v1.ConditionTypeRecoveryBlocked: true,
+	v1.ConditionTypeTeardownBlocked: true,
 }
 
 // conditionPatchRequest is the body sent to
@@ -874,4 +917,89 @@ func (h *Handler) deleteCondition(w http.ResponseWriter, r *http.Request) {
 		zap.String("condition", string(condType)),
 	)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// evidenceRequest is the body of the recovery evidence endpoints: the
+// assignment fence and nothing else. The evidence identity is the fence; the
+// server stamps the observation time.
+type evidenceRequest struct {
+	UID                  string `json:"uid"`
+	NodeRef              string `json:"nodeRef"`
+	AssignmentGeneration *int64 `json:"assignmentGeneration"`
+}
+
+// decodeEvidenceFence reads an evidenceRequest and requires a complete fence.
+//
+// Unlike the condition and status paths, a missing fence is refused in every
+// mode: the evidence records which assignment it is about, and without a fence
+// there is no assignment to record.
+func (h *Handler) decodeEvidenceFence(ctx context.Context, w http.ResponseWriter, r *http.Request, logger *zap.Logger, name string) (store.AssignmentRef, bool) {
+	var req evidenceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.problemWriter.WriteError(ctx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return store.AssignmentRef{}, false
+	}
+	if req.UID == "" || req.NodeRef == "" || req.AssignmentGeneration == nil {
+		h.problemWriter.WriteError(ctx, w,
+			fmt.Errorf("%w: project %q: evidence requires a complete assignment fence", store.ErrStaleAssignment, name), logger)
+		return store.AssignmentRef{}, false
+	}
+	return store.AssignmentRef{UID: req.UID, NodeRef: req.NodeRef, Generation: *req.AssignmentGeneration}, true
+}
+
+// writeEvidenceResult maps a store result for an evidence write to a response.
+func (h *Handler) writeEvidenceResult(ctx context.Context, w http.ResponseWriter, logger *zap.Logger, name, kind string, err error) {
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.problemWriter.WriteError(ctx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		}
+		if !errors.Is(err, store.ErrStaleAssignment) && !errors.Is(err, store.ErrConflictState) {
+			logger.Error("Recording recovery evidence failed", zap.String("name", name), zap.String("evidence", kind), zap.Error(err))
+		}
+		h.problemWriter.WriteError(ctx, w, err, logger)
+		return
+	}
+	logger.Info("Recovery evidence recorded", zap.String("project", name), zap.String("evidence", kind))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// putWorkloadStopped handles PUT /api/v1/projects/{name}/recovery/workload-stopped.
+//
+// The currently assigned Agent calls it after confirming every Project
+// container is stopped. The store checks the fence and phase atomically with
+// the write; re-recording the same evidence is a no-op.
+func (h *Handler) putWorkloadStopped(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putWorkloadStopped")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	ref, ok := h.decodeEvidenceFence(traceCtx, w, r, logger, name)
+	if !ok {
+		return
+	}
+	err := h.store.RecordWorkloadStopped(traceCtx, name, ref, time.Now().UTC())
+	h.writeEvidenceResult(traceCtx, w, logger, name, "WorkloadStopped", err)
+}
+
+// putResourcesRemoved handles PUT /api/v1/projects/{name}/recovery/resources-removed.
+//
+// The Agent of a cleanup obligation calls it after removing every
+// deletion-scoped runtime resource it held for that obligation's assignment.
+// It resolves that one obligation and grants no other authority.
+func (h *Handler) putResourcesRemoved(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putResourcesRemoved")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	ref, ok := h.decodeEvidenceFence(traceCtx, w, r, logger, name)
+	if !ok {
+		return
+	}
+	err := h.store.RecordResourcesRemoved(traceCtx, name, ref, time.Now().UTC())
+	h.writeEvidenceResult(traceCtx, w, logger, name, "ResourcesRemoved", err)
 }

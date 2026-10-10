@@ -2,9 +2,12 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/store"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -184,4 +187,21 @@ func TestProjectSchedulerReconcile(t *testing.T) {
 		assert.False(t, res.Requeue)
 		assert.Empty(t, ps.SetProjectScheduledCalls)
 	})
+}
+
+// A Project whose previous Node still owes cleanup is refused by the store.
+// That is a wait, not a fault: the reconcile succeeds without a requeue, and
+// the periodic resync of Pending Projects tries again. Returning the error
+// would put it on the manager's error backoff and log it as a failure every
+// round until the cleanup is reported.
+func TestProjectSchedulerWaitsOutCleanupObligation(t *testing.T) {
+	ps := newFakeSchedulerProjectStore()
+	ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhasePending}
+	ps.scheduleErrs["my-app"] = fmt.Errorf("%w: node-a owes cleanup", store.ErrConflictState)
+	ctrl := NewProjectSchedulerController(zap.NewNop(), ps, newFakeSchedulerNodeStore("node-b"), nil)
+
+	res, err := ctrl.Reconcile(context.Background(), "my-app")
+	require.NoError(t, err)
+	assert.False(t, res.Requeue)
+	assert.Equal(t, v1.ProjectPhasePending, ps.projects["my-app"].Phase)
 }

@@ -251,6 +251,15 @@ type ProjectStore interface {
 	// version, publishes no event, and returns nil.
 	UpdateProjectStatusWithRetry(ctx context.Context, name string, mutate func(*v1.ProjectStatus) error) error
 
+	// UpdateProjectStatusForUID is UpdateProjectStatusWithRetry pinned to one
+	// Project lifetime: the read must find uid under name, and the swap
+	// matches uid as well as the version read. Use it when the caller decided
+	// what to write from an earlier read of a specific lifetime, so a
+	// delete-and-recreate in between cannot redirect the write to a same-name
+	// successor. Returns ErrStaleAssignment when name now holds another
+	// lifetime, and ErrNotFound when it holds none.
+	UpdateProjectStatusForUID(ctx context.Context, name, uid string, mutate func(*v1.ProjectStatus) error) error
+
 	// PatchProjectCondition replaces exactly one named condition inside a
 	// Project's status.conditions, leaving phase and every other status field
 	// untouched.  Used by the agent to publish Maintenance while controllers
@@ -288,6 +297,27 @@ type ProjectStore interface {
 	// PatchProjectConditionFenced.
 	ClearProjectConditionFenced(ctx context.Context, name string, ref AssignmentRef, conditionType v1.ConditionType) error
 
+	// RecordWorkloadStopped stores the currently assigned Agent's evidence that
+	// every Project container is stopped. The fence and the phase (Scheduled,
+	// Running, Failed or Terminating) are checked on the same snapshot the
+	// compare-and-swap is versioned against. The evidence identity is taken
+	// from ref, never from the caller separately. The first evidence for an
+	// assignment wins: re-recording it is a no-op that keeps the original
+	// ObservedAt and bumps no version. Returns ErrStaleAssignment for a fence
+	// that is not current, ErrConflictState for a disallowed phase, and
+	// ErrNotFound when the Project is gone.
+	RecordWorkloadStopped(ctx context.Context, name string, ref AssignmentRef, observedAt time.Time) error
+
+	// RecordResourcesRemoved resolves one cleanup obligation: owner must be
+	// the assignment of an obligation in the Project's list, for the same
+	// Project UID. Ownership is checked on the snapshot the UID- and
+	// version-pinned swap is based on, so an obligation list or Project that
+	// changes in between turns the swap into a retry that re-checks. The first
+	// evidence for an obligation wins. Returns ErrStaleAssignment when owner
+	// matches no obligation, and ErrNotFound when the Project is gone. It grants
+	// no status-write or workload-start authority.
+	RecordResourcesRemoved(ctx context.Context, name string, owner AssignmentRef, observedAt time.Time) error
+
 	// UpdateProjectSpec writes only the user-mutable fields of a Project
 	// (spec, labels, annotations). Status is preserved. The update is only
 	// allowed when the project's current phase is Pending or Failed; returns
@@ -300,6 +330,12 @@ type ProjectStore interface {
 	// ProjectReschedulerController to find work that needs to be moved or
 	// force-terminated when a node goes NotReady.
 	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*v1.Project, error)
+
+	// ListProjectsOwingCleanup returns every Project whose cleanup obligation
+	// list has an entry for nodeName, resolved or not, in any phase. Use
+	// Project.CleanupTasksFor to pick the entries that are tasks for that
+	// Node.
+	ListProjectsOwingCleanup(ctx context.Context, nodeName string) ([]*v1.Project, error)
 }
 
 // ============================================================

@@ -12,6 +12,56 @@
       ],
       "description": "Whether a Project has ever held a Node assignment, and how confidently that is known."
     },
+    "AssignmentIdentity": {
+      "properties": {
+        "projectUID": {
+          "type": "string"
+        },
+        "nodeName": {
+          "type": "string"
+        },
+        "assignmentGeneration": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "projectUID",
+        "nodeName",
+        "assignmentGeneration"
+      ],
+      "description": "AssignmentIdentity names one assignment of one Project lifetime."
+    },
+    "CleanupObligation": {
+      "properties": {
+        "assignment": {
+          "$ref": "#/$defs/AssignmentIdentity",
+          "description": "Assignment is the released assignment. Its Agent is the cleanup owner."
+        },
+        "releasedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ReleasedAt is when the assignment was given up."
+        },
+        "releaseAuthorization": {
+          "type": "string",
+          "description": "ReleaseAuthorization is what permitted giving the assignment up."
+        },
+        "resourcesRemoved": {
+          "$ref": "#/$defs/ResourcesRemovedEvidence",
+          "description": "ResourcesRemoved is the cleanup owner's evidence that every\ndeletion-scoped runtime resource it held for this assignment is gone.\nNil means the obligation is unresolved."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "assignment",
+        "releasedAt",
+        "releaseAuthorization"
+      ],
+      "description": "CleanupObligation is one released assignment whose Node may still hold the Project's runtime resources."
+    },
     "Condition": {
       "properties": {
         "type": {
@@ -249,6 +299,46 @@
       ],
       "description": "Lifecycle state of a Project as maintained by the Controller Manager."
     },
+    "ProjectRecoveryStatus": {
+      "properties": {
+        "rescheduleAttempts": {
+          "type": "integer",
+          "description": "RescheduleAttempts counts cross-Node reschedules in the current incident."
+        },
+        "lastAttemptAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "LastAttemptAt is when the most recent reschedule was attempted. Backoff\nis computed from it."
+        },
+        "healthySince": {
+          "type": "string",
+          "format": "date-time",
+          "description": "HealthySince is when the Project was last seen continuously healthy. It\nis meaningful only while HealthySinceGeneration equals the current\nassignment generation: a window observed under an older assignment says\nnothing about the current one."
+        },
+        "healthySinceGeneration": {
+          "type": "integer",
+          "description": "HealthySinceGeneration is the assignment generation HealthySince was\nobserved under."
+        },
+        "preferredNode": {
+          "type": "string",
+          "description": "PreferredNode is a scheduler hint only. Status.NodeRef remains the\nauthoritative assignment."
+        },
+        "workloadStopped": {
+          "$ref": "#/$defs/WorkloadStoppedEvidence",
+          "description": "WorkloadStopped is the durable no-start latch for one assignment\ngeneration: the assigned Agent confirmed that every Project container is\nstopped. It is not proof that runtime resources were removed, and it\nalone never authorizes final deletion. Only a committed newer assignment\nclears it; time alone does not."
+        },
+        "cleanupObligations": {
+          "items": {
+            "$ref": "#/$defs/CleanupObligation"
+          },
+          "type": "array",
+          "description": "CleanupObligations lists every assignment this Project has given up\nwhose Node may still hold its runtime resources. An entry is appended in\nthe same write that releases an assignment or moves the Project to\nTerminating, so the list is the complete set of Nodes that may still\nhold resources. Final deletion requires every entry to be resolved."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ProjectRecoveryStatus is the structured recovery state of a Project."
+    },
     "ProjectSize": {
       "type": "string",
       "enum": [
@@ -333,11 +423,29 @@
           },
           "type": "array",
           "description": "Conditions is a list of granular observable states."
+        },
+        "recovery": {
+          "$ref": "#/$defs/ProjectRecoveryStatus",
+          "description": "Recovery is the durable state of cross-Node recovery: retry bookkeeping\nand the evidence that lets an assignment be released or a record be\ndeleted. It lives here rather than in Condition messages because it must\nsurvive server restarts and duplicate controller events, and because code\nmust never recover a counter or an identity by parsing a message.\n\nServer-owned; not a user manifest field. Nil until recovery first records\nsomething."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "ProjectStatus is written by the Controller Manager and Agent."
+    },
+    "ResourcesRemovedEvidence": {
+      "properties": {
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "observedAt"
+      ],
+      "description": "ResourcesRemovedEvidence records when the cleanup owner of an obligation finished removing every deletion-scoped runtime resource it held."
     },
     "SecretKeySelector": {
       "properties": {
@@ -440,6 +548,24 @@
         "Ephemeral"
       ],
       "description": "Governs the lifecycle and backup behaviour of a Volume."
+    },
+    "WorkloadStoppedEvidence": {
+      "properties": {
+        "assignment": {
+          "$ref": "#/$defs/AssignmentIdentity"
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "assignment",
+        "observedAt"
+      ],
+      "description": "WorkloadStoppedEvidence records that the Agent of Assignment confirmed every Project container stopped."
     }
   },
   "title": "Project"

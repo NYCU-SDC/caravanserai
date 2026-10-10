@@ -84,7 +84,7 @@ func TestReconcileProjectsSkipsBusyProject(t *testing.T) {
 		},
 	}
 
-	reconcileProjects(context.Background(), client, rt, nil, &BackupSupport{Coordinator: coordinator}, nil, nil, false, zap.NewNop())
+	reconcileProjects(context.Background(), client, rt, nil, &BackupSupport{Coordinator: coordinator}, nil, nil, nil, false, zap.NewNop())
 
 	assert.Empty(t, *updates, "a Project with an operation in flight must produce no status write")
 }
@@ -101,7 +101,7 @@ func TestReconcileProjectsProcessesUnclaimedProject(t *testing.T) {
 		},
 	}
 
-	reconcileProjects(context.Background(), client, rt, nil, &BackupSupport{Coordinator: coordinator}, nil, nil, false, zap.NewNop())
+	reconcileProjects(context.Background(), client, rt, nil, &BackupSupport{Coordinator: coordinator}, nil, nil, nil, false, zap.NewNop())
 
 	require.Len(t, *updates, 1)
 	assert.Equal(t, v1.ProjectPhaseFailed, (*updates)[0].Phase)
@@ -124,7 +124,7 @@ func TestReconcileProjectsSkipsOnlyTheBusyProject(t *testing.T) {
 		},
 	}
 
-	reconcileProjects(context.Background(), client, rt, nil, &BackupSupport{Coordinator: coordinator}, nil, nil, false, zap.NewNop())
+	reconcileProjects(context.Background(), client, rt, nil, &BackupSupport{Coordinator: coordinator}, nil, nil, nil, false, zap.NewNop())
 
 	require.Len(t, *updates, 1, "only the unclaimed Project is processed")
 	assert.Equal(t, "wiki", (*updates)[0].ProjectName)
@@ -146,23 +146,15 @@ func TestTerminateOneClaimsAndReleases(t *testing.T) {
 	// terminateOne must claim OpTerminate before touching Docker so a backup
 	// tick cannot start mid-teardown, and must release the claim on every exit
 	// path so a stuck claim never blocks the Project forever.
-	client, updates := newReconcileServer(t, nil)
+	client, writes := terminationServer(t, http.StatusNoContent, nil)
 	coordinator := backup.NewCoordinator()
-
-	var removed bool
-	rt := &mockRuntime{
-		removeFn: func(context.Context, string, string, v1.ProjectSpec) error {
-			removed = true
-			return nil
-		},
-	}
+	res := &fakeResource{}
 
 	p := terminatingProject("blog")
-	terminateOne(context.Background(), client, rt, nil, coordinator, p, zap.NewNop())
+	terminateOne(context.Background(), client, &mockRuntime{}, nil, coordinator, newAssignmentCleaner(res), p, zap.NewNop())
 
-	assert.True(t, removed, "RemoveProject must be called when the claim succeeds")
-	require.Len(t, *updates, 1)
-	assert.Equal(t, v1.ProjectPhaseTerminated, (*updates)[0].Phase)
+	assert.Len(t, res.removed, 1, "the teardown must run when the claim succeeds")
+	assert.Equal(t, []string{"ResourcesRemoved", string(v1.ProjectPhaseTerminated)}, *writes)
 
 	key := backup.ResourceKey{Namespace: "default", Name: "blog"}
 	assert.False(t, coordinator.IsBusy(key), "the claim must be released after terminateOne returns")
@@ -172,27 +164,20 @@ func TestTerminateOneSkipsWhenAlreadyClaimed(t *testing.T) {
 	// Simulates a backup winning the race between reconcileProjects' IsBusy
 	// check and terminateOne's own TryClaim: teardown must not proceed, and
 	// nothing Docker-side or status-side should happen this tick.
-	client, updates := newReconcileServer(t, nil)
+	client, writes := terminationServer(t, http.StatusNoContent, nil)
 	coordinator := backup.NewCoordinator()
 
 	key := backup.ResourceKey{Namespace: "default", Name: "blog"}
 	release, ok := coordinator.TryClaim(key, backup.OpBackup)
 	require.True(t, ok)
 	defer release()
-
-	var removed bool
-	rt := &mockRuntime{
-		removeFn: func(context.Context, string, string, v1.ProjectSpec) error {
-			removed = true
-			return nil
-		},
-	}
+	res := &fakeResource{}
 
 	p := terminatingProject("blog")
-	terminateOne(context.Background(), client, rt, nil, coordinator, p, zap.NewNop())
+	terminateOne(context.Background(), client, &mockRuntime{}, nil, coordinator, newAssignmentCleaner(res), p, zap.NewNop())
 
-	assert.False(t, removed, "RemoveProject must not run while another operation holds the claim")
-	assert.Empty(t, *updates, "no status write when termination was deferred")
+	assert.Empty(t, res.removed, "the teardown must not run while another operation holds the claim")
+	assert.Empty(t, *writes, "no status write when termination was deferred")
 }
 
 func TestReconcileProjectsWithoutBackupSupport(t *testing.T) {
@@ -206,7 +191,7 @@ func TestReconcileProjectsWithoutBackupSupport(t *testing.T) {
 		},
 	}
 
-	reconcileProjects(context.Background(), client, rt, nil, nil, nil, nil, false, zap.NewNop())
+	reconcileProjects(context.Background(), client, rt, nil, nil, nil, nil, nil, false, zap.NewNop())
 
 	require.Len(t, *updates, 1)
 	assert.Equal(t, v1.ProjectPhaseFailed, (*updates)[0].Phase)

@@ -7,8 +7,8 @@
 //     the project spec maps to exactly one container.
 //   - Container names follow the deterministic format "{project}-{service}",
 //     which allows idempotent reconciliation without persisting container IDs.
-//   - Ephemeral volumes are created as Docker named volumes and removed when
-//     RemoveProject is called.
+//   - Ephemeral volumes are created as Docker named volumes, labelled with the
+//     Project UID, and removed with the lifetime that created them.
 package docker
 
 import (
@@ -164,14 +164,6 @@ type Runtime interface {
 	// The network and any Ephemeral volumes are also created on demand.
 	ReconcileProject(ctx context.Context, project *v1.Project) error
 
-	// RemoveProject tears down all resources that were created for the project:
-	// containers (stop + remove), the bridge network, and Ephemeral volumes.
-	// Managed volume host directories are deliberately retained; their paths are
-	// logged so an operator can reclaim them. namespace is needed to locate
-	// those directories. It is safe to call even if the project was only
-	// partially created.
-	RemoveProject(ctx context.Context, namespace, projectName string, spec v1.ProjectSpec) error
-
 	// InspectProject returns the current state of every service container for
 	// the project.  If a container for a service does not exist yet, it is
 	// omitted from the returned slice (the caller can detect this by comparing
@@ -195,9 +187,8 @@ type Runtime interface {
 	// RecoverServices puts the named services back, and touches nothing else.
 	//
 	// It exists because ReconcileProject cannot be used on a Project that is
-	// already serving traffic: when any step fails it rolls back by calling
-	// RemoveProject, which deletes every container, the network and the
-	// Ephemeral volumes. That is right for a Project being created — the
+	// already serving traffic: when any step fails it rolls back, deleting the
+	// assignment's containers, the network and the Ephemeral volumes. That is right for a Project being created — the
 	// rollback removes a half-built thing — and catastrophic for one being
 	// repaired, where a failure to recreate one container would take the
 	// healthy ones and their data with it.
@@ -287,9 +278,9 @@ type Runtime interface {
 	// project — containers, the bridge network, and named volumes — without
 	// needing its spec.
 	//
-	// RemoveProject cannot be used for an orphan: it derives volume handling
-	// from the spec, and the spec of a project the server no longer returns is
-	// exactly what the agent does not have. Working from labels alone also
+	// A spec-driven removal cannot be used for an orphan: the spec of a
+	// project the server no longer returns is exactly what the agent does not
+	// have. Working from labels alone also
 	// keeps Managed volume data safe by construction, because Managed volumes
 	// are host bind directories rather than Docker volumes and so are not
 	// reachable through a label filter at all.

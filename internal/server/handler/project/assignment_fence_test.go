@@ -26,7 +26,9 @@ type fenceFakeStore struct {
 
 	fencedStatusCalls   int
 	unfencedStatusCalls int
+	uidStatusCalls      int
 	lastRef             store.AssignmentRef
+	lastUID             string
 
 	deleteCalls      int
 	terminatingCalls int
@@ -61,6 +63,19 @@ func (f *fenceFakeStore) UpdateProjectStatusWithRetry(_ context.Context, _ strin
 		return f.returnErr
 	}
 	st := v1.ProjectStatus{}
+	return mutate(&st)
+}
+
+func (f *fenceFakeStore) UpdateProjectStatusForUID(_ context.Context, _ string, uid string, mutate func(*v1.ProjectStatus) error) error {
+	f.uidStatusCalls++
+	f.lastUID = uid
+	if f.returnErr != nil {
+		return f.returnErr
+	}
+	st := v1.ProjectStatus{}
+	if f.getProject != nil {
+		st = f.getProject.Status
+	}
 	return mutate(&st)
 }
 
@@ -235,8 +250,8 @@ func TestDeleteGuardHonoursAssignmentHistory(t *testing.T) {
 		if s.deleteCalls != 0 {
 			t.Fatalf("deleteCalls = %d, want 0; a Known Project must not be hard-deleted", s.deleteCalls)
 		}
-		if s.unfencedStatusCalls != 1 {
-			t.Fatalf("terminating transition not written (unfenced calls = %d)", s.unfencedStatusCalls)
+		if s.uidStatusCalls != 1 {
+			t.Fatalf("terminating transition not written (UID-pinned calls = %d)", s.uidStatusCalls)
 		}
 	})
 
