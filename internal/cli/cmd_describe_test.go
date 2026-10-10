@@ -137,6 +137,9 @@ var describeProjectCoveredFields = newStringSet(
 	"Status.Phase",
 	"Status.NodeRef",
 	"Status.FailedNodes",
+	"Status.Eviction.Reason",
+	"Status.Eviction.FromNode",
+	"Status.Eviction.State",
 	"Status.AssignmentGeneration",
 	"Status.AssignmentHistory",
 	"Status.Conditions",
@@ -264,6 +267,28 @@ func TestDescribeProjectFailedNodes(t *testing.T) {
 			var buf bytes.Buffer
 			describeProject(&buf, &v1.Project{Status: v1.ProjectStatus{FailedNodes: tt.nodes}})
 			assert.Regexp(t, `(?m)^  Failed Nodes:\s+`+regexp.QuoteMeta(tt.want)+`$`, buf.String())
+		})
+	}
+}
+
+func TestDescribeProjectEviction(t *testing.T) {
+	tests := []struct {
+		name     string
+		eviction *v1.ProjectEviction
+		want     string
+	}{
+		{name: "none", want: "<none>"},
+		{
+			name:     "in progress",
+			eviction: &v1.ProjectEviction{Reason: "Drain", FromNode: "pve1", State: v1.EvictionStateBackingUp},
+			want:     "Drain off pve1 (BackingUp)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			describeProject(&buf, &v1.Project{Status: v1.ProjectStatus{Eviction: tt.eviction}})
+			assert.Regexp(t, `(?m)^  Eviction:\s+`+regexp.QuoteMeta(tt.want)+`$`, buf.String())
 		})
 	}
 }

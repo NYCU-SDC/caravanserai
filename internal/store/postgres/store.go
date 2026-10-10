@@ -1006,6 +1006,10 @@ func copyProjectStatus(src v1.ProjectStatus) v1.ProjectStatus {
 	dst := src
 	dst.Conditions = slices.Clone(src.Conditions)
 	dst.FailedNodes = slices.Clone(src.FailedNodes)
+	if src.Eviction != nil {
+		e := *src.Eviction
+		dst.Eviction = &e
+	}
 	return dst
 }
 

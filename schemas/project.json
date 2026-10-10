@@ -79,6 +79,15 @@
       "type": "object",
       "description": "EnvVarSource holds the possible indirect sources for an EnvVar value."
     },
+    "EvictionState": {
+      "type": "string",
+      "enum": [
+        "Queued",
+        "BackingUp",
+        "Moving"
+      ],
+      "description": "How far a planned move of a Project has got."
+    },
     "IngressAccess": {
       "properties": {
         "scope": {
@@ -237,6 +246,42 @@
       ],
       "description": "ProjectBackupConfig configures periodic object-store backup of a Project's Managed volumes."
     },
+    "ProjectEviction": {
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "Reason says who asked for the move, e.g. \"Drain\" or \"FailBack\"."
+        },
+        "fromNode": {
+          "type": "string",
+          "description": "FromNode is the Node the Project is being moved off. The scheduler does\nnot place the Project back on it while the move is in progress."
+        },
+        "state": {
+          "$ref": "#/$defs/EvictionState",
+          "description": "State is how far the move has got."
+        },
+        "requestedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RequestedAt is when the move was asked for; queued moves start oldest\nfirst."
+        },
+        "stateSince": {
+          "type": "string",
+          "format": "date-time",
+          "description": "StateSince is when State last changed. A result the agent reported\nbefore it belongs to an earlier move and is ignored."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "reason",
+        "fromNode",
+        "state",
+        "requestedAt",
+        "stateSince"
+      ],
+      "description": "ProjectEviction describes a planned move of a Project off a healthy Node."
+    },
     "ProjectPhase": {
       "type": "string",
       "enum": [
@@ -326,6 +371,10 @@
           },
           "type": "array",
           "description": "FailedNodes names the Nodes this Project was moved off after it was\nreported Failed, oldest first. The scheduler never places the Project on\none of them, so a move actually changes Node, and its length is how many\nmoves have been spent against the retry cap.\n\nIt is cleared when the Project has run on a new Node long enough to count\nas recovered, and when the user applies the Project again.\n\nServer-owned; not a user manifest field."
+        },
+        "eviction": {
+          "$ref": "#/$defs/ProjectEviction",
+          "description": "Eviction is set while the Project is being moved off a healthy Node on\npurpose — a drain or a fail-back — and cleared when the move ends,\nwhether it landed or was abandoned. See ProjectEviction.\n\nServer-owned; not a user manifest field."
         },
         "conditions": {
           "items": {

@@ -63,6 +63,9 @@ func (c *Config) Validate() error {
 	if (c.HeadscaleAPIURL == "") != (c.HeadscaleAPIKey == "") {
 		return errors.New("headscale_api_url and headscale_api_key must be set together (or both left empty to disable overlay administration)")
 	}
+	if c.MaxInFlightEvictions < 0 {
+		return errors.New("max_inflight_evictions must not be negative")
+	}
 	return nil
 }
 

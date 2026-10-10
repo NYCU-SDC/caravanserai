@@ -186,6 +186,15 @@ func describeProjectSize(spec v1.ProjectSpec) string {
 	return string(spec.Size)
 }
 
+// describeEviction summarises a planned move in progress, e.g.
+// "Drain off pve1 (BackingUp)".
+func describeEviction(e *v1.ProjectEviction) string {
+	if e == nil {
+		return "<none>"
+	}
+	return fmt.Sprintf("%s off %s (%s)", e.Reason, e.FromNode, e.State)
+}
+
 // describeProject writes a kubectl-style detailed view of a Project.
 func describeProject(w io.Writer, project *v1.Project) {
 	// Basic info
@@ -288,6 +297,7 @@ func describeProject(w io.Writer, project *v1.Project) {
 	printField(w, "  Phase", stringOrNone(string(project.Status.Phase)))
 	printField(w, "  Node", stringOrNone(project.Status.NodeRef))
 	printField(w, "  Failed Nodes", stringOrNone(strings.Join(project.Status.FailedNodes, ", ")))
+	printField(w, "  Eviction", describeEviction(project.Status.Eviction))
 	printField(w, "  Assignment Generation", fmt.Sprintf("%d", project.Status.AssignmentGeneration))
 	printField(w, "  Assignment History", stringOrNone(string(project.Status.AssignmentHistory)))
 

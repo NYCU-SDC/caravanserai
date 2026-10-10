@@ -121,3 +121,37 @@ func TestServerConfig_Validate_RequiresDatabaseURL(t *testing.T) {
 	err := (&Config{}).Validate()
 	assert.ErrorContains(t, err, "database_url is required")
 }
+
+func TestServerMaxInFlightEvictions(t *testing.T) {
+	t.Run("loaded from the environment", func(t *testing.T) {
+		t.Setenv("MAX_INFLIGHT_EVICTIONS", "2")
+		got, err := FromEnv(&Config{}, NewConfigLogger())
+		require.NoError(t, err)
+		assert.Equal(t, 2, got.MaxInFlightEvictions)
+	})
+
+	t.Run("unset leaves the default to the controller", func(t *testing.T) {
+		t.Setenv("MAX_INFLIGHT_EVICTIONS", "")
+		got, err := FromEnv(&Config{}, NewConfigLogger())
+		require.NoError(t, err)
+		assert.Zero(t, got.MaxInFlightEvictions)
+	})
+
+	t.Run("not a number is an error", func(t *testing.T) {
+		t.Setenv("MAX_INFLIGHT_EVICTIONS", "one")
+		_, err := FromEnv(&Config{}, NewConfigLogger())
+		assert.ErrorContains(t, err, "MAX_INFLIGHT_EVICTIONS")
+	})
+
+	t.Run("negative is rejected", func(t *testing.T) {
+		cfg := Config{DatabaseURL: "postgres://localhost/cara", MaxInFlightEvictions: -1}
+		assert.ErrorContains(t, cfg.Validate(), "max_inflight_evictions")
+	})
+
+	t.Run("zero and positive are valid", func(t *testing.T) {
+		for _, n := range []int{0, 1, 3} {
+			cfg := Config{DatabaseURL: "postgres://localhost/cara", MaxInFlightEvictions: n}
+			assert.NoError(t, cfg.Validate(), "max_inflight_evictions=%d", n)
+		}
+	})
+}

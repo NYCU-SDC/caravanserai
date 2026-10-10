@@ -382,6 +382,60 @@ func (s ProjectSpec) EffectiveSize() ProjectSize {
 	return s.Size
 }
 
+// EvictionState is how far a planned move of a Project has got.
+type EvictionState string
+
+const (
+	// EvictionStateQueued means the move was asked for and waits for a slot:
+	// only a limited number of moves run at once.
+	EvictionStateQueued EvictionState = "Queued"
+
+	// EvictionStateBackingUp means the agent on FromNode has been asked to
+	// stop the Project and take a fresh backup, leaving it stopped, so the
+	// new Node restores everything written up to the move.
+	EvictionStateBackingUp EvictionState = "BackingUp"
+
+	// EvictionStateMoving means the Project is back in Pending, off FromNode,
+	// waiting for the scheduler to place it somewhere else.
+	EvictionStateMoving EvictionState = "Moving"
+)
+
+// JSONSchema returns a JSON Schema with the allowed EvictionState values.
+func (EvictionState) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type: "string",
+		Enum: []any{
+			string(EvictionStateQueued),
+			string(EvictionStateBackingUp),
+			string(EvictionStateMoving),
+		},
+		Description: "How far a planned move of a Project has got.",
+	}
+}
+
+// ProjectEviction describes a planned move of a Project off a healthy Node.
+// The Node is healthy, so — unlike failover — a fresh backup can be taken
+// before the Project leaves it, and nothing written before the move is lost.
+type ProjectEviction struct {
+	// Reason says who asked for the move, e.g. "Drain" or "FailBack".
+	Reason string `json:"reason" yaml:"reason"`
+
+	// FromNode is the Node the Project is being moved off. The scheduler does
+	// not place the Project back on it while the move is in progress.
+	FromNode string `json:"fromNode" yaml:"fromNode"`
+
+	// State is how far the move has got.
+	State EvictionState `json:"state" yaml:"state"`
+
+	// RequestedAt is when the move was asked for; queued moves start oldest
+	// first.
+	RequestedAt time.Time `json:"requestedAt" yaml:"requestedAt"`
+
+	// StateSince is when State last changed. A result the agent reported
+	// before it belongs to an earlier move and is ignored.
+	StateSince time.Time `json:"stateSince" yaml:"stateSince"`
+}
+
 // ProjectStatus is written by the Controller Manager and Agent.
 type ProjectStatus struct {
 	// Phase is the high-level lifecycle state.
@@ -416,6 +470,13 @@ type ProjectStatus struct {
 	//
 	// Server-owned; not a user manifest field.
 	FailedNodes []string `json:"failedNodes,omitempty" yaml:"failedNodes,omitempty"`
+
+	// Eviction is set while the Project is being moved off a healthy Node on
+	// purpose — a drain or a fail-back — and cleared when the move ends,
+	// whether it landed or was abandoned. See ProjectEviction.
+	//
+	// Server-owned; not a user manifest field.
+	Eviction *ProjectEviction `json:"eviction,omitempty" yaml:"eviction,omitempty"`
 
 	// Conditions is a list of granular observable states.
 	Conditions []Condition `json:"conditions,omitempty" yaml:"conditions,omitempty"`

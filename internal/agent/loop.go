@@ -79,7 +79,10 @@ func coordinatorOf(backups *BackupSupport) busyChecker {
 // backup runs, the Restorer puts volumes back before containers start, and the
 // Coordinator is how each learns the other is working on the same Project.
 type BackupSupport struct {
-	Supervisor  *backup.Supervisor
+	Supervisor *backup.Supervisor
+	// Runner takes the fresh backups planned moves ask for (CARA-119); the
+	// Supervisor drives the same Runner for periodic ones.
+	Runner      *backup.Runner
 	Coordinator *backup.Coordinator
 	Restorer    *restore.Restorer
 	// DataRoot is where Managed volume data and restore markers live.
@@ -203,6 +206,14 @@ func Run(ctx context.Context, cfg RunConfig) {
 	// against wall-clock time rather than tick count.
 	recovery := newRecoveryTracker()
 
+	// Planned moves (CARA-119) need this node's backup runner; without an
+	// object store there is none, and a move asking for a backup is failed.
+	var evictionRunnerImpl evictionRunner
+	if cfg.Backups != nil && cfg.Backups.Runner != nil {
+		evictionRunnerImpl = cfg.Backups.Runner
+	}
+	evictions := newEvictionBackups(ctx, evictionRunnerImpl, client, logger)
+
 	// ── Bootstrap: health-check Running projects ──────────────────────────
 	// After a restart, the Agent has no memory of Running projects. Fetch
 	// them from the server and verify containers are still alive so that
@@ -245,7 +256,7 @@ func Run(ctx context.Context, cfg RunConfig) {
 			}
 
 		case <-pollTicker.C:
-			reconcileProjects(ctx, client, runtime, routes, cfg.Backups, orphans, recovery, cfg.UIDEnforcement, logger)
+			reconcileProjects(ctx, client, runtime, routes, cfg.Backups, evictions, orphans, recovery, cfg.UIDEnforcement, logger)
 		}
 	}
 }
@@ -309,6 +320,11 @@ func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docke
 	for _, p := range projects {
 		if p.Status.Phase == v1.ProjectPhaseRunning {
 			running++
+			// Stopped on purpose for a planned move; the first poll takes
+			// it from here.
+			if underEviction(p) {
+				continue
+			}
 			healthCheckOne(ctx, client, runtime, routes, busy, recovery, p, logger)
 		}
 	}
@@ -330,7 +346,9 @@ func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docke
 //
 // orphans carries the sweep's cross-tick state. It may be nil, which disables
 // the sweep.
-func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, orphans *orphanTracker, recovery *recoveryTracker, uidEnforcement bool, logger *zap.Logger) {
+// evictions carries out this node's part of planned moves; nil ignores them,
+// as an agent that predates them would.
+func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, evictions *evictionBackups, orphans *orphanTracker, recovery *recoveryTracker, uidEnforcement bool, logger *zap.Logger) {
 	assignedProjects, err := client.ListProjectsAssignedToNode(ctx)
 	if err != nil {
 		// Unknown ownership never counts toward destructive cleanup. Preserve
@@ -394,6 +412,13 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 					zap.String("project", key.String()))
 				continue
 			}
+		}
+
+		// A Project waiting on this node for a planned move's backup is
+		// stopped on purpose; judging its health would start it again.
+		if evictions != nil && underEviction(p) {
+			evictions.handle(p)
+			continue
 		}
 
 		switch p.Status.Phase {

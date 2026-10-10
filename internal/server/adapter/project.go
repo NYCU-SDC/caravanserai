@@ -58,9 +58,14 @@ func (a *ProjectStoreAdapter) GetProjectPlacement(ctx context.Context, name stri
 	if err != nil {
 		return controller.ProjectPlacement{}, err
 	}
+	excluded := slices.Clone(project.Status.FailedNodes)
+	// A Project being moved off a Node on purpose must not land back on it.
+	if e := project.Status.Eviction; e != nil && e.State == v1.EvictionStateMoving {
+		excluded = append(excluded, e.FromNode)
+	}
 	return controller.ProjectPlacement{
 		Size:          project.Spec.Size,
-		ExcludedNodes: slices.Clone(project.Status.FailedNodes),
+		ExcludedNodes: excluded,
 	}, nil
 }
 

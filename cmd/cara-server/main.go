@@ -226,6 +226,16 @@ func main() {
 		projectAdapter,
 		eventBus,
 	))
+	maxInFlightEvictions := cfg.MaxInFlightEvictions
+	if maxInFlightEvictions == 0 {
+		maxInFlightEvictions = controller.DefaultMaxInFlightEvictions
+	}
+	ctrlManager.Add(controller.NewEvictionController(logger,
+		projectAdapter,
+		adapter.NewNodeReadyAdapter(pgStore),
+		eventBus,
+		maxInFlightEvictions,
+	))
 	// TODO: ProjectGCController — handle spec.expireAt (post-MVP)
 	// TODO: ProjectTimeoutController — reschedule Scheduled projects whose Agent goes silent (post-MVP)
 
