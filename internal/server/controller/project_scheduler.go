@@ -30,11 +30,23 @@ type SchedulerProjectStore interface {
 	SetProjectScheduled(ctx context.Context, name, nodeRef string) error
 }
 
+// ReadyNode is the view of a schedulable Node that placement decisions need.
+type ReadyNode struct {
+	Name string
+
+	// Labels are the Node's labels, including the cara.io/tier label when set.
+	Labels map[string]string
+
+	// Allocatable is the capacity the Node offers to Projects, as last
+	// reported by its agent. Empty when the agent has not reported it.
+	Allocatable v1.ResourceList
+}
+
 // SchedulerNodeStore is the store surface needed to enumerate schedulable Nodes.
 type SchedulerNodeStore interface {
-	// ListReadyNodeNames returns the names of all Nodes in Ready state that
-	// are not marked Unschedulable.
-	ListReadyNodeNames(ctx context.Context) ([]string, error)
+	// ListReadyNodes returns all Nodes in Ready state that are not marked
+	// Unschedulable.
+	ListReadyNodes(ctx context.Context) ([]ReadyNode, error)
 }
 
 // ProjectSchedulerController picks a target Node for every Project in Pending
@@ -108,7 +120,7 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		return Result{}, nil
 	}
 
-	readyNodes, err := c.nodes.ListReadyNodeNames(ctx)
+	readyNodes, err := c.nodes.ListReadyNodes(ctx)
 	if err != nil {
 		return Result{}, err
 	}
@@ -119,7 +131,7 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 	}
 
 	// MVP: pick the first node. Replace with a real scoring algorithm later.
-	target := readyNodes[0]
+	target := readyNodes[0].Name
 
 	log.Info("Scheduling project", zap.String("node", target))
 
