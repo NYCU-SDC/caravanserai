@@ -327,8 +327,10 @@ EOF
 chmod 0644 "$work/async.conf"
 
 # kill_async_orphan name — finds an async archiver already reparented to PID 1
-# and kills it in the same shell, so it cannot exit on its own between being
-# found and being killed. Prints the PID; exits 1 if there is none yet.
+# and kills it in the same shell. That narrows, but does not close, the window
+# in which it can exit on its own after being found; a failed kill moves on to
+# the next candidate, and the caller retries until one is killed. Prints the
+# PID; exits 1 if none was killed.
 kill_async_orphan() {
 	docker exec "$1" sh -c '
 		for d in /proc/[0-9]*; do
