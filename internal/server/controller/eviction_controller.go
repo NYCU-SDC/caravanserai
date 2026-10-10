@@ -52,10 +52,11 @@ const (
 // trigger's job.
 type EvictionRequester interface {
 	// RequestEviction queues a move of the named Project off fromNode, with
-	// reason saying who asked. It fails with store.ErrConflictState when the
-	// Project is not Running on fromNode, and does nothing when a move is
-	// already in progress.
-	RequestEviction(ctx context.Context, name, fromNode, reason string) error
+	// reason saying who asked. targetTier, when not empty, is the tier the
+	// Project must land in; see v1.ProjectEviction.TargetTier. It fails with
+	// store.ErrConflictState when the Project is not Running on fromNode, and
+	// does nothing when a move is already in progress.
+	RequestEviction(ctx context.Context, name, fromNode, reason string, targetTier v1.NodeTier) error
 }
 
 // EvictionSnapshot is the view of a Project with a planned move in progress.
@@ -250,13 +251,19 @@ func (c *EvictionController) start(ctx context.Context, log *zap.Logger, e *Evic
 	if err != nil {
 		return false, err
 	}
-	excluded := append([]string{e.Eviction.FromNode}, e.FailedNodes...)
-	candidates, rejected, err := filterNodes(ctx, c.ledger, nodes, e.Size, excluded)
+	candidates, rejected, err := filterNodes(ctx, c.ledger, nodes, ProjectPlacement{
+		Size:          e.Size,
+		ExcludedNodes: append([]string{e.Eviction.FromNode}, e.FailedNodes...),
+		RequiredTier:  e.Eviction.TargetTier,
+	})
 	if err != nil {
 		return false, err
 	}
 	if len(candidates) == 0 {
 		message := "No other node can take the project; it stays where it is"
+		if tier := e.Eviction.TargetTier; tier != "" {
+			message = fmt.Sprintf("No other %s node can take the project; it stays where it is", tier)
+		}
 		if len(rejected) > 0 {
 			message += ": " + strings.Join(rejected, "; ")
 		}

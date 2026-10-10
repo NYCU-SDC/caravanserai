@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 
+	"NYCU-SDC/caravanserai/internal/dailywindow"
+
 	configutil "github.com/NYCU-SDC/summer/pkg/config"
 	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
@@ -62,6 +64,38 @@ type Config struct {
 	// at once across the cluster (CARA-119). Each move is downtime plus a
 	// backup and a restore, so the default is one. Zero means the default.
 	MaxInFlightEvictions int `yaml:"max_inflight_evictions" envconfig:"MAX_INFLIGHT_EVICTIONS"`
+
+	// FailbackWindow is the daily window, "HH:MM-HH:MM" in FailbackTimezone,
+	// in which Projects on the backup tier are moved back to primary
+	// (CARA-121), e.g. "02:00-05:00". It may cross midnight. Empty disables
+	// fail-back. Leave it empty until the anti-flap defences of CARA-122 are
+	// in: without them a primary node that has only just recovered can be
+	// handed Projects straight away.
+	FailbackWindow string `yaml:"failback_window" envconfig:"FAILBACK_WINDOW"`
+	// FailbackTimezone is the IANA time zone FailbackWindow is read in.
+	// Defaults to DefaultFailbackTimezone.
+	FailbackTimezone string `yaml:"failback_timezone" envconfig:"FAILBACK_TIMEZONE"`
+}
+
+// DefaultFailbackTimezone is the time zone FailbackWindow is read in when
+// FailbackTimezone is not set. Taiwan keeps UTC+8 all year.
+const DefaultFailbackTimezone = "Asia/Taipei"
+
+// FailbackDailyWindow returns the configured fail-back window, or nil when
+// fail-back is disabled.
+func (c *Config) FailbackDailyWindow() (*dailywindow.Window, error) {
+	if c.FailbackWindow == "" {
+		return nil, nil
+	}
+	tz := c.FailbackTimezone
+	if tz == "" {
+		tz = DefaultFailbackTimezone
+	}
+	w, err := dailywindow.Parse(c.FailbackWindow, tz)
+	if err != nil {
+		return nil, fmt.Errorf("failback_window: %w", err)
+	}
+	return &w, nil
 }
 
 // Load reads cara-server config from file → env → flags (later sources win).
@@ -136,6 +170,8 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		HeadscaleAPIKey:  os.Getenv("HEADSCALE_API_KEY"),
 		HeadscaleUser:    os.Getenv("HEADSCALE_USER"),
 		UIDEnforcement:   os.Getenv("UID_ENFORCEMENT") == "true",
+		FailbackWindow:   os.Getenv("FAILBACK_WINDOW"),
+		FailbackTimezone: os.Getenv("FAILBACK_TIMEZONE"),
 	}
 	if v := os.Getenv("MAX_INFLIGHT_EVICTIONS"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -164,6 +200,8 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.StringVar(&flagConfig.HeadscaleUser, "headscale-user", "", "Headscale user new pre-auth keys are created under (default: cara-node)")
 	flag.BoolVar(&flagConfig.UIDEnforcement, "uid-enforcement", false, "enforce Project UID and assignment-generation fencing (default: false, compatibility mode)")
 	flag.IntVar(&flagConfig.MaxInFlightEvictions, "max-inflight-evictions", 0, "planned moves (drain, fail-back) allowed at once across the cluster (default: 1)")
+	flag.StringVar(&flagConfig.FailbackWindow, "failback-window", "", "daily window HH:MM-HH:MM in which projects are moved back to the primary tier (default: disabled)")
+	flag.StringVar(&flagConfig.FailbackTimezone, "failback-timezone", "", "IANA time zone the fail-back window is read in (default: Asia/Taipei)")
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)
 }

@@ -427,6 +427,13 @@ type ProjectEviction struct {
 	// State is how far the move has got.
 	State EvictionState `json:"state" yaml:"state"`
 
+	// TargetTier, when set, is the tier the Project must land in. A move
+	// that has nowhere to go in that tier is not started, and while it is
+	// Moving the scheduler considers only Nodes of that tier. Fail-back sets
+	// it to primary, so a move never ends on another backup Node; drain
+	// leaves it empty.
+	TargetTier NodeTier `json:"targetTier,omitempty" yaml:"targetTier,omitempty"`
+
 	// RequestedAt is when the move was asked for; queued moves start oldest
 	// first.
 	RequestedAt time.Time `json:"requestedAt" yaml:"requestedAt"`

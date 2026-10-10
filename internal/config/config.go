@@ -66,6 +66,9 @@ func (c *Config) Validate() error {
 	if c.MaxInFlightEvictions < 0 {
 		return errors.New("max_inflight_evictions must not be negative")
 	}
+	if _, err := c.FailbackDailyWindow(); err != nil {
+		return err
+	}
 	return nil
 }
 

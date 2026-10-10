@@ -159,6 +159,35 @@ func TestProjectSchedulerReconcile(t *testing.T) {
 			"node-a sorts first and has room, but the project already failed on it")
 	})
 
+	t.Run("a project that must land in a tier is placed only there", func(t *testing.T) {
+		ps := newFakeSchedulerProjectStore()
+		ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhasePending, RequiredTier: v1.NodeTierPrimary}
+		ns := newFakeSchedulerNodeStoreOf(
+			ReadyNode{Name: "a-backup", Labels: map[string]string{v1.LabelNodeTier: "backup"}, Allocatable: roomyAllocatable},
+			ReadyNode{Name: "z-primary", Labels: map[string]string{v1.LabelNodeTier: "primary"}, Allocatable: roomyAllocatable},
+		)
+		ctrl := NewProjectSchedulerController(zap.NewNop(), ps, ns, nil)
+
+		_, err := ctrl.Reconcile(context.Background(), "my-app")
+		require.NoError(t, err)
+		require.Len(t, ps.SetProjectScheduledCalls, 1)
+		assert.Equal(t, "z-primary", ps.SetProjectScheduledCalls[0].NodeRef)
+	})
+
+	t.Run("a project that must land in a tier waits when that tier is full", func(t *testing.T) {
+		ps := newFakeSchedulerProjectStore()
+		ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhasePending, RequiredTier: v1.NodeTierPrimary}
+		ns := newFakeSchedulerNodeStoreOf(
+			ReadyNode{Name: "twcc1", Labels: map[string]string{v1.LabelNodeTier: "backup"}, Allocatable: roomyAllocatable},
+		)
+		ctrl := NewProjectSchedulerController(zap.NewNop(), ps, ns, nil)
+
+		res, err := ctrl.Reconcile(context.Background(), "my-app")
+		require.NoError(t, err)
+		assert.True(t, res.Requeue)
+		assert.Empty(t, ps.SetProjectScheduledCalls, "not placed on backup: the move must end on primary")
+	})
+
 	t.Run("a moved project stays Pending when every other node is excluded", func(t *testing.T) {
 		ps := newFakeSchedulerProjectStore()
 		ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhasePending, FailedNodes: []string{"node-a"}}

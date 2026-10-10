@@ -24,7 +24,10 @@ var (
 // fromNode — only a running Project can be backed up and moved — and does
 // nothing when a move is already in progress, so a trigger may ask again
 // without starting a second one.
-func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNode, reason string) error {
+func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNode, reason string, targetTier v1.NodeTier) error {
+	if targetTier != "" && !targetTier.IsValid() {
+		return fmt.Errorf("request eviction of %q: invalid target tier %q", name, targetTier)
+	}
 	now := time.Now().UTC()
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
 		if status.Eviction != nil {
@@ -38,6 +41,7 @@ func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNod
 			Reason:      reason,
 			FromNode:    fromNode,
 			State:       v1.EvictionStateQueued,
+			TargetTier:  targetTier,
 			RequestedAt: now,
 			StateSince:  now,
 		}

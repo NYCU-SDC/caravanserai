@@ -58,15 +58,17 @@ func (a *ProjectStoreAdapter) GetProjectPlacement(ctx context.Context, name stri
 	if err != nil {
 		return controller.ProjectPlacement{}, err
 	}
-	excluded := slices.Clone(project.Status.FailedNodes)
-	// A Project being moved off a Node on purpose must not land back on it.
-	if e := project.Status.Eviction; e != nil && e.State == v1.EvictionStateMoving {
-		excluded = append(excluded, e.FromNode)
-	}
-	return controller.ProjectPlacement{
+	placement := controller.ProjectPlacement{
 		Size:          project.Spec.Size,
-		ExcludedNodes: excluded,
-	}, nil
+		ExcludedNodes: slices.Clone(project.Status.FailedNodes),
+	}
+	// A Project being moved off a Node on purpose must not land back on it,
+	// and must land in the tier the move asked for, if any.
+	if e := project.Status.Eviction; e != nil && e.State == v1.EvictionStateMoving {
+		placement.ExcludedNodes = append(placement.ExcludedNodes, e.FromNode)
+		placement.RequiredTier = e.TargetTier
+	}
+	return placement, nil
 }
 
 func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nodeRef string) error {
@@ -283,6 +285,7 @@ func snapshotOf(p *v1.Project) *controller.ProjectSnapshot {
 		NodeRef:     p.Status.NodeRef,
 		Size:        p.Spec.Size,
 		FailedNodes: slices.Clone(p.Status.FailedNodes),
+		Evicting:    p.Status.Eviction != nil,
 		Conditions:  conditions,
 	}
 }

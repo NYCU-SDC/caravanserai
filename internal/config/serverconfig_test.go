@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -153,5 +154,50 @@ func TestServerMaxInFlightEvictions(t *testing.T) {
 			cfg := Config{DatabaseURL: "postgres://localhost/cara", MaxInFlightEvictions: n}
 			assert.NoError(t, cfg.Validate(), "max_inflight_evictions=%d", n)
 		}
+	})
+}
+
+func TestServerFailbackWindow(t *testing.T) {
+	t.Run("unset disables fail-back", func(t *testing.T) {
+		cfg := Config{DatabaseURL: "postgres://localhost/cara"}
+		w, err := cfg.FailbackDailyWindow()
+		require.NoError(t, err)
+		assert.Nil(t, w)
+		assert.NoError(t, cfg.Validate())
+	})
+
+	t.Run("read in Taiwan time by default", func(t *testing.T) {
+		cfg := Config{FailbackWindow: "02:00-05:00"}
+		w, err := cfg.FailbackDailyWindow()
+		require.NoError(t, err)
+		require.NotNil(t, w)
+		assert.True(t, w.Contains(time.Date(2026, 10, 9, 18, 30, 0, 0, time.UTC)), "02:30 Taiwan")
+		assert.Contains(t, w.Describe(time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC)), "Asia/Taipei (18:00-21:00 UTC)")
+	})
+
+	t.Run("another time zone", func(t *testing.T) {
+		cfg := Config{FailbackWindow: "02:00-05:00", FailbackTimezone: "UTC"}
+		w, err := cfg.FailbackDailyWindow()
+		require.NoError(t, err)
+		assert.True(t, w.Contains(time.Date(2026, 10, 10, 2, 30, 0, 0, time.UTC)))
+	})
+
+	t.Run("a malformed window fails validation", func(t *testing.T) {
+		cfg := Config{DatabaseURL: "postgres://localhost/cara", FailbackWindow: "2am-5am"}
+		assert.ErrorContains(t, cfg.Validate(), "failback_window")
+	})
+
+	t.Run("an unknown time zone fails validation", func(t *testing.T) {
+		cfg := Config{DatabaseURL: "postgres://localhost/cara", FailbackWindow: "02:00-05:00", FailbackTimezone: "Taiwan/Hsinchu"}
+		assert.ErrorContains(t, cfg.Validate(), "failback_window")
+	})
+
+	t.Run("loaded from the environment", func(t *testing.T) {
+		t.Setenv("FAILBACK_WINDOW", "22:00-02:00")
+		t.Setenv("FAILBACK_TIMEZONE", "Asia/Tokyo")
+		got, err := FromEnv(&Config{}, NewConfigLogger())
+		require.NoError(t, err)
+		assert.Equal(t, "22:00-02:00", got.FailbackWindow)
+		assert.Equal(t, "Asia/Tokyo", got.FailbackTimezone)
 	})
 }
