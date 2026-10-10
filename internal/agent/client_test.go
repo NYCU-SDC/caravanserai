@@ -125,6 +125,53 @@ func TestClient_HeartbeatUsesExplicitOverlayIPOverClientDefault(t *testing.T) {
 	assert.Equal(t, "100.64.0.8", got.Network.OverlayIP)
 }
 
+func TestClient_HeartbeatCarriesCapacity(t *testing.T) {
+	capacity, allocatable := nodeCapacity(4, 8<<30, SystemReserved{CPUMilli: 500, MemoryBytes: 512 << 20})
+
+	tests := []struct {
+		name   string
+		status v1.NodeStatus
+		want   map[string]any
+	}{
+		{
+			name:   "measured capacity is sent",
+			status: v1.NodeStatus{State: v1.NodeStateReady, Capacity: capacity, Allocatable: allocatable},
+			want: map[string]any{
+				"capacity":    map[string]any{"cpu": "4000m", "memory": "8Gi"},
+				"allocatable": map[string]any{"cpu": "3500m", "memory": "7680Mi"},
+			},
+		},
+		{
+			// The server keeps the last reported values when the fields are
+			// absent, so a failed measurement must not send empty lists.
+			name:   "unmeasured capacity is omitted",
+			status: v1.NodeStatus{State: v1.NodeStateReady},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+
+			c := NewClient(zap.NewNop(), server.URL, "node-1")
+			require.NoError(t, c.Heartbeat(context.Background(), tt.status))
+
+			if tt.want == nil {
+				assert.NotContains(t, got, "capacity")
+				assert.NotContains(t, got, "allocatable")
+				return
+			}
+			assert.Equal(t, tt.want["capacity"], got["capacity"])
+			assert.Equal(t, tt.want["allocatable"], got["allocatable"])
+		})
+	}
+}
+
 func TestReRegisterReportsOverlayIP(t *testing.T) {
 	var got v1.Node
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

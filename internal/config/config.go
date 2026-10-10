@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"NYCU-SDC/caravanserai/internal/quantity"
+
 	"go.uber.org/zap"
 )
 
@@ -84,7 +86,26 @@ func (c *AgentConfig) Validate() error {
 			c.InsecureSecretFile, c.InsecureSecretFile,
 		)
 	}
+	if _, _, err := c.SystemReserved(); err != nil {
+		return err
+	}
 	return c.S3.Validate()
+}
+
+// SystemReserved parses ReservedCPU into millicores and ReservedMemory into
+// bytes. An empty value reserves nothing.
+func (c *AgentConfig) SystemReserved() (cpuMilli, memoryBytes int64, err error) {
+	if c.ReservedCPU != "" {
+		if cpuMilli, err = quantity.ParseCPU(c.ReservedCPU); err != nil {
+			return 0, 0, fmt.Errorf("reserved_cpu: %w", err)
+		}
+	}
+	if c.ReservedMemory != "" {
+		if memoryBytes, err = quantity.ParseMemory(c.ReservedMemory); err != nil {
+			return 0, 0, fmt.Errorf("reserved_memory: %w", err)
+		}
+	}
+	return cpuMilli, memoryBytes, nil
 }
 
 // Validate checks that a configured object store is fully specified. An empty

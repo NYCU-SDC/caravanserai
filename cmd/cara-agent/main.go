@@ -173,12 +173,17 @@ func main() {
 		logger.Fatal("Failed to configure Managed volume backups", zap.Error(err))
 	}
 
+	// Validate has already rejected malformed values, so this cannot fail.
+	reservedCPU, reservedMemory, _ := cfg.SystemReserved()
+
 	go agent.Run(ctx, agent.RunConfig{
 		Client:            agentClient,
 		Runtime:           dockerRuntime,
 		HeartbeatInterval: cfg.HeartbeatInterval,
 		AgentPort:         agentPort,
 		AdvertiseIP:       cfg.AdvertiseIP,
+		Resources:         dockerRuntime,
+		SystemReserved:    agent.SystemReserved{CPUMilli: reservedCPU, MemoryBytes: reservedMemory},
 		Routes:            routeTable,
 		Backups:           backupSupport,
 		UIDEnforcement:    cfg.UIDEnforcement,

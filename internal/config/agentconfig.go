@@ -18,6 +18,14 @@ const secretFileMaxMode os.FileMode = 0o600
 // backups and restores when the config does not set one.
 const defaultMinFreeBytes uint64 = 2 << 30 // 2 GiB
 
+// Default system-reserved amounts held back from the node's measured capacity
+// (see docs/scheduler-strategy.md §3.4). The Docker host's own overhead is
+// roughly fixed, so these are absolute amounts rather than a ratio.
+const (
+	defaultReservedCPU    = "500m"
+	defaultReservedMemory = "512Mi"
+)
+
 // AgentConfig holds the runtime configuration for cara-agent.
 // It replaces the listen-address fields with the control-plane server URL that
 // the agent dials out to.
@@ -60,6 +68,13 @@ type AgentConfig struct {
 	// backstop against starting work on an already-full disk rather than a
 	// guarantee the work will fit.
 	MinFreeBytes uint64 `yaml:"min_free_bytes" envconfig:"AGENT_MIN_FREE_BYTES"`
+	// ReservedCPU and ReservedMemory are the system-reserved amounts
+	// subtracted from the node's measured capacity to derive the Allocatable
+	// it reports, so the scheduler never plans to hand the OS, dockerd or the
+	// agent's own share to Projects. Values use Kubernetes quantity syntax
+	// ("500m", "0.5"; "512Mi", "1Gi"). Default to 500m and 512Mi.
+	ReservedCPU    string `yaml:"reserved_cpu"    envconfig:"AGENT_RESERVED_CPU"`
+	ReservedMemory string `yaml:"reserved_memory" envconfig:"AGENT_RESERVED_MEMORY"`
 	// HeadscaleURL is the base URL of the Headscale control plane the agent
 	// joins on startup (e.g. "http://localhost:8081").  Overlay networking is
 	// opt-in in 1.0: when HeadscaleURL and PreauthKeyFile are both empty the
@@ -157,6 +172,8 @@ func LoadAgent() (AgentConfig, *LogBuffer) {
 		ProxyListenAddr:   ":8081",
 		DataRoot:          "/var/lib/cara",
 		MinFreeBytes:      defaultMinFreeBytes,
+		ReservedCPU:       defaultReservedCPU,
+		ReservedMemory:    defaultReservedMemory,
 	}
 
 	var err error
@@ -248,6 +265,8 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 		PreauthKeyFile:   os.Getenv("HEADSCALE_PREAUTH_KEY_FILE"),
 		OverlayHostname:  os.Getenv("OVERLAY_HOSTNAME"),
 		UIDEnforcement:   os.Getenv("UID_ENFORCEMENT") == "true",
+		ReservedCPU:      os.Getenv("AGENT_RESERVED_CPU"),
+		ReservedMemory:   os.Getenv("AGENT_RESERVED_MEMORY"),
 		S3: S3Config{
 			Endpoint:  os.Getenv("S3_ENDPOINT"),
 			Bucket:    os.Getenv("S3_BUCKET"),
@@ -283,6 +302,8 @@ func AgentFromFlags(cfg *AgentConfig) (*AgentConfig, error) {
 	flag.StringVar(&flagConfig.PreauthKeyFile, "preauth-key-file", "", "path to a file containing the Headscale pre-auth key")
 	flag.StringVar(&flagConfig.OverlayHostname, "overlay-hostname", "", "hostname to register with Headscale (default: node name)")
 	flag.BoolVar(&flagConfig.UIDEnforcement, "uid-enforcement", false, "enforce Project UID ownership fencing (default: false, compatibility mode)")
+	flag.StringVar(&flagConfig.ReservedCPU, "reserved-cpu", "", "CPU held back from node capacity for the system (default: 500m)")
+	flag.StringVar(&flagConfig.ReservedMemory, "reserved-memory", "", "memory held back from node capacity for the system (default: 512Mi)")
 	flag.Parse()
 	return configutil.Merge[AgentConfig](cfg, flagConfig)
 }
