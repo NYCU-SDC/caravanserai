@@ -268,7 +268,7 @@ All endpoints are under `/api/v1/`.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/v1/nodes` | Register a node |
-| `PUT` | `/api/v1/nodes/{name}` | Update a node's spec |
+| `PUT` | `/api/v1/nodes/{name}` | Update a node's spec and labels. The `cara.io/tier` label must be `primary` or `backup` (an unlabeled node is treated as `backup`); `POST` validates it too. Set it with `caractl node set-tier <name> primary\|backup`. |
 | `GET` | `/api/v1/nodes` | List all nodes |
 | `GET` | `/api/v1/nodes/{name}` | Get a single node |
 | `DELETE` | `/api/v1/nodes/{name}` | Delete a node |

@@ -142,6 +142,13 @@ func (h *Handler) createNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := v1.ValidateNodeLabels(node.Labels); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.labels["+v1.LabelNodeTier+"]",
+				node.Labels[v1.LabelNodeTier], err.Error()), logger)
+		return
+	}
+
 	// Initialise status to NotReady on creation; the Agent will push heartbeats
 	// to transition it to Ready once the connection is confirmed.
 	if node.Status.State == "" {
@@ -189,6 +196,13 @@ func (h *Handler) updateNode(w http.ResponseWriter, r *http.Request) {
 	if err := v1.ValidateNamespace(node.Namespace); err != nil {
 		h.problemWriter.WriteError(traceCtx, w,
 			handlerutil.NewValidationError("metadata.namespace", node.Namespace, err.Error()), logger)
+		return
+	}
+
+	if err := v1.ValidateNodeLabels(node.Labels); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("metadata.labels["+v1.LabelNodeTier+"]",
+				node.Labels[v1.LabelNodeTier], err.Error()), logger)
 		return
 	}
 
