@@ -117,6 +117,7 @@ func (a *ProjectStoreAdapter) ListProjectsByNodeRef(ctx context.Context, nodeRef
 			Name:       p.Name,
 			Phase:      p.Status.Phase,
 			NodeRef:    p.Status.NodeRef,
+			Size:       p.Spec.Size,
 			Conditions: conditions,
 		}
 	}
