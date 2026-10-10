@@ -35,6 +35,7 @@ func TestFullSchedulingLifecycle(t *testing.T) {
 		Spec:       v1.NodeSpec{Hostname: "sched-node-01"},
 		Status: v1.NodeStatus{
 			State:         v1.NodeStateReady,
+			Allocatable:   controllerhelper.RoomyAllocatable(),
 			LastHeartbeat: time.Now().UTC(),
 		},
 	}
@@ -164,4 +165,72 @@ func TestCapacityLedgerAgainstPostgres(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok, "Medium needs 1c but only 0.5c remains")
 	assert.Contains(t, reason, "lacks cpu")
+}
+
+// createLedgerNode creates a Ready node with the given Allocatable and, when
+// busy is true, a Running Large project that fills 2c / 4Gi of it.
+func createLedgerNode(t *testing.T, s *controllerhelper.Suite, name string, allocatable v1.ResourceList, busy bool) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, s.Store.CreateNode(ctx, &v1.Node{
+		TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Node"},
+		ObjectMeta: v1.ObjectMeta{Name: name},
+		Status:     v1.NodeStatus{State: v1.NodeStateReady, Allocatable: allocatable, LastHeartbeat: time.Now().UTC()},
+	}))
+	if busy {
+		require.NoError(t, s.Store.CreateProject(ctx, &v1.Project{
+			TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"},
+			ObjectMeta: v1.ObjectMeta{Name: name + "-tenant"},
+			Spec:       v1.ProjectSpec{Size: v1.ProjectSizeLarge},
+			Status:     v1.ProjectStatus{Phase: v1.ProjectPhaseRunning, NodeRef: name},
+		}))
+	}
+}
+
+// TestSchedulerFilterSkipsFullNode validates that the scheduler leaves out a
+// node whose Allocatable is already booked and places the project on the one
+// with room.
+func TestSchedulerFilterSkipsFullNode(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+
+	createLedgerNode(t, s, "filter-full", v1.ResourceList{"cpu": "2", "memory": "4Gi"}, true)
+	createLedgerNode(t, s, "filter-roomy", v1.ResourceList{"cpu": "8", "memory": "16Gi"}, false)
+	s.Start(t)
+
+	require.NoError(t, s.Store.CreateProject(context.Background(), &v1.Project{
+		TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"},
+		ObjectMeta: v1.ObjectMeta{Name: "filter-project"},
+		Spec:       v1.ProjectSpec{Size: v1.ProjectSizeMedium},
+		Status:     v1.ProjectStatus{Phase: v1.ProjectPhasePending},
+	}))
+
+	controllerhelper.WaitForProjectPhase(t, s.Store, 15*time.Second, "filter-project", v1.ProjectPhaseScheduled)
+	p, err := s.Store.GetProject(context.Background(), "filter-project")
+	require.NoError(t, err)
+	assert.Equal(t, "filter-roomy", p.Status.NodeRef, "the full node must not be chosen")
+}
+
+// TestSchedulerFilterNoRoomStaysPending validates that a project that fits on
+// no node is left Pending rather than over-committed.
+func TestSchedulerFilterNoRoomStaysPending(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+
+	createLedgerNode(t, s, "filter-full", v1.ResourceList{"cpu": "2", "memory": "4Gi"}, true)
+	createLedgerNode(t, s, "filter-unreported", nil, false) // an agent that predates CARA-111
+	s.Start(t)
+
+	ctx := context.Background()
+	require.NoError(t, s.Store.CreateProject(ctx, &v1.Project{
+		TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"},
+		ObjectMeta: v1.ObjectMeta{Name: "filter-project"},
+		Spec:       v1.ProjectSpec{Size: v1.ProjectSizeMedium},
+		Status:     v1.ProjectStatus{Phase: v1.ProjectPhasePending},
+	}))
+
+	assert.Never(t, func() bool {
+		p, err := s.Store.GetProject(ctx, "filter-project")
+		return err != nil || p.Status.Phase != v1.ProjectPhasePending
+	}, 3*time.Second, 200*time.Millisecond, "a project that fits nowhere must stay Pending")
 }

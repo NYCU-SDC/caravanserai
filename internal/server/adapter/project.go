@@ -52,6 +52,14 @@ func (a *ProjectStoreAdapter) GetProjectPhase(ctx context.Context, name string) 
 	return project.Status.Phase, project.Status.NodeRef, nil
 }
 
+func (a *ProjectStoreAdapter) GetProjectSize(ctx context.Context, name string) (v1.ProjectSize, error) {
+	project, err := a.s.GetProject(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	return project.Spec.Size, nil
+}
+
 func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nodeRef string) error {
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
 		// Bump the assignment generation exactly once per real transition into

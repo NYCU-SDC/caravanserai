@@ -125,6 +125,7 @@ func (a *NodeReadyAdapter) ListReadyNodes(ctx context.Context) ([]controller.Rea
 				Name:        n.Name,
 				Labels:      n.Labels,
 				Allocatable: n.Status.Allocatable,
+				Conditions:  n.Status.Conditions,
 			})
 		}
 	}
