@@ -201,6 +201,8 @@ Configuration is read in order: `config.yaml` → `.env` → environment variabl
 | `headscale_api_key` | `HEADSCALE_API_KEY` | _(optional)_ | Headscale management API key (secret, never logged) |
 | `headscale_user` | `HEADSCALE_USER` | `cara-node` | Headscale user new pre-auth keys are created under |
 | `max_inflight_evictions` | `MAX_INFLIGHT_EVICTIONS` | `1` | Planned moves (drain, fail-back) allowed at once across the cluster. Each is downtime plus a backup and a restore |
+| `failback_window` | `FAILBACK_WINDOW` | _(disabled)_ | Daily window `HH:MM-HH:MM` (may cross midnight, e.g. `02:00-05:00`) in which Projects on the backup tier are moved back to primary, one at a time. Empty disables fail-back. **Leave it unset until CARA-122 (fail-back anti-flap) is merged** |
+| `failback_timezone` | `FAILBACK_TIMEZONE` | `Asia/Taipei` | IANA time zone `failback_window` is read in. The server logs the window in both this zone and UTC at startup |
 
 ### cara-agent
 

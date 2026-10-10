@@ -140,6 +140,7 @@ var describeProjectCoveredFields = newStringSet(
 	"Status.Eviction.Reason",
 	"Status.Eviction.FromNode",
 	"Status.Eviction.State",
+	"Status.Eviction.TargetTier",
 	"Status.AssignmentGeneration",
 	"Status.AssignmentHistory",
 	"Status.Conditions",
@@ -282,6 +283,11 @@ func TestDescribeProjectEviction(t *testing.T) {
 			name:     "in progress",
 			eviction: &v1.ProjectEviction{Reason: "Drain", FromNode: "pve1", State: v1.EvictionStateBackingUp},
 			want:     "Drain off pve1 (BackingUp)",
+		},
+		{
+			name:     "with a target tier",
+			eviction: &v1.ProjectEviction{Reason: "FailBack", FromNode: "twcc1", TargetTier: v1.NodeTierPrimary, State: v1.EvictionStateQueued},
+			want:     "FailBack off twcc1 to primary (Queued)",
 		},
 	}
 	for _, tt := range tests {

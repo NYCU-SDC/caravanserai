@@ -187,10 +187,13 @@ func describeProjectSize(spec v1.ProjectSpec) string {
 }
 
 // describeEviction summarises a planned move in progress, e.g.
-// "Drain off pve1 (BackingUp)".
+// "Drain off pve1 (BackingUp)" or "FailBack off twcc1 to primary (Queued)".
 func describeEviction(e *v1.ProjectEviction) string {
 	if e == nil {
 		return "<none>"
+	}
+	if e.TargetTier != "" {
+		return fmt.Sprintf("%s off %s to %s (%s)", e.Reason, e.FromNode, e.TargetTier, e.State)
 	}
 	return fmt.Sprintf("%s off %s (%s)", e.Reason, e.FromNode, e.State)
 }

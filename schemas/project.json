@@ -260,6 +260,10 @@
           "$ref": "#/$defs/EvictionState",
           "description": "State is how far the move has got."
         },
+        "targetTier": {
+          "type": "string",
+          "description": "TargetTier, when set, is the tier the Project must land in. A move\nthat has nowhere to go in that tier is not started, and while it is\nMoving the scheduler considers only Nodes of that tier. Fail-back sets\nit to primary, so a move never ends on another backup Node; drain\nleaves it empty."
+        },
         "requestedAt": {
           "type": "string",
           "format": "date-time",

@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	// The fail-back window is read in a named time zone; embed the zone
+	// database so it works in images that ship without one.
+	_ "time/tzdata"
 
 	"NYCU-SDC/caravanserai/internal/appinit"
 	"NYCU-SDC/caravanserai/internal/config"
@@ -236,6 +239,21 @@ func main() {
 		eventBus,
 		maxInFlightEvictions,
 	))
+	failbackWindow, err := cfg.FailbackDailyWindow()
+	if err != nil {
+		// Validate has already accepted it; this cannot fail.
+		logger.Fatal("Invalid fail-back window", zap.Error(err))
+	}
+	if failbackWindow == nil {
+		logger.Info("Fail-back disabled (failback_window is not set)")
+	} else {
+		logger.Info("Fail-back enabled", zap.String("window", failbackWindow.Describe(time.Now())))
+		ctrlManager.Add(controller.NewFailbackController(logger,
+			projectAdapter,
+			adapter.NewNodeReadyAdapter(pgStore),
+			failbackWindow,
+		))
+	}
 	// TODO: ProjectGCController — handle spec.expireAt (post-MVP)
 	// TODO: ProjectTimeoutController — reschedule Scheduled projects whose Agent goes silent (post-MVP)
 

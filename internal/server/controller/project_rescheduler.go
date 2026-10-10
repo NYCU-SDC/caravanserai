@@ -41,7 +41,9 @@ type ProjectSnapshot struct {
 	Size    v1.ProjectSize
 	// FailedNodes are the Nodes the Project has been moved off after Failed.
 	FailedNodes []string
-	Conditions  []ConditionSnapshot
+	// Evicting reports whether a planned move of the Project is in progress.
+	Evicting   bool
+	Conditions []ConditionSnapshot
 }
 
 // ConditionSnapshot is the minimal view of a Condition needed by this

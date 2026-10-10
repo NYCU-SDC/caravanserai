@@ -47,6 +47,10 @@ type ProjectPlacement struct {
 	// ExcludedNodes are Nodes the Project must not be placed on: the ones it
 	// failed on and was moved off, so that moving it changes Node.
 	ExcludedNodes []string
+
+	// RequiredTier, when set, limits placement to Nodes of that tier. It is
+	// set while a planned move with a target tier is in progress.
+	RequiredTier v1.NodeTier
 }
 
 // ReadyNode is the view of a schedulable Node that placement decisions need.
@@ -164,7 +168,7 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 	}
 
 	size := placement.Size
-	candidates, rejected, err := filterNodes(ctx, c.ledger, readyNodes, size, placement.ExcludedNodes)
+	candidates, rejected, err := filterNodes(ctx, c.ledger, readyNodes, placement)
 	if err != nil {
 		return Result{}, err
 	}

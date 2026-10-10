@@ -25,23 +25,28 @@ type candidate struct {
 // candidates that can host a Project of the given size:
 //
 //   - the Node is not one the Project failed on and was moved off (excluded),
+//   - the Node is in the required tier, when one is set,
 //   - the Node is not reporting DiskPressure or MemoryPressure, and
 //   - the Project's size fits in what the Node has left (CapacityLedger).
 //
 // rejected has one line per excluded Node saying why, for the scheduler to log.
 // The error is non-nil only when the ledger could not be computed; the
 // scheduler then retries rather than treating the Node as full.
-func filterNodes(ctx context.Context, ledger *CapacityLedger, nodes []ReadyNode, size v1.ProjectSize, excluded []string) (candidates []candidate, rejected []string, err error) {
+func filterNodes(ctx context.Context, ledger *CapacityLedger, nodes []ReadyNode, p ProjectPlacement) (candidates []candidate, rejected []string, err error) {
 	for _, n := range nodes {
-		if slices.Contains(excluded, n.Name) {
-			rejected = append(rejected, fmt.Sprintf("node %q already failed this project", n.Name))
+		if slices.Contains(p.ExcludedNodes, n.Name) {
+			rejected = append(rejected, fmt.Sprintf("node %q is excluded for this project", n.Name))
+			continue
+		}
+		if tier := v1.NodeTierFromLabels(n.Labels); p.RequiredTier != "" && tier != p.RequiredTier {
+			rejected = append(rejected, fmt.Sprintf("node %q is %s tier, not %s", n.Name, tier, p.RequiredTier))
 			continue
 		}
 		if cond, ok := underPressure(n); ok {
 			rejected = append(rejected, fmt.Sprintf("node %q reports %s", n.Name, cond))
 			continue
 		}
-		c, err := ledger.check(ctx, n, size)
+		c, err := ledger.check(ctx, n, p.Size)
 		if err != nil {
 			return nil, nil, err
 		}

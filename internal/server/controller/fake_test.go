@@ -161,10 +161,11 @@ type fakeSchedulerProjectStore struct {
 }
 
 type schedulerProjectRecord struct {
-	Phase       v1.ProjectPhase
-	NodeRef     string
-	Size        v1.ProjectSize
-	FailedNodes []string
+	Phase        v1.ProjectPhase
+	NodeRef      string
+	Size         v1.ProjectSize
+	FailedNodes  []string
+	RequiredTier v1.NodeTier
 }
 
 var _ SchedulerProjectStore = (*fakeSchedulerProjectStore)(nil)
@@ -214,7 +215,7 @@ func (f *fakeSchedulerProjectStore) GetProjectPlacement(_ context.Context, name 
 	if !ok {
 		return ProjectPlacement{}, store.ErrNotFound
 	}
-	return ProjectPlacement{Size: r.Size, ExcludedNodes: r.FailedNodes}, nil
+	return ProjectPlacement{Size: r.Size, ExcludedNodes: r.FailedNodes, RequiredTier: r.RequiredTier}, nil
 }
 
 // ListProjectsByNodeRef serves the capacity ledger from the same records the
