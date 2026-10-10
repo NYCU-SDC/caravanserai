@@ -288,8 +288,72 @@ type ProjectBackupConfig struct {
 	OnMissing VolumeOnMissing `json:"onMissing,omitempty" yaml:"onMissing,omitempty"`
 }
 
+// ProjectSize is a t-shirt size declaring a Project's resource footprint. Each
+// size maps to fixed CPU and memory amounts (see Requests) that the scheduler
+// books against a Node's Allocatable, so users pick a tier instead of
+// measuring exact requests.
+type ProjectSize string
+
+const (
+	ProjectSizeSmall  ProjectSize = "Small"
+	ProjectSizeMedium ProjectSize = "Medium"
+	ProjectSizeLarge  ProjectSize = "Large"
+)
+
+// DefaultProjectSize is the size assumed for a Project that does not declare
+// one. It is applied when the size is read (see ProjectSpec.EffectiveSize),
+// not stored, so Projects created before the field existed need no backfill.
+const DefaultProjectSize = ProjectSizeMedium
+
+// ResourceRequests is the CPU and memory a Project books on its Node.
+type ResourceRequests struct {
+	CPUMilli    int64
+	MemoryBytes int64
+}
+
+// projectSizeRequests maps each size to the resources it books. The amounts
+// are interim values pending product sign-off (docs/scheduler-strategy.md §3.4).
+var projectSizeRequests = map[ProjectSize]ResourceRequests{
+	ProjectSizeSmall:  {CPUMilli: 500, MemoryBytes: 512 << 20},
+	ProjectSizeMedium: {CPUMilli: 1000, MemoryBytes: 2 << 30},
+	ProjectSizeLarge:  {CPUMilli: 2000, MemoryBytes: 4 << 30},
+}
+
+// IsValid reports whether s is one of the defined sizes. The empty size is not
+// valid here; callers that accept an omitted size check for it separately.
+func (s ProjectSize) IsValid() bool {
+	_, ok := projectSizeRequests[s]
+	return ok
+}
+
+// Requests returns the resources a Project of this size books. An empty or
+// unknown size books the DefaultProjectSize amounts.
+func (s ProjectSize) Requests() ResourceRequests {
+	if r, ok := projectSizeRequests[s]; ok {
+		return r
+	}
+	return projectSizeRequests[DefaultProjectSize]
+}
+
+// JSONSchema returns a JSON Schema with the allowed ProjectSize values.
+func (ProjectSize) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type: "string",
+		Enum: []any{
+			string(ProjectSizeSmall),
+			string(ProjectSizeMedium),
+			string(ProjectSizeLarge),
+		},
+		Description: "T-shirt size declaring the Project's resource footprint. Defaults to Medium when omitted.",
+	}
+}
+
 // ProjectSpec is the desired state declared by the user.
 type ProjectSpec struct {
+	// Size declares the Project's resource footprint for capacity-aware
+	// placement. Omitting it means DefaultProjectSize; see EffectiveSize.
+	Size ProjectSize `json:"size,omitempty" yaml:"size,omitempty"`
+
 	// Services is the ordered list of containers to run.
 	Services []ServiceDef `json:"services" yaml:"services"`
 
@@ -307,6 +371,15 @@ type ProjectSpec struct {
 	// ExpireAt, when set, causes the GC controller to delete the Project
 	// after this time. Useful for ephemeral preview environments.
 	ExpireAt *time.Time `json:"expireAt,omitempty" yaml:"expireAt,omitempty"`
+}
+
+// EffectiveSize returns the declared Size, or DefaultProjectSize when none was
+// declared.
+func (s ProjectSpec) EffectiveSize() ProjectSize {
+	if s.Size == "" {
+		return DefaultProjectSize
+	}
+	return s.Size
 }
 
 // ProjectStatus is written by the Controller Manager and Agent.
@@ -332,6 +405,17 @@ type ProjectStatus struct {
 	// gating whether it may be hard-deleted directly or must enter the cleanup
 	// lifecycle first. Server-owned; not a user manifest field.
 	AssignmentHistory AssignmentHistory `json:"assignmentHistory,omitempty" yaml:"assignmentHistory,omitempty"`
+
+	// FailedNodes names the Nodes this Project was moved off after it was
+	// reported Failed, oldest first. The scheduler never places the Project on
+	// one of them, so a move actually changes Node, and its length is how many
+	// moves have been spent against the retry cap.
+	//
+	// It is cleared when the Project has run on a new Node long enough to count
+	// as recovered, and when the user applies the Project again.
+	//
+	// Server-owned; not a user manifest field.
+	FailedNodes []string `json:"failedNodes,omitempty" yaml:"failedNodes,omitempty"`
 
 	// Conditions is a list of granular observable states.
 	Conditions []Condition `json:"conditions,omitempty" yaml:"conditions,omitempty"`

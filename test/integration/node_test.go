@@ -569,6 +569,74 @@ func TestNodeNamespaceValidation(t *testing.T) {
 	drainBody(resp)
 }
 
+// TestNodeTierLabel verifies that the cara.io/tier label round-trips through
+// PostgreSQL and that values other than primary/backup are rejected on both
+// create and update.
+func TestNodeTierLabel(t *testing.T) {
+	const nodeName = "e2e-node-tier"
+
+	// ── 1. Create with an invalid tier → 400 ──────────────────────────────────
+
+	resp := doRequest(t, http.MethodPost, "/api/v1/nodes", mustMarshal(t, v1.Node{
+		ObjectMeta: v1.ObjectMeta{Name: nodeName, Labels: map[string]string{v1.LabelNodeTier: "gold"}},
+	}))
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, "create with invalid tier: expected 400")
+	var p problemResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&p))
+	assert.Contains(t, p.Detail, v1.LabelNodeTier, "detail should name the rejected label")
+	drainBody(resp)
+
+	// ── 2. Create unlabeled → effective tier is the default ───────────────────
+
+	resp = doRequest(t, http.MethodPost, "/api/v1/nodes", mustMarshal(t, v1.Node{
+		ObjectMeta: v1.ObjectMeta{Name: nodeName},
+		Spec:       v1.NodeSpec{Hostname: "tier-host", Unschedulable: true},
+	}))
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "create node: expected 201")
+	drainBody(resp)
+
+	resp = doRequest(t, http.MethodGet, "/api/v1/nodes/"+nodeName, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var got v1.Node
+	mustDecodeBody(t, resp, &got)
+	assert.Equal(t, v1.NodeTierBackup, got.EffectiveTier(), "unlabeled node defaults to backup")
+
+	// ── 3. Set primary via PUT and read it back ───────────────────────────────
+
+	got.Labels = map[string]string{v1.LabelNodeTier: "primary"}
+	resp = doRequest(t, http.MethodPut, "/api/v1/nodes/"+nodeName, mustMarshal(t, got))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "set primary: expected 200")
+	drainBody(resp)
+
+	resp = doRequest(t, http.MethodGet, "/api/v1/nodes/"+nodeName, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	got = v1.Node{}
+	mustDecodeBody(t, resp, &got)
+	assert.Equal(t, "primary", got.Labels[v1.LabelNodeTier], "tier label should persist")
+	assert.Equal(t, v1.NodeTierPrimary, got.EffectiveTier())
+	assert.True(t, got.Spec.Unschedulable, "spec read back alongside the label is kept")
+
+	// ── 4. Update with an invalid tier → 400, stored tier unchanged ───────────
+
+	bad := got
+	bad.Labels = map[string]string{v1.LabelNodeTier: "Primary"}
+	resp = doRequest(t, http.MethodPut, "/api/v1/nodes/"+nodeName, mustMarshal(t, bad))
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, "update with invalid tier: expected 400")
+	drainBody(resp)
+
+	resp = doRequest(t, http.MethodGet, "/api/v1/nodes/"+nodeName, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	got = v1.Node{}
+	mustDecodeBody(t, resp, &got)
+	assert.Equal(t, "primary", got.Labels[v1.LabelNodeTier], "rejected update must not change the tier")
+
+	// ── Cleanup ───────────────────────────────────────────────────────────────
+
+	resp = doRequest(t, http.MethodDelete, "/api/v1/nodes/"+nodeName, nil)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode, "cleanup delete")
+	drainBody(resp)
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 // doRequest sends an HTTP request to the shared test server and returns the

@@ -25,6 +25,14 @@ type SchedulerProjectStore interface {
 	// GetProjectPhase returns the current phase and nodeRef of the named Project.
 	GetProjectPhase(ctx context.Context, name string) (v1.ProjectPhase, string, error)
 
+	// GetProjectPlacement returns what the scheduler needs to know about the
+	// named Project beyond its phase.
+	GetProjectPlacement(ctx context.Context, name string) (ProjectPlacement, error)
+
+	// CapacityProjectStore lets the scheduler's capacity ledger see what is
+	// already placed on each Node.
+	CapacityProjectStore
+
 	// SetProjectScheduled writes the nodeRef and transitions the Project to
 	// Scheduled phase atomically. Only a Pending Project is assigned;
 	// re-asserting the same Node on a Scheduled Project is a no-op. It returns
@@ -33,24 +41,51 @@ type SchedulerProjectStore interface {
 	SetProjectScheduled(ctx context.Context, name, nodeRef string) error
 }
 
+// ProjectPlacement is what the scheduler needs to know about a Project to
+// choose a Node for it.
+type ProjectPlacement struct {
+	// Size is the declared size; empty when the Project declared none.
+	Size v1.ProjectSize
+
+	// ExcludedNodes are Nodes the Project must not be placed on: the ones it
+	// failed on and was moved off, so that moving it changes Node.
+	ExcludedNodes []string
+}
+
+// ReadyNode is the view of a schedulable Node that placement decisions need.
+type ReadyNode struct {
+	Name string
+
+	// Labels are the Node's labels, including the cara.io/tier label when set.
+	Labels map[string]string
+
+	// Allocatable is the capacity the Node offers to Projects, as last
+	// reported by its agent. Empty when the agent has not reported it.
+	Allocatable v1.ResourceList
+
+	// Conditions are the Node's observable conditions, e.g. DiskPressure.
+	Conditions []v1.Condition
+}
+
 // SchedulerNodeStore is the store surface needed to enumerate schedulable Nodes.
 type SchedulerNodeStore interface {
-	// ListReadyNodeNames returns the names of all Nodes in Ready state that
-	// are not marked Unschedulable.
-	ListReadyNodeNames(ctx context.Context) ([]string, error)
+	// ListReadyNodes returns all Nodes in Ready state that are not marked
+	// Unschedulable.
+	ListReadyNodes(ctx context.Context) ([]ReadyNode, error)
 }
 
 // ProjectSchedulerController picks a target Node for every Project in Pending
 // phase and transitions it to Scheduled.
 //
-// MVP scheduling algorithm: select the first Ready Node in the list returned
-// by the store.  A more sophisticated algorithm (resource-aware, affinity,
-// weighted random) can be dropped in later without changing the controller
-// lifecycle or the Manager wiring.
+// Scheduling is Filter -> Score. Filter narrows the Ready Nodes to those that
+// can legitimately host the Project (see filterNodes); Score picks the best of
+// them, preferring primary-tier Nodes and then the emptiest (see
+// scoreCandidate). The Project is bound to the winner.
 type ProjectSchedulerController struct {
 	logger       *zap.Logger
 	projects     SchedulerProjectStore
 	nodes        SchedulerNodeStore
+	ledger       *CapacityLedger
 	bus          *event.Bus
 	seedInterval time.Duration
 }
@@ -75,6 +110,7 @@ func NewProjectSchedulerController(
 		logger:       logger,
 		projects:     projects,
 		nodes:        nodes,
+		ledger:       NewCapacityLedger(logger, projects),
 		bus:          bus,
 		seedInterval: interval,
 	}
@@ -111,7 +147,7 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		return Result{}, nil
 	}
 
-	readyNodes, err := c.nodes.ListReadyNodeNames(ctx)
+	readyNodes, err := c.nodes.ListReadyNodes(ctx)
 	if err != nil {
 		return Result{}, err
 	}
@@ -121,10 +157,36 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		return Result{Requeue: true}, nil
 	}
 
-	// MVP: pick the first node. Replace with a real scoring algorithm later.
-	target := readyNodes[0]
+	placement, err := c.projects.GetProjectPlacement(ctx, name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			log.Debug("Project not found, skipping")
+			return Result{}, nil
+		}
+		return Result{}, err
+	}
 
-	log.Info("Scheduling project", zap.String("node", target))
+	size := placement.Size
+	candidates, rejected, err := filterNodes(ctx, c.ledger, readyNodes, size, placement.ExcludedNodes)
+	if err != nil {
+		return Result{}, err
+	}
+
+	if len(candidates) == 0 {
+		log.Warn("No node can host the project, will retry",
+			zap.String("size", string(v1.ProjectSpec{Size: size}.EffectiveSize())),
+			zap.Strings("rejected", rejected))
+		return Result{Requeue: true}, nil
+	}
+
+	best, score := pickBest(candidates, size)
+	target := best.Name
+
+	log.Info("Scheduling project",
+		zap.String("node", target),
+		zap.String("tier", string(v1.NodeTierFromLabels(best.Labels))),
+		zap.Float64("score", score),
+		zap.Int("candidates", len(candidates)))
 
 	if err := c.projects.SetProjectScheduled(ctx, name, target); err != nil {
 		// Refused, not failed: a previous Node still owes cleanup, or the

@@ -177,6 +177,15 @@ func describeNode(w io.Writer, node *v1.Node) {
 	printConditions(w, node.Status.Conditions)
 }
 
+// describeProjectSize shows the declared size, marking an omitted one with the
+// default it resolves to.
+func describeProjectSize(spec v1.ProjectSpec) string {
+	if spec.Size == "" {
+		return string(spec.EffectiveSize()) + " (default)"
+	}
+	return string(spec.Size)
+}
+
 // describeProject writes a kubectl-style detailed view of a Project.
 func describeProject(w io.Writer, project *v1.Project) {
 	// Basic info
@@ -196,6 +205,9 @@ func describeProject(w io.Writer, project *v1.Project) {
 	// Spec
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Spec:")
+
+	// Size
+	printField(w, "  Size", describeProjectSize(project.Spec))
 
 	// Services
 	fmt.Fprintln(w, "  Services:")
@@ -275,6 +287,7 @@ func describeProject(w io.Writer, project *v1.Project) {
 	fmt.Fprintln(w, "Status:")
 	printField(w, "  Phase", stringOrNone(string(project.Status.Phase)))
 	printField(w, "  Node", stringOrNone(project.Status.NodeRef))
+	printField(w, "  Failed Nodes", stringOrNone(strings.Join(project.Status.FailedNodes, ", ")))
 	printField(w, "  Assignment Generation", fmt.Sprintf("%d", project.Status.AssignmentGeneration))
 	printField(w, "  Assignment History", stringOrNone(string(project.Status.AssignmentHistory)))
 

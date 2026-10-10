@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -167,8 +168,10 @@ type fakeSchedulerProjectStore struct {
 }
 
 type schedulerProjectRecord struct {
-	Phase   v1.ProjectPhase
-	NodeRef string
+	Phase       v1.ProjectPhase
+	NodeRef     string
+	Size        v1.ProjectSize
+	FailedNodes []string
 }
 
 var _ SchedulerProjectStore = (*fakeSchedulerProjectStore)(nil)
@@ -208,6 +211,36 @@ func (f *fakeSchedulerProjectStore) GetProjectPhase(_ context.Context, name stri
 	return r.Phase, r.NodeRef, nil
 }
 
+func (f *fakeSchedulerProjectStore) GetProjectPlacement(_ context.Context, name string) (ProjectPlacement, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err, ok := f.errs[name]; ok {
+		return ProjectPlacement{}, err
+	}
+	r, ok := f.projects[name]
+	if !ok {
+		return ProjectPlacement{}, store.ErrNotFound
+	}
+	return ProjectPlacement{Size: r.Size, ExcludedNodes: r.FailedNodes}, nil
+}
+
+// ListProjectsByNodeRef serves the capacity ledger from the same records the
+// scheduler reads, so a Project the scheduler places counts against its node.
+func (f *fakeSchedulerProjectStore) ListProjectsByNodeRef(_ context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*ProjectSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var out []*ProjectSnapshot
+	for n, r := range f.projects {
+		if r.NodeRef != nodeRef || !slices.Contains(phases, r.Phase) {
+			continue
+		}
+		out = append(out, &ProjectSnapshot{Name: n, Phase: r.Phase, NodeRef: r.NodeRef, Size: r.Size})
+	}
+	return out, nil
+}
+
 func (f *fakeSchedulerProjectStore) SetProjectScheduled(_ context.Context, name, nodeRef string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -238,20 +271,35 @@ func (f *fakeSchedulerProjectStore) SetProjectScheduled(_ context.Context, name,
 
 type fakeSchedulerNodeStore struct {
 	mu         sync.Mutex
-	readyNodes []string
+	readyNodes []ReadyNode
 }
 
 var _ SchedulerNodeStore = (*fakeSchedulerNodeStore)(nil)
 
+// roomyAllocatable is large enough that no test Project fills it, for tests
+// that are not about capacity.
+var roomyAllocatable = v1.ResourceList{"cpu": "64", "memory": "256Gi"}
+
+// newFakeSchedulerNodeStore returns a store whose ready Nodes have the given
+// names, plenty of Allocatable and no labels.
 func newFakeSchedulerNodeStore(ready ...string) *fakeSchedulerNodeStore {
-	return &fakeSchedulerNodeStore{readyNodes: ready}
+	nodes := make([]ReadyNode, len(ready))
+	for i, name := range ready {
+		nodes[i] = ReadyNode{Name: name, Allocatable: roomyAllocatable}
+	}
+	return &fakeSchedulerNodeStore{readyNodes: nodes}
 }
 
-func (f *fakeSchedulerNodeStore) ListReadyNodeNames(_ context.Context) ([]string, error) {
+// newFakeSchedulerNodeStoreOf returns a store serving exactly the given Nodes.
+func newFakeSchedulerNodeStoreOf(nodes ...ReadyNode) *fakeSchedulerNodeStore {
+	return &fakeSchedulerNodeStore{readyNodes: nodes}
+}
+
+func (f *fakeSchedulerNodeStore) ListReadyNodes(_ context.Context) ([]ReadyNode, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	out := make([]string, len(f.readyNodes))
+	out := make([]ReadyNode, len(f.readyNodes))
 	copy(out, f.readyNodes)
 	return out, nil
 }

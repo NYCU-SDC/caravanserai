@@ -141,6 +141,12 @@ const (
 	// stopped nor fenced. Server-owned.
 	ConditionTypeTakeoverRequired ConditionType = "TakeoverRequired"
 
+	// ConditionTypeRescheduleExhausted is True on a Failed Project that has used
+	// up every move to a different Node. Nothing will move it again, so it needs
+	// an operator; this condition is how that becomes visible without reading
+	// server logs. It is cleared when the Project is applied again.
+	ConditionTypeRescheduleExhausted ConditionType = "RescheduleExhausted"
+
 	// ConditionTypeDiskPressure indicates whether the node's disk usage is
 	// approaching capacity. Set by the NodeConditionController based on
 	// the Agent's reported Capacity and Allocatable values.

@@ -74,6 +74,38 @@ func (c *Client) GetNode(ctx context.Context, name string) (v1.Node, error) {
 	return node, nil
 }
 
+// UpdateNode replaces a node's spec, labels and annotations with those of
+// node and returns the stored result.
+func (c *Client) UpdateNode(ctx context.Context, node v1.Node) (v1.Node, error) {
+	raw, err := json.Marshal(node)
+	if err != nil {
+		return v1.Node{}, fmt.Errorf("encode request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.BaseURL+"/api/v1/nodes/"+node.Name,
+		bytes.NewReader(raw))
+	if err != nil {
+		return v1.Node{}, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return v1.Node{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return v1.Node{}, err
+	}
+
+	var updated v1.Node
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		return v1.Node{}, fmt.Errorf("decode response: %w", err)
+	}
+	return updated, nil
+}
+
 // DeleteNode removes a node by name.
 func (c *Client) DeleteNode(ctx context.Context, name string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+"/api/v1/nodes/"+name, nil)
