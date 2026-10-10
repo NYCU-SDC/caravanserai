@@ -23,6 +23,10 @@ type fakeFailedProjectStore struct {
 	moves     []moveCall
 	cleared   []string
 	exhausted []string
+
+	// unconfirmed makes every move report that the workload is not confirmed
+	// stopped, as the store does for a Failed Project without WorkloadStopped.
+	unconfirmed bool
 }
 
 type moveCall struct {
@@ -62,14 +66,14 @@ func (f *fakeFailedProjectStore) GetProjectSnapshot(_ context.Context, name stri
 	return &cp, nil
 }
 
-func (f *fakeFailedProjectStore) MoveFailedProject(_ context.Context, name, fromNode, message string) error {
+func (f *fakeFailedProjectStore) MoveFailedProject(_ context.Context, p *ProjectSnapshot, message string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.projects[name]; !ok {
-		return store.ErrNotFound
+	if _, ok := f.projects[p.Name]; !ok {
+		return false, store.ErrNotFound
 	}
-	f.moves = append(f.moves, moveCall{name, fromNode, message})
-	return nil
+	f.moves = append(f.moves, moveCall{p.Name, p.NodeRef, message})
+	return !f.unconfirmed, nil
 }
 
 func (f *fakeFailedProjectStore) ClearFailedNodes(_ context.Context, name string) error {
@@ -279,4 +283,18 @@ func TestFailedProjectRescheduler_Resync(t *testing.T) {
 	var got []string
 	ctrl.resync(context.Background(), zap.NewNop(), func(n string) { got = append(got, n) })
 	assert.ElementsMatch(t, []string{"app", "up"}, got, "Failed and Running projects are watched, Pending ones are not")
+}
+
+// A move the store refuses for want of stop evidence is not an error and not a
+// spent move: the controller neither fails the reconcile nor raises the
+// exhaustion alert, and the next resync simply asks again.
+func TestFailedProjectRescheduler_UnconfirmedStopIsNotAMove(t *testing.T) {
+	st := newFakeFailedProjectStore(failedProject("LocalRestartExhausted", "node-a"))
+	st.unconfirmed = true
+
+	res := reconcileAt(t, st, 2*time.Minute)
+
+	assert.False(t, res.Requeue)
+	require.Len(t, st.moves, 1, "the move is attempted")
+	assert.Empty(t, st.exhausted)
 }

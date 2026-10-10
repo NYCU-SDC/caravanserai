@@ -375,29 +375,62 @@ func (a *ProjectStoreAdapter) GetProjectSnapshot(ctx context.Context, name strin
 	return snapshotOf(project), nil
 }
 
-// MoveFailedProject satisfies controller.FailedProjectStore. It returns a
-// Failed Project to Pending so the scheduler places it again, and records the
+// MoveFailedProject satisfies controller.FailedProjectStore. It releases a
+// Failed Project's assignment so the scheduler places it again, and records the
 // Node it leaves in FailedNodes so the scheduler does not choose it again.
 //
-// It does nothing unless the Project is still Failed on fromNode: the decision
-// to move was made on an earlier read, and a Project that was since applied
-// again, deleted or moved is no longer the one that was judged.
+// Failed is not stopped. A Project fails when its containers keep exiting, but
+// a crash-looping container may be running at this moment, and the Node is up.
+// So the move goes through the same gate as every other release: the assigned
+// Agent must have confirmed that this generation's containers are stopped
+// (WorkloadStopped). Without that the Project stays Failed on its Node with
+// TakeoverRequired, and nothing about its moves changes — FailedNodes is not
+// extended, so no move is spent on one that did not happen.
 //
-// Clearing nodeRef revokes the assignment but, as in SetProjectPending, leaves
-// the generation counter and assignment history alone.
-func (a *ProjectStoreAdapter) MoveFailedProject(ctx context.Context, name, fromNode, message string) error {
+// Everything is decided in one UID-bound write against the snapshot the
+// controller judged: the Project must still be the same lifetime, Failed, on the
+// same Node and generation. A release appends the cleanup obligation in that
+// same write, so no reader can see the assignment gone without its debt.
+//
+// It reports whether the Project was moved. Calling it again after a move is a
+// no-op: the Project is no longer Failed on that Node.
+func (a *ProjectStoreAdapter) MoveFailedProject(ctx context.Context, p *controller.ProjectSnapshot, message string) (bool, error) {
 	now := time.Now().UTC()
-	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
-		if status.Phase != v1.ProjectPhaseFailed || status.NodeRef != fromNode {
+	assignment := v1.AssignmentIdentity{ProjectUID: p.UID, NodeName: p.NodeRef, AssignmentGeneration: p.AssignmentGeneration}
+
+	var moved bool
+	err := a.s.UpdateProjectStatusForUID(ctx, p.Name, p.UID, func(status *v1.ProjectStatus) error {
+		moved = false
+		if status.Phase != v1.ProjectPhaseFailed || status.NodeRef != p.NodeRef ||
+			status.AssignmentGeneration != p.AssignmentGeneration {
+			// Applied again, deleted, moved, or reassigned since it was judged.
 			return nil
 		}
-		if !slices.Contains(status.FailedNodes, fromNode) {
-			status.FailedNodes = append(status.FailedNodes, fromNode)
+
+		if !status.Recovery.WorkloadStoppedFor(assignment) {
+			status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+				Type:   v1.ConditionTypeTakeoverRequired,
+				Status: v1.ConditionTrue,
+				Reason: "WorkloadStopUnconfirmed",
+				Message: fmt.Sprintf("Failed on node %s, which has not confirmed generation %d stopped; "+
+					"the project stays assigned to it until the stop is confirmed or the takeover is authorized",
+					p.NodeRef, p.AssignmentGeneration),
+				LastTransitionTime: now,
+			}, false)
+			return nil
+		}
+
+		moved = true
+		if !slices.Contains(status.FailedNodes, p.NodeRef) {
+			status.FailedNodes = append(status.FailedNodes, p.NodeRef)
 		}
 		status.Phase = v1.ProjectPhasePending
+		// The generation counter and history stay: the next assignment must
+		// advance past every generation this Project ever held.
 		status.NodeRef = ""
+		status.EnsureRecovery().AddObligation(assignment, now, v1.ReleaseByWorkloadStopped)
 		status.Conditions = v1.RemoveConditions(status.Conditions,
-			v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt)
+			v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt, v1.ConditionTypeTakeoverRequired)
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypePhase,
 			Status:             v1.ConditionTrue,
@@ -407,6 +440,10 @@ func (a *ProjectStoreAdapter) MoveFailedProject(ctx context.Context, name, fromN
 		}, true)
 		return nil
 	})
+	if err != nil {
+		return false, err
+	}
+	return moved, nil
 }
 
 // ClearFailedNodes satisfies controller.FailedProjectStore.
