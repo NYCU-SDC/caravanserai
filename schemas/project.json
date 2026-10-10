@@ -249,8 +249,21 @@
       ],
       "description": "Lifecycle state of a Project as maintained by the Controller Manager."
     },
+    "ProjectSize": {
+      "type": "string",
+      "enum": [
+        "Small",
+        "Medium",
+        "Large"
+      ],
+      "description": "T-shirt size declaring the Project's resource footprint. Defaults to Medium when omitted."
+    },
     "ProjectSpec": {
       "properties": {
+        "size": {
+          "$ref": "#/$defs/ProjectSize",
+          "description": "Size declares the Project's resource footprint for capacity-aware\nplacement. Omitting it means DefaultProjectSize; see EffectiveSize."
+        },
         "services": {
           "items": {
             "$ref": "#/$defs/ServiceDef"

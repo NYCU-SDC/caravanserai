@@ -81,6 +81,10 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 	if len(spec.Services) == 0 {
 		return handlerutil.NewValidationError("spec.services", nil, "spec.services must contain at least one service")
 	}
+	if spec.Size != "" && !spec.Size.IsValid() {
+		return handlerutil.NewValidationError("spec.size", spec.Size,
+			`spec.size must be one of "Small", "Medium", "Large"`)
+	}
 	for _, svc := range spec.Services {
 		if svc.Name == "" {
 			return handlerutil.NewValidationError("spec.services[].name", nil, "each service must have a non-empty name")
