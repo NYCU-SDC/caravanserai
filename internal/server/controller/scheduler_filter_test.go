@@ -77,7 +77,7 @@ func TestFilterNodes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ledger, _ := newTestLedger(nil)
-			got, rejected, err := filterNodes(context.Background(), ledger, tt.nodes, v1.ProjectSizeMedium)
+			got, rejected, err := filterNodes(context.Background(), ledger, tt.nodes, v1.ProjectSizeMedium, nil)
 			require.NoError(t, err)
 
 			var names []string
@@ -100,12 +100,12 @@ func TestFilterNodes(t *testing.T) {
 		ledger, _ := newTestLedger(map[string][]*ProjectSnapshot{"n1": snapshots(v1.ProjectSizeLarge)})
 		n := ReadyNode{Name: "n1", Allocatable: v1.ResourceList{"cpu": "4", "memory": "8Gi"}}
 
-		got, _, err := filterNodes(context.Background(), ledger, []ReadyNode{n}, v1.ProjectSizeLarge)
+		got, _, err := filterNodes(context.Background(), ledger, []ReadyNode{n}, v1.ProjectSizeLarge, nil)
 		require.NoError(t, err)
 		assert.Len(t, got, 1, "a second Large fits exactly")
 
 		ledger, _ = newTestLedger(map[string][]*ProjectSnapshot{"n1": snapshots(v1.ProjectSizeLarge, v1.ProjectSizeLarge)})
-		got, rejected, err := filterNodes(context.Background(), ledger, []ReadyNode{n}, v1.ProjectSizeSmall)
+		got, rejected, err := filterNodes(context.Background(), ledger, []ReadyNode{n}, v1.ProjectSizeSmall, nil)
 		require.NoError(t, err)
 		assert.Empty(t, got, "a full node has no room even for Small")
 		require.Len(t, rejected, 1)
@@ -114,8 +114,25 @@ func TestFilterNodes(t *testing.T) {
 	t.Run("ledger error is returned, not treated as full", func(t *testing.T) {
 		ledger := NewCapacityLedger(zap.NewNop(), &fakeCapacityProjectStore{err: assert.AnError})
 		got, _, err := filterNodes(context.Background(), ledger,
-			[]ReadyNode{{Name: "n1", Allocatable: alloc}}, v1.ProjectSizeSmall)
+			[]ReadyNode{{Name: "n1", Allocatable: alloc}}, v1.ProjectSizeSmall, nil)
 		assert.ErrorIs(t, err, assert.AnError)
 		assert.Empty(t, got)
 	})
+}
+
+func TestFilterNodes_ExcludesNodesTheProjectFailedOn(t *testing.T) {
+	alloc := v1.ResourceList{"cpu": "4", "memory": "8Gi"}
+	nodes := []ReadyNode{{Name: "failed-1", Allocatable: alloc}, {Name: "fresh", Allocatable: alloc}, {Name: "failed-2", Allocatable: alloc}}
+	ledger, _ := newTestLedger(nil)
+
+	got, rejected, err := filterNodes(context.Background(), ledger, nodes, v1.ProjectSizeSmall, []string{"failed-1", "failed-2"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "fresh", got[0].Name)
+	require.Len(t, rejected, 2)
+	assert.Contains(t, rejected[0], "already failed this project")
+
+	got, _, err = filterNodes(context.Background(), ledger, nodes[:1], v1.ProjectSizeSmall, []string{"failed-1"})
+	require.NoError(t, err)
+	assert.Empty(t, got, "a node excluded for this project is not a candidate even when it is the only one")
 }

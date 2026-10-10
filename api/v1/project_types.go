@@ -406,6 +406,17 @@ type ProjectStatus struct {
 	// lifecycle first. Server-owned; not a user manifest field.
 	AssignmentHistory AssignmentHistory `json:"assignmentHistory,omitempty" yaml:"assignmentHistory,omitempty"`
 
+	// FailedNodes names the Nodes this Project was moved off after it was
+	// reported Failed, oldest first. The scheduler never places the Project on
+	// one of them, so a move actually changes Node, and its length is how many
+	// moves have been spent against the retry cap.
+	//
+	// It is cleared when the Project has run on a new Node long enough to count
+	// as recovered, and when the user applies the Project again.
+	//
+	// Server-owned; not a user manifest field.
+	FailedNodes []string `json:"failedNodes,omitempty" yaml:"failedNodes,omitempty"`
+
 	// Conditions is a list of granular observable states.
 	Conditions []Condition `json:"conditions,omitempty" yaml:"conditions,omitempty"`
 }

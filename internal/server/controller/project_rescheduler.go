@@ -35,17 +35,20 @@ const (
 // ProjectSnapshot is the minimal view of a Project needed by
 // ProjectReschedulerController and CapacityLedger.
 type ProjectSnapshot struct {
-	Name       string
-	Phase      v1.ProjectPhase
-	NodeRef    string
-	Size       v1.ProjectSize
-	Conditions []ConditionSnapshot
+	Name    string
+	Phase   v1.ProjectPhase
+	NodeRef string
+	Size    v1.ProjectSize
+	// FailedNodes are the Nodes the Project has been moved off after Failed.
+	FailedNodes []string
+	Conditions  []ConditionSnapshot
 }
 
 // ConditionSnapshot is the minimal view of a Condition needed by this
 // controller.
 type ConditionSnapshot struct {
 	Type               v1.ConditionType
+	Reason             string
 	LastTransitionTime time.Time
 }
 

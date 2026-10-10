@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 )
@@ -23,14 +24,19 @@ type candidate struct {
 // §5.1). It narrows nodes, already limited to Ready and schedulable, to the
 // candidates that can host a Project of the given size:
 //
+//   - the Node is not one the Project failed on and was moved off (excluded),
 //   - the Node is not reporting DiskPressure or MemoryPressure, and
 //   - the Project's size fits in what the Node has left (CapacityLedger).
 //
 // rejected has one line per excluded Node saying why, for the scheduler to log.
 // The error is non-nil only when the ledger could not be computed; the
 // scheduler then retries rather than treating the Node as full.
-func filterNodes(ctx context.Context, ledger *CapacityLedger, nodes []ReadyNode, size v1.ProjectSize) (candidates []candidate, rejected []string, err error) {
+func filterNodes(ctx context.Context, ledger *CapacityLedger, nodes []ReadyNode, size v1.ProjectSize, excluded []string) (candidates []candidate, rejected []string, err error) {
 	for _, n := range nodes {
+		if slices.Contains(excluded, n.Name) {
+			rejected = append(rejected, fmt.Sprintf("node %q already failed this project", n.Name))
+			continue
+		}
 		if cond, ok := underPressure(n); ok {
 			rejected = append(rejected, fmt.Sprintf("node %q reports %s", n.Name, cond))
 			continue

@@ -320,6 +320,13 @@
           "$ref": "#/$defs/AssignmentHistory",
           "description": "AssignmentHistory records whether this Project was ever assigned a Node,\ngating whether it may be hard-deleted directly or must enter the cleanup\nlifecycle first. Server-owned; not a user manifest field."
         },
+        "failedNodes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "FailedNodes names the Nodes this Project was moved off after it was\nreported Failed, oldest first. The scheduler never places the Project on\none of them, so a move actually changes Node, and its length is how many\nmoves have been spent against the retry cap.\n\nIt is cleared when the Project has run on a new Node long enough to count\nas recovered, and when the user applies the Project again.\n\nServer-owned; not a user manifest field."
+        },
         "conditions": {
           "items": {
             "$ref": "#/$defs/Condition"

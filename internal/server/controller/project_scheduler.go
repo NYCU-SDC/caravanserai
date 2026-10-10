@@ -25,9 +25,9 @@ type SchedulerProjectStore interface {
 	// GetProjectPhase returns the current phase and nodeRef of the named Project.
 	GetProjectPhase(ctx context.Context, name string) (v1.ProjectPhase, string, error)
 
-	// GetProjectSize returns the declared size of the named Project; empty
-	// when it declared none.
-	GetProjectSize(ctx context.Context, name string) (v1.ProjectSize, error)
+	// GetProjectPlacement returns what the scheduler needs to know about the
+	// named Project beyond its phase.
+	GetProjectPlacement(ctx context.Context, name string) (ProjectPlacement, error)
 
 	// CapacityProjectStore lets the scheduler's capacity ledger see what is
 	// already placed on each Node.
@@ -36,6 +36,17 @@ type SchedulerProjectStore interface {
 	// SetProjectScheduled writes the nodeRef and transitions the Project to
 	// Scheduled phase atomically.
 	SetProjectScheduled(ctx context.Context, name, nodeRef string) error
+}
+
+// ProjectPlacement is what the scheduler needs to know about a Project to
+// choose a Node for it.
+type ProjectPlacement struct {
+	// Size is the declared size; empty when the Project declared none.
+	Size v1.ProjectSize
+
+	// ExcludedNodes are Nodes the Project must not be placed on: the ones it
+	// failed on and was moved off, so that moving it changes Node.
+	ExcludedNodes []string
 }
 
 // ReadyNode is the view of a schedulable Node that placement decisions need.
@@ -143,7 +154,7 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		return Result{Requeue: true}, nil
 	}
 
-	size, err := c.projects.GetProjectSize(ctx, name)
+	placement, err := c.projects.GetProjectPlacement(ctx, name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			log.Debug("Project not found, skipping")
@@ -152,7 +163,8 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		return Result{}, err
 	}
 
-	candidates, rejected, err := filterNodes(ctx, c.ledger, readyNodes, size)
+	size := placement.Size
+	candidates, rejected, err := filterNodes(ctx, c.ledger, readyNodes, size, placement.ExcludedNodes)
 	if err != nil {
 		return Result{}, err
 	}
