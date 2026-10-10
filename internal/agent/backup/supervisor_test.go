@@ -256,4 +256,14 @@ func TestShouldSupervise(t *testing.T) {
 	ephemeralOnly := base()
 	ephemeralOnly.Spec.Volumes = []v1.VolumeDef{{Name: "c", Type: v1.VolumeTypeEphemeral}}
 	assert.False(t, shouldSupervise(ephemeralOnly))
+
+	// A periodic run during a planned move would restart the containers the
+	// move left stopped.
+	beingMoved := base()
+	beingMoved.Status.Eviction = &v1.ProjectEviction{State: v1.EvictionStateBackingUp}
+	assert.False(t, shouldSupervise(beingMoved))
+
+	queuedMove := base()
+	queuedMove.Status.Eviction = &v1.ProjectEviction{State: v1.EvictionStateQueued}
+	assert.True(t, shouldSupervise(queuedMove), "a queued move has not stopped anything yet")
 }

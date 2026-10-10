@@ -2,7 +2,9 @@ package config
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"strconv"
 
 	configutil "github.com/NYCU-SDC/summer/pkg/config"
 	"github.com/joho/godotenv"
@@ -55,6 +57,11 @@ type Config struct {
 	// assignment rather than accepted. Enable it cluster-wide only after every
 	// Agent sends the fence and legacy runtime ownership has been remediated.
 	UIDEnforcement bool `yaml:"uid_enforcement" envconfig:"UID_ENFORCEMENT"`
+
+	// MaxInFlightEvictions caps how many planned moves (drain, fail-back) run
+	// at once across the cluster (CARA-119). Each move is downtime plus a
+	// backup and a restore, so the default is one. Zero means the default.
+	MaxInFlightEvictions int `yaml:"max_inflight_evictions" envconfig:"MAX_INFLIGHT_EVICTIONS"`
 }
 
 // Load reads cara-server config from file → env → flags (later sources win).
@@ -130,6 +137,13 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		HeadscaleUser:    os.Getenv("HEADSCALE_USER"),
 		UIDEnforcement:   os.Getenv("UID_ENFORCEMENT") == "true",
 	}
+	if v := os.Getenv("MAX_INFLIGHT_EVICTIONS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("MAX_INFLIGHT_EVICTIONS: %w", err)
+		}
+		envConfig.MaxInFlightEvictions = n
+	}
 
 	return configutil.Merge[Config](cfg, envConfig)
 }
@@ -149,6 +163,7 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.StringVar(&flagConfig.HeadscaleAPIKey, "headscale-api-key", "", "Headscale management API key")
 	flag.StringVar(&flagConfig.HeadscaleUser, "headscale-user", "", "Headscale user new pre-auth keys are created under (default: cara-node)")
 	flag.BoolVar(&flagConfig.UIDEnforcement, "uid-enforcement", false, "enforce Project UID and assignment-generation fencing (default: false, compatibility mode)")
+	flag.IntVar(&flagConfig.MaxInFlightEvictions, "max-inflight-evictions", 0, "planned moves (drain, fail-back) allowed at once across the cluster (default: 1)")
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)
 }

@@ -116,6 +116,19 @@ const (
 	// server logs. It is cleared when the Project is applied again.
 	ConditionTypeRescheduleExhausted ConditionType = "RescheduleExhausted"
 
+	// ConditionTypeEvictionBackup is how the agent reports the fresh backup a
+	// planned move asked for: True when it is committed and the Project has
+	// been left stopped for the move, False when it failed and the Project
+	// was started again where it is. Written by the agent; cleared by the
+	// server whenever a move starts or ends.
+	ConditionTypeEvictionBackup ConditionType = "EvictionBackup"
+
+	// ConditionTypeEvictionFailed is True on a Project whose planned move was
+	// abandoned: no other Node had room, the backup failed, the agent never
+	// started it, or the Project could not be placed afterwards. The Reason
+	// says which. It is cleared when another move is asked for.
+	ConditionTypeEvictionFailed ConditionType = "EvictionFailed"
+
 	// ConditionTypeDiskPressure indicates whether the node's disk usage is
 	// approaching capacity. Set by the NodeConditionController based on
 	// the Agent's reported Capacity and Allocatable values.

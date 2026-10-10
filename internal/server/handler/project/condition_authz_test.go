@@ -114,3 +114,32 @@ func TestRecoveryBlockedWithoutFenceIsRejectedInStrictMode(t *testing.T) {
 		t.Fatalf("store was written: %+v", s.patched)
 	}
 }
+
+// A planned move's backup result is agent-owned; the verdict on the move is
+// not. An agent that could write EvictionFailed could cancel moves, and one
+// that could forge any other server-owned condition could steer them.
+func TestEvictionConditionsOwnership(t *testing.T) {
+	tests := []struct {
+		condType string
+		wantCode int
+	}{
+		{"EvictionBackup", http.StatusNoContent},
+		{"EvictionFailed", http.StatusBadRequest},
+		{"RescheduleExhausted", http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.condType, func(t *testing.T) {
+			s := &conditionFakeStore{}
+			h := newFenceHandler(s, true)
+			rec := doPatchCondition(h, "demo", tt.condType,
+				`{"status":"True","reason":"BackupSucceeded","message":"b1",`+
+					`"uid":"uid-1","nodeRef":"node-a","assignmentGeneration":5}`)
+			if rec.Code != tt.wantCode {
+				t.Fatalf("patch %s status = %d, want %d; body = %s", tt.condType, rec.Code, tt.wantCode, rec.Body.String())
+			}
+			if wantWrite := tt.wantCode == http.StatusNoContent; wantWrite != (len(s.patched) == 1) {
+				t.Fatalf("patched = %+v, want a write: %v", s.patched, wantWrite)
+			}
+		})
+	}
+}

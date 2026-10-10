@@ -57,6 +57,11 @@ type RouteRefresher interface {
 // containers are never stopped.
 var ErrNoManagedVolumes = errors.New("backup: project has no Managed volumes")
 
+// ErrProjectBusy is returned by RunForEviction when another operation holds
+// the Project. Nothing was done; the caller tries again later. Run, by
+// contrast, treats a busy Project as a skipped tick and returns nil.
+var ErrProjectBusy = errors.New("backup: project is busy with another operation")
+
 // ErrInsufficientDiskSpace is returned when the staging filesystem is below
 // the configured minimum. It is raised before containers are stopped, so a
 // full disk costs no downtime.
@@ -186,7 +191,43 @@ func NewRunner(
 //     clear the Maintenance condition, and release the claim.
 //
 // Returning ErrNoManagedVolumes means the Project was left untouched.
-func (r *Runner) Run(ctx context.Context, project *v1.Project) (err error) {
+func (r *Runner) Run(ctx context.Context, project *v1.Project) error {
+	return r.run(ctx, project, nil)
+}
+
+// evictionRun carries what a backup for a planned move does differently.
+type evictionRun struct {
+	// stillWanted is asked once the backup is committed. True leaves the
+	// containers stopped for the move; false restarts them as usual.
+	stillWanted func(context.Context) bool
+
+	// Filled in by run.
+	backupID    string
+	leftStopped bool
+}
+
+// RunForEviction takes the fresh backup a planned move needs (CARA-119). It
+// is Run with two differences.
+//
+// On success it asks stillWanted whether the move is still on, and if so
+// leaves the containers stopped: anything written between the backup and the
+// Project leaving this node would otherwise be lost, since the new node
+// restores from this backup. If the move was called off meanwhile, the
+// containers are restarted as after any backup.
+//
+// A Project already held by another operation is reported as ErrProjectBusy
+// rather than skipped silently, since the caller is waiting on this backup.
+//
+// It returns the committed backup's ID and whether the containers were left
+// stopped. On failure the containers are restarted, as by Run.
+func (r *Runner) RunForEviction(ctx context.Context, project *v1.Project, stillWanted func(context.Context) bool) (backupID string, leftStopped bool, err error) {
+	ev := &evictionRun{stillWanted: stillWanted}
+	err = r.run(ctx, project, ev)
+	return ev.backupID, ev.leftStopped, err
+}
+
+// run is Run, and RunForEviction when ev is not nil.
+func (r *Runner) run(ctx context.Context, project *v1.Project, ev *evictionRun) (err error) {
 	key := ResourceKey{Namespace: project.Namespace, Name: project.Name}
 	log := r.logger.With(zap.String("project", key.String()))
 
@@ -199,6 +240,9 @@ func (r *Runner) Run(ctx context.Context, project *v1.Project) (err error) {
 	if !ok {
 		op, _ := r.coordinator.Current(key)
 		log.Info("Skipping backup, project is busy", zap.String("operation", string(op)))
+		if ev != nil {
+			return ErrProjectBusy
+		}
 		return nil
 	}
 	// Registered first so it runs last: nothing else may claim the Project
@@ -220,7 +264,11 @@ func (r *Runner) Run(ctx context.Context, project *v1.Project) (err error) {
 	log = log.With(zap.String("backupID", backupID))
 
 	uid, nodeRef, generation := project.ObjectMeta.UID, project.Status.NodeRef, project.Status.AssignmentGeneration
-	if err := r.conditions.SetMaintenance(ctx, key, uid, nodeRef, generation, "BackingUp"); err != nil {
+	maintenanceReason := "BackingUp"
+	if ev != nil {
+		maintenanceReason = "BackingUpForMove"
+	}
+	if err := r.conditions.SetMaintenance(ctx, key, uid, nodeRef, generation, maintenanceReason); err != nil {
 		// Correctness is already protected by the claim above; losing the
 		// condition only costs visibility.
 		log.Warn("Failed to set Maintenance condition", zap.Error(err))
@@ -239,7 +287,7 @@ func (r *Runner) Run(ctx context.Context, project *v1.Project) (err error) {
 	// error and strand them. Runs before the condition is cleared and before
 	// the claim is released.
 	defer func() {
-		r.restoreService(ctx, project, key, err, log)
+		r.restoreService(ctx, project, key, err, ev, log)
 	}()
 
 	if err = r.containers.StopProject(ctx, project); err != nil {
@@ -276,6 +324,9 @@ func (r *Runner) Run(ctx context.Context, project *v1.Project) (err error) {
 	}
 
 	log.Info("Backup complete", zap.Int("volumes", len(entries)))
+	if ev != nil {
+		ev.backupID = backupID
+	}
 	return nil
 }
 
@@ -416,12 +467,21 @@ func (r *Runner) putJSON(ctx context.Context, key string, body []byte) error {
 // restoreService brings the Project back after a backup, on every exit path.
 // Whether the containers are restarted depends on why the run ended and on
 // whether this node still owns the Project — see ShouldRestartContainers.
-func (r *Runner) restoreService(ctx context.Context, project *v1.Project, key ResourceKey, runErr error, log *zap.Logger) {
+//
+// A backup for a planned move that succeeded leaves the containers stopped
+// while the move is still wanted; see RunForEviction.
+func (r *Runner) restoreService(ctx context.Context, project *v1.Project, key ResourceKey, runErr error, ev *evictionRun, log *zap.Logger) {
 	reason := classifyExit(ctx, runErr)
 
 	// The caller's context may already be cancelled; ownership and restart
 	// still need to run, so detach from cancellation while keeping values.
 	cleanupCtx := context.WithoutCancel(ctx)
+
+	if ev != nil && runErr == nil && ev.stillWanted(cleanupCtx) {
+		ev.leftStopped = true
+		log.Info("Leaving containers stopped: the project is being moved off this node")
+		return
+	}
 
 	ownership := r.ownership.Resolve(cleanupCtx, key)
 	if !ShouldRestartContainers(reason, ownership) {

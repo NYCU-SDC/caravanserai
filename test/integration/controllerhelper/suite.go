@@ -62,6 +62,10 @@ func NewSuite(t *testing.T, pool *pgxpool.Pool, databaseURL string, logger *zap.
 
 	pgStore, err := pgstore.New(ctx, databaseURL, logger, bus)
 	require.NoError(t, err, "pgstore.New")
+	// Every suite opens its own pool; left open, they pile up across the
+	// package until PostgreSQL refuses new clients. Cleanups run last-in
+	// first-out, so the controllers Start registers are stopped before this.
+	t.Cleanup(pgStore.Close)
 
 	// Merge caller-provided options with the fast seed interval default.
 	// If the caller already provided WithSeedInterval, theirs wins (last
@@ -97,6 +101,13 @@ func NewSuite(t *testing.T, pool *pgxpool.Pool, databaseURL string, logger *zap.
 	mgr.Add(controller.NewFailedProjectReschedulerController(logger,
 		projectAdapter,
 		bus,
+		opts...,
+	))
+	mgr.Add(controller.NewEvictionController(logger,
+		projectAdapter,
+		adapter.NewNodeReadyAdapter(pgStore),
+		bus,
+		controller.DefaultMaxInFlightEvictions,
 		opts...,
 	))
 
