@@ -63,10 +63,10 @@ type SchedulerNodeStore interface {
 // ProjectSchedulerController picks a target Node for every Project in Pending
 // phase and transitions it to Scheduled.
 //
-// Scheduling is Filter -> pick. Filter narrows the Ready Nodes to those that
-// can legitimately host the Project (see filterNodes). The pick is still the
-// MVP one, the first candidate; a Score stage can be dropped in later without
-// changing the controller lifecycle or the Manager wiring.
+// Scheduling is Filter -> Score. Filter narrows the Ready Nodes to those that
+// can legitimately host the Project (see filterNodes); Score picks the best of
+// them, preferring primary-tier Nodes and then the emptiest (see
+// scoreCandidate). The Project is bound to the winner.
 type ProjectSchedulerController struct {
 	logger       *zap.Logger
 	projects     SchedulerProjectStore
@@ -164,10 +164,14 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		return Result{Requeue: true}, nil
 	}
 
-	// MVP: pick the first candidate. Replace with a Score stage later.
-	target := candidates[0].Name
+	best, score := pickBest(candidates, size)
+	target := best.Name
 
-	log.Info("Scheduling project", zap.String("node", target))
+	log.Info("Scheduling project",
+		zap.String("node", target),
+		zap.String("tier", string(v1.NodeTierFromLabels(best.Labels))),
+		zap.Float64("score", score),
+		zap.Int("candidates", len(candidates)))
 
 	if err := c.projects.SetProjectScheduled(ctx, name, target); err != nil {
 		return Result{}, err

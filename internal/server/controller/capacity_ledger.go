@@ -69,6 +69,15 @@ func (l *CapacityLedger) Used(ctx context.Context, node string) (NodeUsage, erro
 	return used, nil
 }
 
+// placementCheck is the outcome of checking a Project against a Node, with the
+// numbers the verdict rests on so that scoring does not recompute them.
+type placementCheck struct {
+	ok          bool
+	reason      string
+	used        NodeUsage
+	allocatable NodeUsage
+}
+
 // Fits reports whether a Project of the given size can be placed on node
 // without the Node's booked total exceeding its Allocatable. When it cannot,
 // reason says why, for the scheduler to log; the error is non-nil only when
@@ -77,27 +86,39 @@ func (l *CapacityLedger) Used(ctx context.Context, node string) (NodeUsage, erro
 // A Node that has not reported Allocatable, or reports one that cannot be
 // parsed, does not fit: placing onto it would be unguarded over-commit.
 func (l *CapacityLedger) Fits(ctx context.Context, node ReadyNode, size v1.ProjectSize) (ok bool, reason string, err error) {
+	c, err := l.check(ctx, node, size)
+	return c.ok, c.reason, err
+}
+
+// check is Fits plus the usage and Allocatable it was decided on. Usage is
+// zero when the Node was rejected for not reporting a usable Allocatable.
+func (l *CapacityLedger) check(ctx context.Context, node ReadyNode, size v1.ProjectSize) (placementCheck, error) {
 	cpuMilli, memoryBytes, reason := parseAllocatable(node)
 	if reason != "" {
-		return false, reason, nil
+		return placementCheck{reason: reason}, nil
 	}
+	allocatable := NodeUsage{CPUMilli: cpuMilli, MemoryBytes: memoryBytes}
 
 	used, err := l.Used(ctx, node.Name)
 	if err != nil {
-		return false, "", err
+		return placementCheck{}, err
 	}
 
+	c := placementCheck{used: used, allocatable: allocatable}
 	req := size.Requests()
 	if used.CPUMilli+req.CPUMilli > cpuMilli {
-		return false, fmt.Sprintf("node %q lacks cpu: %dm in use + %dm requested > %dm allocatable",
-			node.Name, used.CPUMilli, req.CPUMilli, cpuMilli), nil
+		c.reason = fmt.Sprintf("node %q lacks cpu: %dm in use + %dm requested > %dm allocatable",
+			node.Name, used.CPUMilli, req.CPUMilli, cpuMilli)
+		return c, nil
 	}
 	if used.MemoryBytes+req.MemoryBytes > memoryBytes {
-		return false, fmt.Sprintf("node %q lacks memory: %s in use + %s requested > %s allocatable",
+		c.reason = fmt.Sprintf("node %q lacks memory: %s in use + %s requested > %s allocatable",
 			node.Name, quantity.FormatMemory(used.MemoryBytes), quantity.FormatMemory(req.MemoryBytes),
-			quantity.FormatMemory(memoryBytes)), nil
+			quantity.FormatMemory(memoryBytes))
+		return c, nil
 	}
-	return true, "", nil
+	c.ok = true
+	return c, nil
 }
 
 // parseAllocatable reads the node's Allocatable cpu and memory. A non-empty

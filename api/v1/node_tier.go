@@ -43,12 +43,17 @@ func ValidateNodeLabels(labels map[string]string) error {
 	return nil
 }
 
-// EffectiveTier returns the Node's tier from its LabelNodeTier label, or
-// DefaultNodeTier when the label is unset. Labels are validated on write, so
-// an invalid value is not expected here; it also resolves to DefaultNodeTier.
-func (n Node) EffectiveTier() NodeTier {
-	if tier := NodeTier(n.Labels[LabelNodeTier]); tier.IsValid() {
+// NodeTierFromLabels returns the tier in labels' LabelNodeTier, or
+// DefaultNodeTier when the label is unset. Labels are validated on write, so an
+// invalid value is not expected here; it also resolves to DefaultNodeTier.
+func NodeTierFromLabels(labels map[string]string) NodeTier {
+	if tier := NodeTier(labels[LabelNodeTier]); tier.IsValid() {
 		return tier
 	}
 	return DefaultNodeTier
+}
+
+// EffectiveTier returns the Node's tier; see NodeTierFromLabels.
+func (n Node) EffectiveTier() NodeTier {
+	return NodeTierFromLabels(n.Labels)
 }

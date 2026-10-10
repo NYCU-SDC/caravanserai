@@ -168,13 +168,18 @@ func TestCapacityLedgerAgainstPostgres(t *testing.T) {
 }
 
 // createLedgerNode creates a Ready node with the given Allocatable and, when
-// busy is true, a Running Large project that fills 2c / 4Gi of it.
-func createLedgerNode(t *testing.T, s *controllerhelper.Suite, name string, allocatable v1.ResourceList, busy bool) {
+// busy is true, a Running Large project that fills 2c / 4Gi of it. tier, when
+// not empty, is set as the node's cara.io/tier label.
+func createLedgerNode(t *testing.T, s *controllerhelper.Suite, name, tier string, allocatable v1.ResourceList, busy bool) {
 	t.Helper()
 	ctx := context.Background()
+	var labels map[string]string
+	if tier != "" {
+		labels = map[string]string{v1.LabelNodeTier: tier}
+	}
 	require.NoError(t, s.Store.CreateNode(ctx, &v1.Node{
 		TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Node"},
-		ObjectMeta: v1.ObjectMeta{Name: name},
+		ObjectMeta: v1.ObjectMeta{Name: name, Labels: labels},
 		Status:     v1.NodeStatus{State: v1.NodeStateReady, Allocatable: allocatable, LastHeartbeat: time.Now().UTC()},
 	}))
 	if busy {
@@ -194,8 +199,8 @@ func TestSchedulerFilterSkipsFullNode(t *testing.T) {
 	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
 	s.TruncateAll(t)
 
-	createLedgerNode(t, s, "filter-full", v1.ResourceList{"cpu": "2", "memory": "4Gi"}, true)
-	createLedgerNode(t, s, "filter-roomy", v1.ResourceList{"cpu": "8", "memory": "16Gi"}, false)
+	createLedgerNode(t, s, "filter-full", "", v1.ResourceList{"cpu": "2", "memory": "4Gi"}, true)
+	createLedgerNode(t, s, "filter-roomy", "", v1.ResourceList{"cpu": "8", "memory": "16Gi"}, false)
 	s.Start(t)
 
 	require.NoError(t, s.Store.CreateProject(context.Background(), &v1.Project{
@@ -217,8 +222,8 @@ func TestSchedulerFilterNoRoomStaysPending(t *testing.T) {
 	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
 	s.TruncateAll(t)
 
-	createLedgerNode(t, s, "filter-full", v1.ResourceList{"cpu": "2", "memory": "4Gi"}, true)
-	createLedgerNode(t, s, "filter-unreported", nil, false) // an agent that predates CARA-111
+	createLedgerNode(t, s, "filter-full", "", v1.ResourceList{"cpu": "2", "memory": "4Gi"}, true)
+	createLedgerNode(t, s, "filter-unreported", "", nil, false) // an agent that predates CARA-111
 	s.Start(t)
 
 	ctx := context.Background()
@@ -233,4 +238,49 @@ func TestSchedulerFilterNoRoomStaysPending(t *testing.T) {
 		p, err := s.Store.GetProject(ctx, "filter-project")
 		return err != nil || p.Status.Phase != v1.ProjectPhasePending
 	}, 3*time.Second, 200*time.Millisecond, "a project that fits nowhere must stay Pending")
+}
+
+// scheduleOnePending creates a Pending Medium project and returns the node the
+// scheduler places it on.
+func scheduleOnePending(t *testing.T, s *controllerhelper.Suite, name string) string {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, s.Store.CreateProject(ctx, &v1.Project{
+		TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"},
+		ObjectMeta: v1.ObjectMeta{Name: name},
+		Spec:       v1.ProjectSpec{Size: v1.ProjectSizeMedium},
+		Status:     v1.ProjectStatus{Phase: v1.ProjectPhasePending},
+	}))
+	controllerhelper.WaitForProjectPhase(t, s.Store, 15*time.Second, name, v1.ProjectPhaseScheduled)
+	p, err := s.Store.GetProject(ctx, name)
+	require.NoError(t, err)
+	return p.Status.NodeRef
+}
+
+// TestSchedulerScorePrefersPrimary validates that with room on both tiers the
+// project goes to the primary node, even though the backup node is emptier
+// and sorts first.
+func TestSchedulerScorePrefersPrimary(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+
+	createLedgerNode(t, s, "score-a-backup", "backup", v1.ResourceList{"cpu": "16", "memory": "64Gi"}, false)
+	createLedgerNode(t, s, "score-z-primary", "primary", v1.ResourceList{"cpu": "4", "memory": "8Gi"}, true)
+	s.Start(t)
+
+	assert.Equal(t, "score-z-primary", scheduleOnePending(t, s, "score-project"))
+}
+
+// TestSchedulerScoreFallsBackToBackup validates that when no primary node has
+// room the project goes to a backup node.
+func TestSchedulerScoreFallsBackToBackup(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+
+	// 2c / 4Gi allocatable is filled by the Running Large project: no room.
+	createLedgerNode(t, s, "score-primary-full", "primary", v1.ResourceList{"cpu": "2", "memory": "4Gi"}, true)
+	createLedgerNode(t, s, "score-backup", "backup", v1.ResourceList{"cpu": "4", "memory": "8Gi"}, false)
+	s.Start(t)
+
+	assert.Equal(t, "score-backup", scheduleOnePending(t, s, "score-project"))
 }
