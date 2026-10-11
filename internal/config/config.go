@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/quantity"
 
 	"go.uber.org/zap"
@@ -68,6 +70,27 @@ func (c *Config) Validate() error {
 	}
 	if _, err := c.FailbackDailyWindow(); err != nil {
 		return err
+	}
+	for name, d := range map[string]time.Duration{
+		"failback_stable_window":     c.FailbackStableWindow,
+		"failback_flap_window":       c.FailbackFlapWindow,
+		"failback_max_stable_window": c.FailbackMaxStableWindow,
+		"failback_cooldown":          c.FailbackCooldown,
+	} {
+		if d < 0 {
+			return fmt.Errorf("%s must not be negative", name)
+		}
+	}
+	// Flaps are counted from the history each node keeps; a window longer
+	// than that history would silently undercount.
+	if c.FailbackFlapWindow > v1.NotReadyHistoryRetention {
+		return fmt.Errorf("failback_flap_window must not exceed %s", v1.NotReadyHistoryRetention)
+	}
+	if c.FailbackBackoffMultiplier < 0 {
+		return errors.New("failback_backoff_multiplier must not be negative")
+	}
+	if c.FailbackMinFreePercent < 0 || c.FailbackMinFreePercent > 100 {
+		return errors.New("failback_min_free_percent must be between 0 and 100")
 	}
 	return nil
 }

@@ -434,6 +434,12 @@ type ProjectEviction struct {
 	// leaves it empty.
 	TargetTier NodeTier `json:"targetTier,omitempty" yaml:"targetTier,omitempty"`
 
+	// AvoidNodes are Nodes the Project must not land on, besides FromNode.
+	// Fail-back lists the primary Nodes it does not trust yet — recovered
+	// too recently, or with too little room to spare — so the scheduler,
+	// which would otherwise prefer the emptiest Node, does not choose them.
+	AvoidNodes []string `json:"avoidNodes,omitempty" yaml:"avoidNodes,omitempty"`
+
 	// RequestedAt is when the move was asked for; queued moves start oldest
 	// first.
 	RequestedAt time.Time `json:"requestedAt" yaml:"requestedAt"`

@@ -138,6 +138,7 @@ func describeNode(w io.Writer, node *v1.Node) {
 	fmt.Fprintln(w, "Status:")
 	printField(w, "  State", stringOrNone(string(node.Status.State)))
 	printField(w, "  Last Heartbeat", formatTimestamp(node.Status.LastHeartbeat))
+	printField(w, "  Recent NotReady", describeRecentNotReady(node.Status.RecentNotReady))
 
 	// Info
 	fmt.Fprintln(w)
@@ -187,15 +188,29 @@ func describeProjectSize(spec v1.ProjectSpec) string {
 }
 
 // describeEviction summarises a planned move in progress, e.g.
-// "Drain off pve1 (BackingUp)" or "FailBack off twcc1 to primary (Queued)".
+// "Drain off pve1 (BackingUp)" or
+// "FailBack off twcc1 to primary, avoiding pve2 (Queued)".
 func describeEviction(e *v1.ProjectEviction) string {
 	if e == nil {
 		return "<none>"
 	}
+	s := fmt.Sprintf("%s off %s", e.Reason, e.FromNode)
 	if e.TargetTier != "" {
-		return fmt.Sprintf("%s off %s to %s (%s)", e.Reason, e.FromNode, e.TargetTier, e.State)
+		s += " to " + string(e.TargetTier)
 	}
-	return fmt.Sprintf("%s off %s (%s)", e.Reason, e.FromNode, e.State)
+	if len(e.AvoidNodes) > 0 {
+		s += ", avoiding " + strings.Join(e.AvoidNodes, ", ")
+	}
+	return s + " (" + string(e.State) + ")"
+}
+
+// describeRecentNotReady summarises a Node's recent NotReady transitions,
+// e.g. "3, latest 2026-10-11T02:00:00Z".
+func describeRecentNotReady(times []time.Time) string {
+	if len(times) == 0 {
+		return "<none>"
+	}
+	return fmt.Sprintf("%d, latest %s", len(times), formatTimestamp(times[len(times)-1]))
 }
 
 // describeProject writes a kubectl-style detailed view of a Project.

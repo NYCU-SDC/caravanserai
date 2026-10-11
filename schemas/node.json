@@ -185,6 +185,14 @@
           },
           "type": "array",
           "description": "Conditions is a list of observable Node conditions."
+        },
+        "recentNotReady": {
+          "items": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "type": "array",
+          "description": "RecentNotReady are the times the Node went NotReady, oldest first,\nkept for NotReadyHistoryRetention and at most NotReadyHistoryMax\nentries. Fail-back reads it to wait longer before trusting a Node that\nkeeps failing. Written by the server through SetState."
         }
       },
       "additionalProperties": false,

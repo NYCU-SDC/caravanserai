@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"NYCU-SDC/caravanserai/internal/dailywindow"
 
@@ -68,13 +69,29 @@ type Config struct {
 	// FailbackWindow is the daily window, "HH:MM-HH:MM" in FailbackTimezone,
 	// in which Projects on the backup tier are moved back to primary
 	// (CARA-121), e.g. "02:00-05:00". It may cross midnight. Empty disables
-	// fail-back. Leave it empty until the anti-flap defences of CARA-122 are
-	// in: without them a primary node that has only just recovered can be
-	// handed Projects straight away.
+	// fail-back.
 	FailbackWindow string `yaml:"failback_window" envconfig:"FAILBACK_WINDOW"`
 	// FailbackTimezone is the IANA time zone FailbackWindow is read in.
 	// Defaults to DefaultFailbackTimezone.
 	FailbackTimezone string `yaml:"failback_timezone" envconfig:"FAILBACK_TIMEZONE"`
+
+	// Fail-back's defences against a flapping primary tier (CARA-122). Zero
+	// means the default; see controller.DefaultFailbackPolicy.
+	//
+	// FailbackStableWindow is how long a primary node must have been Ready
+	// before it may take a Project back. Each NotReady within
+	// FailbackFlapWindow beyond the first multiplies it by
+	// FailbackBackoffMultiplier, up to FailbackMaxStableWindow.
+	FailbackStableWindow      time.Duration `yaml:"failback_stable_window"      envconfig:"FAILBACK_STABLE_WINDOW"`
+	FailbackFlapWindow        time.Duration `yaml:"failback_flap_window"        envconfig:"FAILBACK_FLAP_WINDOW"`
+	FailbackBackoffMultiplier int           `yaml:"failback_backoff_multiplier" envconfig:"FAILBACK_BACKOFF_MULTIPLIER"`
+	FailbackMaxStableWindow   time.Duration `yaml:"failback_max_stable_window"  envconfig:"FAILBACK_MAX_STABLE_WINDOW"`
+	// FailbackCooldown is how long a Project must have run where it is before
+	// fail-back moves it.
+	FailbackCooldown time.Duration `yaml:"failback_cooldown" envconfig:"FAILBACK_COOLDOWN"`
+	// FailbackMinFreePercent is how much of a primary node's CPU and memory
+	// must still be free once the Project is placed there.
+	FailbackMinFreePercent float64 `yaml:"failback_min_free_percent" envconfig:"FAILBACK_MIN_FREE_PERCENT"`
 }
 
 // DefaultFailbackTimezone is the time zone FailbackWindow is read in when
@@ -173,6 +190,37 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		FailbackWindow:   os.Getenv("FAILBACK_WINDOW"),
 		FailbackTimezone: os.Getenv("FAILBACK_TIMEZONE"),
 	}
+	for _, d := range []struct {
+		env string
+		dst *time.Duration
+	}{
+		{"FAILBACK_STABLE_WINDOW", &envConfig.FailbackStableWindow},
+		{"FAILBACK_FLAP_WINDOW", &envConfig.FailbackFlapWindow},
+		{"FAILBACK_MAX_STABLE_WINDOW", &envConfig.FailbackMaxStableWindow},
+		{"FAILBACK_COOLDOWN", &envConfig.FailbackCooldown},
+	} {
+		if v := os.Getenv(d.env); v != "" {
+			parsed, err := time.ParseDuration(v)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", d.env, err)
+			}
+			*d.dst = parsed
+		}
+	}
+	if v := os.Getenv("FAILBACK_BACKOFF_MULTIPLIER"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("FAILBACK_BACKOFF_MULTIPLIER: %w", err)
+		}
+		envConfig.FailbackBackoffMultiplier = n
+	}
+	if v := os.Getenv("FAILBACK_MIN_FREE_PERCENT"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return nil, fmt.Errorf("FAILBACK_MIN_FREE_PERCENT: %w", err)
+		}
+		envConfig.FailbackMinFreePercent = f
+	}
 	if v := os.Getenv("MAX_INFLIGHT_EVICTIONS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
@@ -202,6 +250,12 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.IntVar(&flagConfig.MaxInFlightEvictions, "max-inflight-evictions", 0, "planned moves (drain, fail-back) allowed at once across the cluster (default: 1)")
 	flag.StringVar(&flagConfig.FailbackWindow, "failback-window", "", "daily window HH:MM-HH:MM in which projects are moved back to the primary tier (default: disabled)")
 	flag.StringVar(&flagConfig.FailbackTimezone, "failback-timezone", "", "IANA time zone the fail-back window is read in (default: Asia/Taipei)")
+	flag.DurationVar(&flagConfig.FailbackStableWindow, "failback-stable-window", 0, "how long a primary node must have been Ready before fail-back uses it (default: 30m)")
+	flag.DurationVar(&flagConfig.FailbackFlapWindow, "failback-flap-window", 0, "how far back a primary node's NotReady transitions are counted (default: 24h, at most 168h)")
+	flag.IntVar(&flagConfig.FailbackBackoffMultiplier, "failback-backoff-multiplier", 0, "stable window multiplier per extra NotReady in the flap window (default: 2)")
+	flag.DurationVar(&flagConfig.FailbackMaxStableWindow, "failback-max-stable-window", 0, "cap on the backed-off stable window (default: 8h)")
+	flag.DurationVar(&flagConfig.FailbackCooldown, "failback-cooldown", 0, "how long a project must have run where it is before fail-back moves it (default: 6h)")
+	flag.Float64Var(&flagConfig.FailbackMinFreePercent, "failback-min-free-percent", 0, "percent of a primary node's CPU and memory that must stay free after a fail-back (default: 20)")
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)
 }

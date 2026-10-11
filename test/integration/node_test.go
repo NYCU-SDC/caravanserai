@@ -17,8 +17,10 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/server/adapter"
 	"NYCU-SDC/caravanserai/internal/server/agentdialer"
 	"NYCU-SDC/caravanserai/internal/server/apiserver"
 	"NYCU-SDC/caravanserai/internal/server/handler"
@@ -678,4 +680,62 @@ func mustDecodeBody(t *testing.T, resp *http.Response, v any) {
 func drainBody(resp *http.Response) {
 	defer resp.Body.Close()
 	_, _ = bytes.NewBuffer(nil).ReadFrom(resp.Body)
+}
+
+// TestNodeReadinessIsRecorded validates that coming back through a heartbeat
+// records when the Node became Ready, that repeated heartbeats leave that
+// time alone, and that going NotReady is kept in the Node's history — what
+// fail-back reads to judge a primary node stable (CARA-122).
+func TestNodeReadinessIsRecorded(t *testing.T) {
+	const nodeName = "e2e-node-readiness"
+	ctx := context.Background()
+
+	resp := doRequest(t, http.MethodPost, "/api/v1/nodes", mustMarshal(t, v1.Node{
+		ObjectMeta: v1.ObjectMeta{Name: nodeName},
+	}))
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	drainBody(resp)
+
+	heartbeat := func() {
+		t.Helper()
+		resp := doRequest(t, http.MethodPost, "/api/v1/nodes/"+nodeName+"/heartbeat",
+			mustMarshal(t, map[string]string{"state": string(v1.NodeStateReady)}))
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		drainBody(resp)
+	}
+	readySince := func() (time.Time, bool) {
+		t.Helper()
+		n, err := suite.store.GetNode(ctx, nodeName)
+		require.NoError(t, err)
+		return n.Status.ReadySince()
+	}
+
+	// Created NotReady; the first heartbeat brings it up.
+	heartbeat()
+	first, ok := readySince()
+	require.True(t, ok, "a heartbeat that brings the node up records when")
+
+	time.Sleep(20 * time.Millisecond)
+	heartbeat()
+	again, ok := readySince()
+	require.True(t, ok)
+	assert.True(t, again.Equal(first), "a heartbeat that changes nothing must not move the Ready time")
+
+	// The health controller marks it NotReady, then it comes back.
+	require.NoError(t, adapter.NewNodeStoreAdapter(suite.store).SetNodeState(ctx, nodeName,
+		v1.NodeStateNotReady, "HeartbeatTimeout", "gone"))
+	n, err := suite.store.GetNode(ctx, nodeName)
+	require.NoError(t, err)
+	require.Len(t, n.Status.RecentNotReady, 1, "going NotReady is kept in the history")
+	_, ok = n.Status.ReadySince()
+	assert.False(t, ok)
+
+	heartbeat()
+	back, ok := readySince()
+	require.True(t, ok)
+	assert.True(t, back.After(first), "coming back restarts the Ready time")
+
+	resp = doRequest(t, http.MethodDelete, "/api/v1/nodes/"+nodeName, nil)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+	drainBody(resp)
 }

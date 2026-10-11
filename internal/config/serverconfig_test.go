@@ -201,3 +201,61 @@ func TestServerFailbackWindow(t *testing.T) {
 		assert.Equal(t, "Asia/Tokyo", got.FailbackTimezone)
 	})
 }
+
+func TestServerFailbackPolicySettings(t *testing.T) {
+	base := func() Config { return Config{DatabaseURL: "postgres://localhost/cara"} }
+
+	t.Run("unset is valid and left to the defaults", func(t *testing.T) {
+		c := base()
+		assert.NoError(t, c.Validate())
+	})
+
+	t.Run("loaded from the environment", func(t *testing.T) {
+		t.Setenv("FAILBACK_STABLE_WINDOW", "45m")
+		t.Setenv("FAILBACK_FLAP_WINDOW", "48h")
+		t.Setenv("FAILBACK_BACKOFF_MULTIPLIER", "3")
+		t.Setenv("FAILBACK_MAX_STABLE_WINDOW", "12h")
+		t.Setenv("FAILBACK_COOLDOWN", "2h")
+		t.Setenv("FAILBACK_MIN_FREE_PERCENT", "15.5")
+		got, err := FromEnv(&Config{}, NewConfigLogger())
+		require.NoError(t, err)
+		assert.Equal(t, 45*time.Minute, got.FailbackStableWindow)
+		assert.Equal(t, 48*time.Hour, got.FailbackFlapWindow)
+		assert.Equal(t, 3, got.FailbackBackoffMultiplier)
+		assert.Equal(t, 12*time.Hour, got.FailbackMaxStableWindow)
+		assert.Equal(t, 2*time.Hour, got.FailbackCooldown)
+		assert.Equal(t, 15.5, got.FailbackMinFreePercent)
+	})
+
+	t.Run("a malformed duration is an error", func(t *testing.T) {
+		t.Setenv("FAILBACK_COOLDOWN", "six hours")
+		_, err := FromEnv(&Config{}, NewConfigLogger())
+		assert.ErrorContains(t, err, "FAILBACK_COOLDOWN")
+	})
+
+	invalid := []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"negative stable window", func(c *Config) { c.FailbackStableWindow = -time.Minute }, "failback_stable_window"},
+		{"negative cooldown", func(c *Config) { c.FailbackCooldown = -time.Hour }, "failback_cooldown"},
+		{"flap window longer than the history kept", func(c *Config) { c.FailbackFlapWindow = 8 * 24 * time.Hour }, "failback_flap_window"},
+		{"negative multiplier", func(c *Config) { c.FailbackBackoffMultiplier = -1 }, "failback_backoff_multiplier"},
+		{"percent over 100", func(c *Config) { c.FailbackMinFreePercent = 101 }, "failback_min_free_percent"},
+		{"negative percent", func(c *Config) { c.FailbackMinFreePercent = -1 }, "failback_min_free_percent"},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			c := base()
+			tt.mutate(&c)
+			assert.ErrorContains(t, c.Validate(), tt.want)
+		})
+	}
+
+	t.Run("a seven day flap window is the most allowed", func(t *testing.T) {
+		c := base()
+		c.FailbackFlapWindow = 7 * 24 * time.Hour
+		assert.NoError(t, c.Validate())
+	})
+}
