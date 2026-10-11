@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"time"
 
@@ -25,6 +26,60 @@ const (
 	// considers the whole cluster.
 	failbackQueueKey = "failback"
 )
+
+// FailbackPolicy is how cautious fail-back is (CARA-122,
+// docs/scheduler-strategy.md §3.3). The primary tier is the less stable one,
+// and every move back is downtime, so it is better to move back late than to
+// bounce.
+type FailbackPolicy struct {
+	// StableWindow is how long a primary Node must have been Ready, without
+	// a break, before it may receive a Project back.
+	StableWindow time.Duration
+
+	// FlapWindow is how far back NotReady transitions are counted. Each one
+	// in it beyond the first multiplies StableWindow by BackoffMultiplier,
+	// up to MaxStableWindow.
+	FlapWindow        time.Duration
+	BackoffMultiplier int
+	MaxStableWindow   time.Duration
+
+	// Cooldown is how long a Project must have been running on its current
+	// Node — however it got there — before fail-back moves it.
+	Cooldown time.Duration
+
+	// MinFreePercent is how much of a primary Node's Allocatable, of CPU and
+	// of memory each, must still be free once the Project is placed. A Node
+	// the Project only just fits on is not used, so fail-back does not keep
+	// firing at the edge of capacity.
+	MinFreePercent float64
+}
+
+// DefaultFailbackPolicy returns the interim values pending product sign-off.
+func DefaultFailbackPolicy() FailbackPolicy {
+	return FailbackPolicy{
+		StableWindow:      30 * time.Minute,
+		FlapWindow:        24 * time.Hour,
+		BackoffMultiplier: 2,
+		MaxStableWindow:   8 * time.Hour,
+		Cooldown:          6 * time.Hour,
+		MinFreePercent:    20,
+	}
+}
+
+// stableWindowFor returns how long a Node that went NotReady flaps times in
+// the flap window must have been Ready: StableWindow for one flap or none,
+// multiplied by BackoffMultiplier for each further one, capped at
+// MaxStableWindow.
+func (p FailbackPolicy) stableWindowFor(flaps int) time.Duration {
+	d := p.StableWindow
+	for i := 1; i < flaps; i++ {
+		d *= time.Duration(p.BackoffMultiplier)
+		if d >= p.MaxStableWindow {
+			return p.MaxStableWindow
+		}
+	}
+	return d
+}
 
 // FailbackStore is the store surface needed by FailbackController.
 type FailbackStore interface {
@@ -56,33 +111,37 @@ type FailbackStore interface {
 //   - one fail-back move at a time, the next asked for only once the last is
 //     over, each after checking afresh what primary can take;
 //   - the move must land on primary — it is not started if primary has no
-//     room, and the scheduler may place it nowhere else.
+//     room, and the scheduler may place it nowhere else;
+//   - and the FailbackPolicy defences against a flapping primary tier: only
+//     a primary Node that has been Ready long enough (longer for one that
+//     keeps failing) and that keeps comfortable room after the move may take
+//     the Project, and a Project that has only just started where it is is
+//     left there.
 //
 // It does not move anything itself: it asks the eviction controller for a
 // planned move (fresh backup, then Pending), and the scheduler places the
-// Project. A move that started inside the window is left to finish after it.
-//
-// The anti-flap defences (a stability window for a recovered primary Node,
-// backoff for a flapping one, a per-Project cooldown, capacity hysteresis)
-// are CARA-122. Until they land, leave the window unset, which keeps this
-// controller from moving anything.
+// Project, avoiding the primary Nodes fail-back did not accept. A move that
+// started inside the window is left to finish after it.
 type FailbackController struct {
 	logger       *zap.Logger
 	projects     FailbackStore
 	nodes        SchedulerNodeStore
 	ledger       *CapacityLedger
 	window       *dailywindow.Window
+	policy       FailbackPolicy
 	clock        Clock
 	seedInterval time.Duration
 }
 
 // NewFailbackController creates a FailbackController that moves Projects only
-// inside window. A nil window disables fail-back.
+// inside window, as cautiously as policy says. A nil window disables
+// fail-back.
 func NewFailbackController(
 	logger *zap.Logger,
 	projects FailbackStore,
 	nodes SchedulerNodeStore,
 	window *dailywindow.Window,
+	policy FailbackPolicy,
 	opts ...Option,
 ) *FailbackController {
 	o := applyOptions(opts)
@@ -96,6 +155,7 @@ func NewFailbackController(
 		nodes:        nodes,
 		ledger:       NewCapacityLedger(logger, projects),
 		window:       window,
+		policy:       policy,
 		clock:        o.clock,
 		seedInterval: interval,
 	}
@@ -129,13 +189,23 @@ func (c *FailbackController) Reconcile(ctx context.Context, _ string) (Result, e
 		return Result{}, err
 	}
 
+	stable, unstable := c.stablePrimaries(log, nodes)
+	if len(stable) == 0 {
+		log.Debug("No primary node has been stable long enough to take a project back")
+		return Result{}, nil
+	}
+
 	candidates, err := c.misplaced(ctx, nodes)
 	if err != nil {
 		return Result{}, err
 	}
 
 	for _, p := range candidates {
-		fits, _, err := filterNodes(ctx, c.ledger, nodes, ProjectPlacement{
+		if !c.cooledDown(log, p) {
+			continue
+		}
+
+		fits, _, err := filterNodes(ctx, c.ledger, stable, ProjectPlacement{
 			Size:          p.Size,
 			ExcludedNodes: p.FailedNodes,
 			RequiredTier:  v1.NodeTierPrimary,
@@ -143,13 +213,32 @@ func (c *FailbackController) Reconcile(ctx context.Context, _ string) (Result, e
 		if err != nil {
 			return Result{}, err
 		}
-		if len(fits) == 0 {
+
+		// Of the stable primary Nodes, only those the Project fits on with
+		// room to spare are accepted. The scheduler, which prefers the
+		// emptiest Node, is told to avoid every other primary Node.
+		var accepted []string
+		for _, n := range fits {
+			if c.comfortable(n, p.Size) {
+				accepted = append(accepted, n.Name)
+			}
+		}
+		if len(accepted) == 0 {
+			log.Debug("No stable primary node keeps enough room for the project",
+				zap.String("project", p.Name), zap.Int("fits", len(fits)))
 			continue
+		}
+		avoid := slices.Clone(unstable)
+		for _, n := range stable {
+			if !slices.Contains(accepted, n.Name) {
+				avoid = append(avoid, n.Name)
+			}
 		}
 
 		log.Info("Moving project back to the primary tier",
-			zap.String("project", p.Name), zap.String("fromNode", p.NodeRef), zap.String("size", string(p.Size)))
-		err = c.projects.RequestEviction(ctx, p.Name, p.NodeRef, FailBackReason, v1.NodeTierPrimary)
+			zap.String("project", p.Name), zap.String("fromNode", p.NodeRef), zap.String("size", string(p.Size)),
+			zap.Strings("acceptedNodes", accepted), zap.Strings("avoidNodes", avoid))
+		err = c.projects.RequestEviction(ctx, p.Name, p.NodeRef, FailBackReason, v1.NodeTierPrimary, avoid)
 		if errors.Is(err, store.ErrConflictState) || errors.Is(err, store.ErrNotFound) {
 			// It moved or stopped since it was listed; look again next pass.
 			log.Debug("Project changed before the fail-back request", zap.String("project", p.Name), zap.Error(err))
@@ -158,6 +247,61 @@ func (c *FailbackController) Reconcile(ctx context.Context, _ string) (Result, e
 		return Result{}, err
 	}
 	return Result{}, nil
+}
+
+// stablePrimaries splits the Ready primary Nodes into those stable long
+// enough to take a Project back and the names of the rest. A Node whose
+// Ready time is unknown is not trusted.
+func (c *FailbackController) stablePrimaries(log *zap.Logger, nodes []ReadyNode) (stable []ReadyNode, unstable []string) {
+	now := c.clock.Now()
+	for _, n := range nodes {
+		if v1.NodeTierFromLabels(n.Labels) != v1.NodeTierPrimary {
+			continue
+		}
+		status := v1.NodeStatus{State: v1.NodeStateReady, Conditions: n.Conditions}
+		since, known := status.ReadySince()
+		flaps := 0
+		for _, t := range n.RecentNotReady {
+			if now.Sub(t) <= c.policy.FlapWindow {
+				flaps++
+			}
+		}
+		need := c.policy.stableWindowFor(flaps)
+		if !known || now.Sub(since) < need {
+			log.Debug("Primary node not stable long enough for fail-back",
+				zap.String("node", n.Name), zap.Bool("readySinceKnown", known),
+				zap.Duration("readyFor", now.Sub(since)), zap.Duration("needed", need), zap.Int("flaps", flaps))
+			unstable = append(unstable, n.Name)
+			continue
+		}
+		stable = append(stable, n)
+	}
+	return stable, unstable
+}
+
+// cooledDown reports whether the Project has been running where it is for
+// at least the cooldown. A Project whose start is unknown is left alone.
+func (c *FailbackController) cooledDown(log *zap.Logger, p *ProjectSnapshot) bool {
+	phase, ok := phaseCondition(p)
+	if !ok || phase.Reason != phaseReasonRunning {
+		log.Debug("Project's running time is unknown, not moving it", zap.String("project", p.Name))
+		return false
+	}
+	if runningFor := c.clock.Since(phase.LastTransitionTime); runningFor < c.policy.Cooldown {
+		log.Debug("Project moved too recently for fail-back", zap.String("project", p.Name),
+			zap.Duration("runningFor", runningFor), zap.Duration("cooldown", c.policy.Cooldown))
+		return false
+	}
+	return true
+}
+
+// comfortable reports whether n keeps at least MinFreePercent of its CPU and
+// of its memory free once a Project of size is placed on it.
+func (c *FailbackController) comfortable(n candidate, size v1.ProjectSize) bool {
+	req := size.Requests()
+	cpu := freePercent(n.Allocatable.CPUMilli, n.Used.CPUMilli+req.CPUMilli)
+	mem := freePercent(n.Allocatable.MemoryBytes, n.Used.MemoryBytes+req.MemoryBytes)
+	return cpu >= c.policy.MinFreePercent && mem >= c.policy.MinFreePercent
 }
 
 // misplaced returns the Running Projects on backup-tier Nodes that are not

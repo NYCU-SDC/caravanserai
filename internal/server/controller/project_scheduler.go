@@ -66,6 +66,9 @@ type ReadyNode struct {
 
 	// Conditions are the Node's observable conditions, e.g. DiskPressure.
 	Conditions []v1.Condition
+
+	// RecentNotReady are the times the Node went NotReady recently.
+	RecentNotReady []time.Time
 }
 
 // SchedulerNodeStore is the store surface needed to enumerate schedulable Nodes.

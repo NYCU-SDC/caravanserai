@@ -53,10 +53,11 @@ const (
 type EvictionRequester interface {
 	// RequestEviction queues a move of the named Project off fromNode, with
 	// reason saying who asked. targetTier, when not empty, is the tier the
-	// Project must land in; see v1.ProjectEviction.TargetTier. It fails with
-	// store.ErrConflictState when the Project is not Running on fromNode, and
-	// does nothing when a move is already in progress.
-	RequestEviction(ctx context.Context, name, fromNode, reason string, targetTier v1.NodeTier) error
+	// Project must land in, and avoid lists Nodes it must not land on; see
+	// v1.ProjectEviction. It fails with store.ErrConflictState when the
+	// Project is not Running on fromNode, and does nothing when a move is
+	// already in progress.
+	RequestEviction(ctx context.Context, name, fromNode, reason string, targetTier v1.NodeTier, avoid []string) error
 }
 
 // EvictionSnapshot is the view of a Project with a planned move in progress.
@@ -253,7 +254,7 @@ func (c *EvictionController) start(ctx context.Context, log *zap.Logger, e *Evic
 	}
 	candidates, rejected, err := filterNodes(ctx, c.ledger, nodes, ProjectPlacement{
 		Size:          e.Size,
-		ExcludedNodes: append([]string{e.Eviction.FromNode}, e.FailedNodes...),
+		ExcludedNodes: append(append([]string{e.Eviction.FromNode}, e.Eviction.AvoidNodes...), e.FailedNodes...),
 		RequiredTier:  e.Eviction.TargetTier,
 	})
 	if err != nil {

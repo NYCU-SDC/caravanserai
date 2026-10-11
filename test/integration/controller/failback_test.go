@@ -38,7 +38,7 @@ func newFailback(t *testing.T, s *controllerhelper.Suite, now time.Time) *ctrlpk
 	require.NoError(t, err)
 	return ctrlpkg.NewFailbackController(shared.logger,
 		adapter.NewProjectStoreAdapter(s.Store), adapter.NewNodeReadyAdapter(s.Store),
-		&w, ctrlpkg.WithClock(fixedClock(now)))
+		&w, ctrlpkg.DefaultFailbackPolicy(), ctrlpkg.WithClock(fixedClock(now)))
 }
 
 func runFailback(t *testing.T, fb *ctrlpkg.FailbackController) {
@@ -124,4 +124,57 @@ func TestFailbackOneAtATime(t *testing.T) {
 
 	runFailback(t, fb)
 	assert.NotEqual(t, v1.EvictionState(""), evictionState(t, s, "fb-b"), "fb-b is asked for once fb-a is over")
+}
+
+// TestFailbackAvoidsJustRecoveredPrimary validates the stable window end to
+// end: fb-pve2 has only just come back and is the emptiest primary node, so
+// the scheduler would choose it. Fail-back rules it out and the project lands
+// on fb-pve1, which has been stable all along.
+func TestFailbackAvoidsJustRecoveredPrimary(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+
+	createLedgerNode(t, s, "fb-pve1", "primary", controllerhelper.RoomyAllocatable(), true)
+	createNodeReadySince(t, s, "fb-pve2", "primary", controllerhelper.RoomyAllocatable(), taipeiNight.Add(-5*time.Minute))
+	createLedgerNode(t, s, "fb-twcc1", "backup", controllerhelper.RoomyAllocatable(), false)
+	createRunningProject(t, s, "fb-app", "fb-twcc1")
+	s.Start(t)
+
+	runFailback(t, newFailback(t, s, taipeiNight))
+
+	ctx := context.Background()
+	p, err := s.Store.GetProject(ctx, "fb-app")
+	require.NoError(t, err)
+	require.NotNil(t, p.Status.Eviction)
+	assert.Equal(t, []string{"fb-pve2"}, p.Status.Eviction.AvoidNodes)
+
+	waitForEvictionState(t, s, "fb-app", v1.EvictionStateBackingUp)
+	agentReportsBackup(t, s, "fb-app", v1.ConditionTrue, "backup-1")
+
+	controllerhelper.WaitForCondition(t, 20*time.Second, 200*time.Millisecond, "placed and done", func() bool {
+		p, err := s.Store.GetProject(ctx, "fb-app")
+		return err == nil && p.Status.NodeRef != "" && p.Status.Eviction == nil
+	})
+	p, err = s.Store.GetProject(ctx, "fb-app")
+	require.NoError(t, err)
+	assert.Equal(t, "fb-pve1", p.Status.NodeRef, "not the node that has only just recovered")
+}
+
+// TestFailbackWaitsForEveryPrimaryToSettle validates that with no primary
+// node stable long enough, nothing is moved.
+func TestFailbackWaitsForEveryPrimaryToSettle(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+
+	createNodeReadySince(t, s, "fb-pve1", "primary", controllerhelper.RoomyAllocatable(), taipeiNight.Add(-29*time.Minute))
+	createLedgerNode(t, s, "fb-twcc1", "backup", controllerhelper.RoomyAllocatable(), false)
+	createRunningProject(t, s, "fb-app", "fb-twcc1")
+	s.Start(t)
+
+	runFailback(t, newFailback(t, s, taipeiNight))
+
+	p, err := s.Store.GetProject(context.Background(), "fb-app")
+	require.NoError(t, err)
+	assert.Nil(t, p.Status.Eviction)
+	assert.Equal(t, "fb-twcc1", p.Status.NodeRef)
 }

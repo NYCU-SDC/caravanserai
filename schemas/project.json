@@ -264,6 +264,13 @@
           "type": "string",
           "description": "TargetTier, when set, is the tier the Project must land in. A move\nthat has nowhere to go in that tier is not started, and while it is\nMoving the scheduler considers only Nodes of that tier. Fail-back sets\nit to primary, so a move never ends on another backup Node; drain\nleaves it empty."
         },
+        "avoidNodes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AvoidNodes are Nodes the Project must not land on, besides FromNode.\nFail-back lists the primary Nodes it does not trust yet — recovered\ntoo recently, or with too little room to spare — so the scheduler,\nwhich would otherwise prefer the emptiest Node, does not choose them."
+        },
         "requestedAt": {
           "type": "string",
           "format": "date-time",

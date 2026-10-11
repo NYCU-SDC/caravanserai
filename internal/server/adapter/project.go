@@ -66,6 +66,7 @@ func (a *ProjectStoreAdapter) GetProjectPlacement(ctx context.Context, name stri
 	// and must land in the tier the move asked for, if any.
 	if e := project.Status.Eviction; e != nil && e.State == v1.EvictionStateMoving {
 		placement.ExcludedNodes = append(placement.ExcludedNodes, e.FromNode)
+		placement.ExcludedNodes = append(placement.ExcludedNodes, e.AvoidNodes...)
 		placement.RequiredTier = e.TargetTier
 	}
 	return placement, nil
