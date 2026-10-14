@@ -133,4 +133,6 @@ website/out/
 /agent-win-preauth.key
 /server-preauth.key
 /mac-apikey.txt
+/*.key
+test/overlay/.tmp/
 /cara-agent
