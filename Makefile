@@ -167,6 +167,20 @@ walg-verify: .env
 		&& echo -e "==> $(BLUE)Verification complete$(NC)" \
 		|| (echo -e "==> $(RED)Verification failed$(NC)" && exit 1)
 
+# The image for PostgresDifferential databases and the Node's pgBackRest repo
+# host. Built for the host architecture under the name manifests use, because
+# nothing publishes it yet; the image ID and recorded versions are printed so
+# two Nodes' builds can be compared.
+CARA_POSTGRES_IMAGE ?= ghcr.io/nycu-sdc/cara-postgres:16
+
+build-cara-postgres-image:
+	@echo -e ":: $(GREEN)Building $(CARA_POSTGRES_IMAGE)...$(NC)"
+	@docker build -t $(CARA_POSTGRES_IMAGE) deploy/images/cara-postgres/16 \
+		&& docker image inspect $(CARA_POSTGRES_IMAGE) --format '  -> image ID {{.Id}}' \
+		&& docker run --rm --entrypoint cat $(CARA_POSTGRES_IMAGE) /usr/share/cara/image-versions | sed 's/^/  -> /' \
+		&& echo -e "==> $(BLUE)Image built$(NC)" \
+		|| (echo -e "==> $(RED)Image build failed$(NC)" && exit 1)
+
 install-hooks:
 	@echo -e ":: $(GREEN)Installing git hooks...$(NC)"
 	@git config core.hooksPath .githooks \
@@ -176,3 +190,4 @@ install-hooks:
 .PHONY: all prepare build run-server run-agent run-cli test test-integration test-orphan-e2e test-recovery-e2e test-managed-failover-e2e schemas
 .PHONY: dev-up dev-down dev-reset dev-server dev-logs install-hooks
 .PHONY: walg-backup walg-restore walg-verify
+.PHONY: build-cara-postgres-image
