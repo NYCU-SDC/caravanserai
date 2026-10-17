@@ -218,15 +218,12 @@ func (h *RepoHost) Revoke(ctx context.Context, uid, network string) error {
 		if err := h.saveState(st); err != nil {
 			return err
 		}
-		running, err := h.docker.ContainerRunning(ctx, h.cfg.ContainerName)
-		if err != nil {
-			return err
-		}
-		if running {
-			if err := h.apply(ctx, st); err != nil {
-				return err
-			}
-		}
+	}
+	// Applied on every call, not only the one that removed the record: a
+	// reload that failed was rolled back to a configuration that still
+	// authorizes uid, and a retry must not find the record gone and stop.
+	if err := h.applyWithout(ctx, st, uid); err != nil {
+		return err
 	}
 	if network != "" && !h.networkInUse(st, network) {
 		if err := h.docker.DisconnectNetwork(ctx, network, h.cfg.ContainerName); err != nil {
@@ -234,6 +231,42 @@ func (h *RepoHost) Revoke(ctx context.Context, uid, network string) error {
 		}
 	}
 	return nil
+}
+
+// applyWithout makes the configuration the repo host serves match st, which no
+// longer authorizes uid. A running server is reloaded and checked; a stopped
+// one only has its configuration file rewritten, so that whatever starts it
+// next cannot serve uid. Called with h.mu held.
+func (h *RepoHost) applyWithout(ctx context.Context, st repoState, uid string) error {
+	served, err := h.servesUID(uid)
+	if err != nil || !served {
+		return err
+	}
+	running, err := h.docker.ContainerRunning(ctx, h.cfg.ContainerName)
+	if err != nil {
+		return err
+	}
+	if running {
+		return h.apply(ctx, st)
+	}
+	desired, err := renderServerConfig(st.Authorizations, h.cfg.S3)
+	if err != nil {
+		return err
+	}
+	return h.writeConfig(ctx, desired, st.Image)
+}
+
+// servesUID reports whether the configuration last written for the repo host
+// authorizes uid.
+func (h *RepoHost) servesUID(uid string) (bool, error) {
+	applied, err := os.ReadFile(h.appliedPath())
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("pgbackrest: read repo host configuration: %w", err)
+	}
+	return bytes.Contains(applied, []byte("\ntls-server-auth="+uid+"=")), nil
 }
 
 // networkInUse reports whether another authorization still reaches the repo
@@ -259,6 +292,10 @@ func (h *RepoHost) Remaining(ctx context.Context, uid, network string) ([]string
 	var left []string
 	if _, ok := st.Authorizations[uid]; ok {
 		left = append(left, "pgbackrest authorization "+uid)
+	} else if served, err := h.servesUID(uid); err != nil {
+		return nil, err
+	} else if served {
+		left = append(left, "pgbackrest authorization "+uid+" in the served configuration")
 	}
 	if network != "" && !h.networkInUse(st, network) {
 		attached, err := h.docker.NetworkAttached(ctx, network, h.cfg.ContainerName)

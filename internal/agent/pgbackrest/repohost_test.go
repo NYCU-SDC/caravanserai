@@ -341,3 +341,49 @@ func TestReconcileRebuildsFromTheDurableState(t *testing.T) {
 	assert.Equal(t, []string{"create:" + testImage}, d2.callsWith("create"))
 	assert.Equal(t, []string{"connect:cara-a"}, d2.callsWith("connect"))
 }
+
+// A revocation whose reload the server rejects is rolled back to a
+// configuration that still authorizes the Project. Its retry must still remove
+// it, and until then nothing may report the Project's authorization gone.
+func TestARevocationRolledBackIsCompletedByItsRetry(t *testing.T) {
+	d := newFakeRepoDocker()
+	h := newTestRepoHost(t, d)
+	ctx := context.Background()
+	require.NoError(t, h.Authorize(ctx, "uid-a", Authorization{Stanzas: []string{"uid-a-pgdata"}, Network: "cara-a"}, testImage))
+	require.NoError(t, h.Authorize(ctx, "uid-b", Authorization{Stanzas: []string{"uid-b-pgdata"}, Network: "cara-b"}, testImage))
+
+	h.cfg.ReadinessTimeout = 600 * time.Millisecond
+	d.mu.Lock()
+	d.failPings = 3
+	d.mu.Unlock()
+	require.Error(t, h.Revoke(ctx, "uid-a", "cara-a"))
+	assert.Contains(t, authLines(readConfig(t, h)), "tls-server-auth=uid-a=uid-a-pgdata", "rolled back")
+
+	left, err := h.Remaining(ctx, "uid-a", "cara-a")
+	require.NoError(t, err)
+	assert.Contains(t, left, "pgbackrest authorization uid-a in the served configuration")
+
+	require.NoError(t, h.Revoke(ctx, "uid-a", "cara-a"))
+	assert.Equal(t, []string{"tls-server-auth=uid-b=uid-b-pgdata"}, authLines(readConfig(t, h)))
+	left, err = h.Remaining(ctx, "uid-a", "cara-a")
+	require.NoError(t, err)
+	assert.Empty(t, left)
+}
+
+// With the repo host stopped, a revocation still rewrites its configuration:
+// whatever starts it next must not serve the revoked Project.
+func TestARevocationReachesAStoppedRepoHost(t *testing.T) {
+	d := newFakeRepoDocker()
+	h := newTestRepoHost(t, d)
+	ctx := context.Background()
+	require.NoError(t, h.Authorize(ctx, "uid-a", Authorization{Stanzas: []string{"uid-a-pgdata"}, Network: "cara-a"}, testImage))
+	d.mu.Lock()
+	d.running = false
+	d.mu.Unlock()
+
+	require.NoError(t, h.Revoke(ctx, "uid-a", "cara-a"))
+	assert.Equal(t, []string{"tls-server-auth=" + noClient}, authLines(readConfig(t, h)))
+	left, err := h.Remaining(ctx, "uid-a", "cara-a")
+	require.NoError(t, err)
+	assert.Empty(t, left)
+}
