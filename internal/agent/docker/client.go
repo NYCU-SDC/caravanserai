@@ -138,7 +138,7 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 	// 3. Ensure every service container exists and is running.
 	var created []string
 	for _, svc := range project.Spec.Services {
-		madeOne, err := r.ensureContainer(ctx, project.Namespace, project.Name, project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec.Volumes)
+		madeOne, err := r.ensureContainer(ctx, project.Namespace, project.Name, project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec)
 		if madeOne {
 			created = append(created, ContainerName(project.Name, svc.Name))
 		}
@@ -887,11 +887,13 @@ func (r *DockerRuntime) ensureEphemeralVolume(ctx context.Context, identity Proj
 // named-volume auto-create. It also returns the names of the Managed volumes
 // bound, for labelling. An undeclared or unsupported volume is an error rather
 // than a fall-through.
-func (r *DockerRuntime) buildBinds(namespace, projectName string, svc v1.ServiceDef, vols []v1.VolumeDef) (binds, managedNames []string, err error) {
+func (r *DockerRuntime) buildBinds(namespace, projectName, uid string, svc v1.ServiceDef, spec v1.ProjectSpec) (binds, managedNames []string, err error) {
+	vols := spec.Volumes
 	byName := make(map[string]v1.VolumeDef, len(vols))
 	for _, v := range vols {
 		byName[v.Name] = v
 	}
+	postgresDifferential := false
 	for _, vm := range svc.VolumeMounts {
 		vol, ok := byName[vm.Name]
 		if !ok {
@@ -907,11 +909,25 @@ func (r *DockerRuntime) buildBinds(namespace, projectName string, svc v1.Service
 			}
 			binds = append(binds, hostPath+":"+vm.MountPath)
 			managedNames = append(managedNames, vm.Name)
+			if spec.BackupStrategyFor(vm.Name) == v1.BackupStrategyPostgresDifferential {
+				postgresDifferential = true
+			}
 		case v1.VolumeTypeEphemeral:
 			binds = append(binds, VolumeName(projectName, vm.Name)+":"+vm.MountPath)
 		default:
 			return nil, nil, fmt.Errorf("service %q mounts volume %q of unsupported type %q", svc.Name, vm.Name, vol.Type)
 		}
+	}
+	if postgresDifferential {
+		// The database reaches the Node's repo host with the lifetime's
+		// identity and configuration. Both are directories, so the Agent's
+		// later rewrites of the files inside are visible to the running
+		// container.
+		confDir, tlsDir, perr := caravolume.PgBackRestClientDirs(r.dataRoot, uid)
+		if perr != nil {
+			return nil, nil, fmt.Errorf("service %q: %w", svc.Name, perr)
+		}
+		binds = append(binds, confDir+":/etc/pgbackrest:ro", tlsDir+":/etc/cara/pgbackrest/tls:ro")
 	}
 	return binds, managedNames, nil
 }
@@ -919,7 +935,7 @@ func (r *DockerRuntime) buildBinds(namespace, projectName string, svc v1.Service
 // ensureContainer creates and starts the container for a single service if it
 // is not already running. vols is the project's volume list, used to resolve
 // each mount's bind source by volume type.
-func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectName, uid string, generation int64, svc v1.ServiceDef, vols []v1.VolumeDef) (created bool, err error) {
+func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectName, uid string, generation int64, svc v1.ServiceDef, spec v1.ProjectSpec) (created bool, err error) {
 	cName := ContainerName(projectName, svc.Name)
 	log := r.logger.With(
 		zap.String("container", cName),
@@ -977,7 +993,7 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 		env[i] = e.Name + "=" + e.Value
 	}
 
-	binds, managedNames, err := r.buildBinds(namespace, projectName, svc, vols)
+	binds, managedNames, err := r.buildBinds(namespace, projectName, uid, svc, spec)
 	if err != nil {
 		return false, err
 	}
@@ -1397,7 +1413,7 @@ func (r *DockerRuntime) RecoverServices(ctx context.Context, project *v1.Project
 			// confusing "no such image" from the create call.
 			log.Info("Recreating missing container", zap.String("service", svc.Name))
 			if _, cErr := r.ensureContainer(ctx, project.Namespace, project.Name,
-				project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec.Volumes); cErr != nil {
+				project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec); cErr != nil {
 				return fmt.Errorf("recreate %q: %w", name, cErr)
 			}
 
@@ -1418,7 +1434,7 @@ func (r *DockerRuntime) RecoverServices(ctx context.Context, project *v1.Project
 				return fmt.Errorf("remove dead %q: %w", name, rErr)
 			}
 			if _, cErr := r.ensureContainer(ctx, project.Namespace, project.Name,
-				project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec.Volumes); cErr != nil {
+				project.ObjectMeta.UID, project.Status.AssignmentGeneration, svc, project.Spec); cErr != nil {
 				return fmt.Errorf("recreate dead %q: %w", name, cErr)
 			}
 

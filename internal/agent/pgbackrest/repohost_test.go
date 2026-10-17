@@ -527,3 +527,22 @@ func TestAFileAheadOfTheServerIsBroughtBack(t *testing.T) {
 	assert.Len(t, d.callsWith("signal:HUP"), hups+1)
 	assert.Equal(t, served, readConfig(t, h))
 }
+
+func TestClientConfigNamesTheRepoHostAndEachStanza(t *testing.T) {
+	h := newTestRepoHost(t, newFakeRepoDocker())
+	dir, err := h.WriteClientConfig("uid-a", []ClientStanza{{Name: "uid-a-z", RetainFull: 4}, {Name: "uid-a-a"}})
+	require.NoError(t, err)
+	data, err := os.ReadFile(filepath.Join(dir, "pgbackrest.conf"))
+	require.NoError(t, err)
+	text := string(data)
+
+	assert.Contains(t, text, "repo1-host=pgbackrest-repo\n")
+	assert.Contains(t, text, "repo1-host-type=tls\n")
+	assert.Contains(t, text, "repo1-host-key-file=/etc/cara/pgbackrest/tls/client.key\n")
+	assert.Contains(t, text, "compress-type=zst\n")
+	assert.Less(t, strings.Index(text, "[uid-a-a]"), strings.Index(text, "[uid-a-z]"), "stanzas sorted")
+	assert.Contains(t, text, "[uid-a-z]\npg1-path=/var/lib/postgresql/data\nrepo1-retention-full=4\n",
+		"retention is set where the command is issued, per stanza")
+	assert.NotContains(t, text, "s3", "the database never sees the object store")
+	assert.Equal(t, filepath.Join(h.cfg.DataRoot, "pgbackrest", "projects", "uid-a", "conf"), dir)
+}

@@ -850,7 +850,7 @@ func TestInspectProjectReportsOwnership(t *testing.T) {
 func TestEnsureContainerUsesTheSharedOwnershipRule(t *testing.T) {
 	ensure := func(f *recoverFixture) error {
 		_, err := f.runtime.ensureContainer(t.Context(), f.project.Namespace, f.project.Name,
-			f.project.UID, f.project.Status.AssignmentGeneration, f.project.Spec.Services[0], f.project.Spec.Volumes)
+			f.project.UID, f.project.Status.AssignmentGeneration, f.project.Spec.Services[0], f.project.Spec)
 		return err
 	}
 

@@ -35,6 +35,11 @@ const (
 	// one would start them again underneath it — archiving a volume that is
 	// being written to, and reporting a repair that was really an interference.
 	OpRecovery Operation = "Recovery"
+
+	// OpPlacement is the agent placing a PostgresDifferential Project: it
+	// starts the database, then restarts it to turn archiving on. A backup or
+	// recovery alongside would see a database that stops underneath it.
+	OpPlacement Operation = "Placement"
 )
 
 // Coordinator serialises operations per Project and lets unrelated parts of

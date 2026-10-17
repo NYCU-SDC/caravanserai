@@ -178,7 +178,18 @@ spec:
 | `items[].strategy` | `Offline` (default for unlisted volumes) or `PostgresDifferential` |
 | `items[].retainFull` | `PostgresDifferential` only: full backups kept, 1 to 12, default 4. A count, not a time guarantee |
 
-`PostgresDifferential` requires the volume to be mounted by exactly one service on `ghcr.io/nycu-sdc/cara-postgres:16` (or the image `postgres_differential_image` names) at `/var/lib/postgresql/data`, and every Managed volume of the Project to use it. That service cannot move its data or WAL out of the volume: `PGDATA` must be unset or that path, `POSTGRES_INITDB_WALDIR` is refused, `POSTGRES_INITDB_ARGS` may only hold `-k`, `--data-checksums` or `--NAME=VALUE` for an encoding, locale, authentication or WAL segment size setting written out in full (initdb accepts abbreviations, so anything else is refused), and none of the three may come from a Secret. A tablespace created from SQL outside the volume cannot be checked at apply time and is not supported. `items` is fixed when the Project is created and must be resent exactly as created: an omitted `retainFull` and an explicit `4` are different values, even though both mean four. The strategy does not run yet: such a Project shows `BackupActive=False` (reason `StrategyNotActive`), and a placement that would need its data restored from the object store is refused with `StrategyRestoreUnavailable`.
+`PostgresDifferential` requires the volume to be mounted by exactly one service on `ghcr.io/nycu-sdc/cara-postgres:16` (or the image `postgres_differential_image` names) at `/var/lib/postgresql/data`, and every Managed volume of the Project to use it. That service cannot move its data or WAL out of the volume: `PGDATA` must be unset or that path, `POSTGRES_INITDB_WALDIR` is refused, `POSTGRES_INITDB_ARGS` may only hold `-k`, `--data-checksums` or `--NAME=VALUE` for an encoding, locale, authentication or WAL segment size setting written out in full (initdb accepts abbreviations, so anything else is refused), and none of the three may come from a Secret. A tablespace created from SQL outside the volume cannot be checked at apply time and is not supported. `items` is fixed when the Project is created and must be resent exactly as created: an omitted `retainFull` and an explicit `4` are different values, even though both mean four.
+
+Placing such a Project needs the Agent's object store to be reached over HTTPS (`S3_ENDPOINT`, with `S3_CA_FILE` for a private CA): the Agent runs a pgBackRest repo host on the Node, creates the volume's stanza, turns on WAL archiving (restarting PostgreSQL once) and reports `Running` only after `pgbackrest check` passes. The Project's other services start together with the database and may see that restart. Until then the Project stays `Scheduled` with a `RecoveryBlocked` condition and is retried on every poll:
+
+| Reason | Meaning |
+|--------|---------|
+| `BackupRepositoryUnavailable` | The Node has no object store, or reaches it over plain HTTP |
+| `PgBackRestVersionMismatch` | The database image and the repo host run different pgBackRest versions |
+| `ArchivingNotReady` | Creating the stanza or the archive check failed |
+| `PostgresPlacementPending` | Another placement step failed, for example the server was unreachable |
+
+Backups themselves do not run yet: such a Project shows `BackupActive=False` (reason `StrategyNotActive`), and a placement that would need its data restored from the object store is refused with `StrategyRestoreUnavailable`.
 
 ### Node manifest (manual registration)
 

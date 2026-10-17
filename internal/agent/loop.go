@@ -83,6 +83,10 @@ type BackupSupport struct {
 	Supervisor  *backup.Supervisor
 	Coordinator *backup.Coordinator
 	Restorer    *restore.Restorer
+	// RepoHost is the Node's pgBackRest repo host, which PostgresDifferential
+	// placement authorizes each Project on. Run sets it from RunConfig; nil
+	// when the Node has no object store.
+	RepoHost pgRepository
 	// DataRoot is where Managed volume data and restore markers live.
 	DataRoot string
 	// NodeName is this agent's Node name, recorded in and checked against the
@@ -248,6 +252,9 @@ func Run(ctx context.Context, cfg RunConfig) {
 			logger.Warn("Failed to rebuild the pgBackRest repo host", zap.Error(err))
 		}
 		go superviseRepoHost(ctx, cfg.RepoHost, repoHostCheckInterval, repoHostCheckTimeout, repoHostMaxBackoff, logger)
+	}
+	if cfg.Backups != nil && cfg.RepoHost != nil {
+		cfg.Backups.RepoHost = cfg.RepoHost
 	}
 	if cleaner == nil {
 		logger.Warn("Runtime cannot remove a single assignment; cleanup obligations will not be resolved by this agent")
@@ -530,6 +537,11 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	}
 	if runningCount == len(p.Spec.Services) && len(p.Spec.Services) > 0 {
 		log.Debug("All containers running, nothing to do")
+		// A PostgreSQL started on an earlier tick whose archiving was not yet
+		// proven: Running still waits for it.
+		if postgresPending(p) && !placePostgres(ctx, client, runtime, backups, p, nil, log) {
+			return
+		}
 		if err := client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p),
 			v1.ProjectPhaseRunning,
 			"ContainersRunning",
@@ -605,23 +617,19 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 
 		// The data is in place. A block recorded on an earlier tick is over,
 		// and leaving it would report a Project as refused while it serves.
-		clearRecoveryBlocked(ctx, client, p, log)
+		// PostgresDifferential placement has blocks of its own, cleared only
+		// once it finishes.
+		if !postgresPending(p) {
+			clearRecoveryBlocked(ctx, client, p, log)
+		}
 	}
 
-	if err := runtime.ReconcileProject(ctx, resolved); err != nil {
-		// A container from another assignment appeared between the check above
-		// and the reconcile. Nothing was mutated — ReconcileProject refuses
-		// before its first Docker call — and this must not become Failed:
-		// Failed is terminal for the poll loop, so the Project would never be
-		// reconciled again even after the stale container is removed.
-		if errors.Is(err, docker.ErrContainerNotOwned) {
-			log.Warn("A container from another assignment appeared during reconcile",
-				zap.String("reason", recoveryBlockedStaleContainer), zap.Error(err))
-			reportRecoveryBlocked(ctx, client, p, recoveryBlockedStaleContainer, staleContainerMessage(err), log)
+	start := func() bool { return reconcileContainers(ctx, client, runtime, p, resolved, log) }
+	if postgresPending(p) {
+		if !placePostgres(ctx, client, runtime, backups, p, start, log) {
 			return
 		}
-		log.Error("Failed to reconcile project", zap.Error(err))
-		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "ReconcileError", err.Error())
+	} else if !start() {
 		return
 	}
 
@@ -634,6 +642,29 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	}
 
 	updateProxyRoutes(ctx, runtime, routes, p, log)
+}
+
+// reconcileContainers creates and starts the Project's missing containers, and
+// reports false, having recorded why, when they could not be.
+func reconcileContainers(ctx context.Context, client *Client, runtime docker.Runtime, p, resolved *v1.Project, log *zap.Logger) bool {
+	err := runtime.ReconcileProject(ctx, resolved)
+	if err == nil {
+		return true
+	}
+	// A container from another assignment appeared between the check above
+	// and the reconcile. Nothing was mutated — ReconcileProject refuses
+	// before its first Docker call — and this must not become Failed:
+	// Failed is terminal for the poll loop, so the Project would never be
+	// reconciled again even after the stale container is removed.
+	if errors.Is(err, docker.ErrContainerNotOwned) {
+		log.Warn("A container from another assignment appeared during reconcile",
+			zap.String("reason", recoveryBlockedStaleContainer), zap.Error(err))
+		reportRecoveryBlocked(ctx, client, p, recoveryBlockedStaleContainer, staleContainerMessage(err), log)
+		return false
+	}
+	log.Error("Failed to reconcile project", zap.Error(err))
+	_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "ReconcileError", err.Error())
+	return false
 }
 
 // resolveSecrets replaces every EnvVar.valueFrom.secretKeyRef in the project
