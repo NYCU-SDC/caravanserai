@@ -33,6 +33,7 @@ type dockerAPI interface {
 	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
 	ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error
 	ContainerKill(ctx context.Context, containerID, signal string) error
+	ContainerWait(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error)
 
 	ContainerExecCreate(ctx context.Context, container string, options container.ExecOptions) (types.IDResponse, error)
 	ContainerExecAttach(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)

@@ -57,6 +57,8 @@ type fakeDocker struct {
 	// lastExec is the command and user of the most recent exec.
 	lastExec     []string
 	lastExecUser string
+	// waitCode is the exit code ContainerWait reports.
+	waitCode int64
 
 	// mutations records every call that changes Docker state, in order.
 	mutations []string
@@ -215,6 +217,12 @@ func (f *fakeDocker) NetworkDisconnect(_ context.Context, networkID, containerID
 	f.record("NetworkDisconnect:" + networkID + ":" + containerID)
 	delete(f.endpoints[networkID], containerID)
 	return nil
+}
+
+func (f *fakeDocker) ContainerWait(_ context.Context, containerID string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	ch := make(chan container.WaitResponse, 1)
+	ch <- container.WaitResponse{StatusCode: f.waitCode}
+	return ch, make(chan error)
 }
 
 func (f *fakeDocker) ContainerKill(_ context.Context, containerID, signal string) error {

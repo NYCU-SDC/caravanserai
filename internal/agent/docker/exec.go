@@ -3,6 +3,8 @@ package docker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -145,4 +147,61 @@ func (r *DockerRuntime) networkHasContainer(ctx context.Context, networkName, co
 		}
 	}
 	return false, nil
+}
+
+// RunToCompletion runs cmd in a throwaway container from image, as user, with
+// binds mounted, waits for it to exit and removes it. It is for one-off work
+// the Agent cannot do as itself, such as handing files to a container user
+// when the Agent is not root. The container carries no Project label, so no
+// Project reconcile or sweep ever treats it as a workload.
+func (r *DockerRuntime) RunToCompletion(ctx context.Context, image, user string, binds, cmd []string) (ExecResult, error) {
+	if len(cmd) == 0 {
+		return ExecResult{}, errors.New("docker: helper container needs a command")
+	}
+	suffix := make([]byte, 4)
+	if _, err := rand.Read(suffix); err != nil {
+		return ExecResult{}, fmt.Errorf("docker: helper name: %w", err)
+	}
+	name := "cara-helper-" + hex.EncodeToString(suffix)
+
+	created, err := r.client.ContainerCreate(ctx,
+		&container.Config{Image: image, User: user, Entrypoint: cmd[:1], Cmd: cmd[1:], Labels: map[string]string{labelHelper: "true"}},
+		&container.HostConfig{Binds: slices.Clone(binds), NetworkMode: "none"},
+		nil, nil, name)
+	if err != nil {
+		return ExecResult{}, fmt.Errorf("docker: create helper from %s: %w", image, err)
+	}
+	// Removed on every path, with a context of its own: a caller that gave up
+	// must not leave the helper behind.
+	defer func() {
+		_ = r.client.ContainerRemove(context.WithoutCancel(ctx), created.ID, container.RemoveOptions{Force: true})
+	}()
+
+	waitCh, errCh := r.client.ContainerWait(ctx, created.ID, container.WaitConditionNextExit)
+	if err := r.client.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
+		return ExecResult{}, fmt.Errorf("docker: start helper from %s: %w", image, err)
+	}
+	var code int64
+	select {
+	case resp := <-waitCh:
+		if resp.Error != nil {
+			return ExecResult{}, fmt.Errorf("docker: helper from %s: %s", image, resp.Error.Message)
+		}
+		code = resp.StatusCode
+	case err := <-errCh:
+		return ExecResult{}, fmt.Errorf("docker: wait for helper from %s: %w", image, err)
+	case <-ctx.Done():
+		return ExecResult{}, fmt.Errorf("docker: wait for helper from %s: %w", image, ctx.Err())
+	}
+
+	logs, err := r.client.ContainerLogs(ctx, created.ID, container.LogsOptions{ShowStdout: true, ShowStderr: true})
+	if err != nil {
+		return ExecResult{}, fmt.Errorf("docker: read helper output: %w", err)
+	}
+	defer func() { _ = logs.Close() }()
+	var stdout, stderr bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdout, &stderr, logs); err != nil {
+		return ExecResult{}, fmt.Errorf("docker: read helper output: %w", err)
+	}
+	return ExecResult{ExitCode: int(code), Stdout: stdout.String(), Stderr: stderr.String()}, nil
 }
