@@ -196,6 +196,19 @@ func TestPostgresPlacementArchivesThroughTheRepoHost(t *testing.T) {
 	}, 30*time.Second, 500*time.Millisecond, "no pgbackrest backup process is left in the container")
 	// And the next run is not blocked by it.
 	require.NoError(t, runner.Run(ctx, running))
+
+	// The repo host stops while the Project runs. Nothing places a Running
+	// Project again; the Agent's supervision brings the repo host back, and
+	// archiving with it.
+	out, err := dockerCLI("stop", repoName)
+	require.NoError(t, err, out)
+	superviseCtx, stopSupervising := context.WithCancel(ctx)
+	defer stopSupervising()
+	go superviseRepoHost(superviseCtx, repo, 200*time.Millisecond, time.Minute, time.Second, zap.NewNop())
+	require.Eventually(t, func() bool {
+		res, err := runtime.Exec(ctx, db, "postgres", []string{"pgbackrest", "--stanza=" + stanza, "check"})
+		return err == nil && res.ExitCode == 0
+	}, 90*time.Second, time.Second, "archiving works again once the repo host is back")
 }
 
 type itemRecorder struct{ items [][]pgbackup.Item }
