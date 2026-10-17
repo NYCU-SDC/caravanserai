@@ -61,7 +61,7 @@ func (m *memStore) Head(context.Context, string) (objectstore.ObjectMeta, error)
 	return objectstore.ObjectMeta{}, objectstore.ErrNotFound
 }
 func (m *memStore) List(context.Context, string) ([]objectstore.ObjectMeta, error) { return nil, nil }
-func (m *memStore) Delete(context.Context, string) error                          { return nil }
+func (m *memStore) Delete(context.Context, string) error                           { return nil }
 
 var completionItems = []pgbackup.Item{{
 	Volume: "pgdata", Stanza: "uid-1-pgdata", Label: "20261017-030000F", Type: pgbackup.TypeFull, PGMajor: 16,
