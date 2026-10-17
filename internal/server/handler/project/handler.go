@@ -17,6 +17,7 @@
 //	POST   /api/v1/projects/{name}/recovery/takeover           — operator overrides the release gate (operator token)
 //	GET    /api/v1/projects/{name}/recovery/takeover-audit     — recorded takeovers of the Project (operator token)
 //	PUT    /api/v1/projects/{name}/backup/stanzas  — assigned Agent records a pgBackRest stanza before creating it
+//	PUT    /api/v1/projects/{name}/backup/completions/{backupID}  — assigned Agent reports a completed backup
 package project
 
 import (
@@ -105,6 +106,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("DELETE /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.deleteCondition))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/workload-stopped", mid.HandlerFunc(h.putWorkloadStopped))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/backup/stanzas", mid.HandlerFunc(h.putStanza))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/backup/completions/{backupID}", mid.HandlerFunc(h.putBackupCompletion))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/resources-removed", mid.HandlerFunc(h.putResourcesRemoved))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/committed-backup", mid.HandlerFunc(h.putCommittedBackup))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/managed-data-quarantined", mid.HandlerFunc(h.putManagedDataQuarantined))
@@ -501,7 +503,7 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 	// still-Pending Project be hard-deleted directly.
 	project.Status = v1.InitialProjectStatus()
 
-	// A Project asking for a strategy that does not run yet must say so from
+	// A Project whose strategy reports its backups must say it has none from
 	// the moment it exists; otherwise an accepted manifest reads as protected
 	// data. Server-owned, so any value a client sent is replaced.
 	project.Status.Conditions = v1.RemoveConditions(project.Status.Conditions, v1.ConditionTypeBackupActive)
@@ -510,8 +512,8 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 			Type:               v1.ConditionTypeBackupActive,
 			Status:             v1.ConditionFalse,
 			LastTransitionTime: time.Now().UTC(),
-			Reason:             v1.ReasonStrategyNotActive,
-			Message:            "PostgresDifferential backups are not running yet; nothing backs up this Project's data",
+			Reason:             v1.ReasonNoAcceptedBackup,
+			Message:            "No PostgresDifferential backup of this Project has been accepted yet",
 		})
 	}
 
@@ -1264,6 +1266,91 @@ func (h *Handler) putStanza(w http.ResponseWriter, r *http.Request) {
 	ref := store.AssignmentRef{UID: req.UID, NodeRef: req.NodeRef, Generation: *req.AssignmentGeneration}
 	err = h.store.RecordStanza(traceCtx, name, ref, req.Volume, time.Now().UTC())
 	h.writeEvidenceResult(traceCtx, w, logger, name, "Stanza", err)
+}
+
+// completionRequest is the body of
+// PUT /api/v1/projects/{name}/backup/completions/{backupID}.
+type completionRequest struct {
+	evidenceRequest
+	Items []v1.BackupCompletionItem `json:"items"`
+}
+
+// backupIDPattern is the form the Agent generates backup IDs in.
+var backupIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`)
+
+// putBackupCompletion handles
+// PUT /api/v1/projects/{name}/backup/completions/{backupID}.
+//
+// The Agent reports a backup after confirming it in pgBackRest and writing its
+// manifest. The store accepts it only from the current assignment of a Running
+// Project, idempotently by backupID: a retry of an accepted one is accepted
+// again even after a reassignment. Each item must be the backup of a
+// PostgresDifferential volume of the Project in the stanza of the reporting
+// lifetime.
+func (h *Handler) putBackupCompletion(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putBackupCompletion")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name, backupID := r.PathValue("name"), r.PathValue("backupID")
+
+	var req completionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return
+	}
+	if req.UID == "" || req.NodeRef == "" || req.AssignmentGeneration == nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			fmt.Errorf("%w: project %q: a backup completion requires a complete assignment fence", store.ErrStaleAssignment, name), logger)
+		return
+	}
+	if !backupIDPattern.MatchString(backupID) {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("backupID", backupID, "not a backup ID"), logger)
+		return
+	}
+
+	project, err := h.store.GetProject(traceCtx, name)
+	if err != nil {
+		h.writeEvidenceResult(traceCtx, w, logger, name, "BackupCompletion", err)
+		return
+	}
+	if len(req.Items) == 0 {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("items", nil, "a backup completion lists at least one item"), logger)
+		return
+	}
+	for i, item := range req.Items {
+		field := fmt.Sprintf("items[%d]", i)
+		switch {
+		case project.Spec.BackupStrategyFor(item.Volume) != v1.BackupStrategyPostgresDifferential || !hasManagedVolume(project.Spec, item.Volume):
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError(field+".volume", item.Volume,
+					"volume "+item.Volume+" is not a PostgresDifferential volume of project "+name), logger)
+			return
+		case item.Stanza != v1.StanzaName(req.UID, item.Volume):
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError(field+".stanza", item.Stanza, "not the stanza of this lifetime's volume"), logger)
+			return
+		case item.Label == "":
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError(field+".label", item.Label, "a backup label is required"), logger)
+			return
+		case item.Type != "full" && item.Type != "diff":
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError(field+".type", item.Type, "must be full or diff"), logger)
+			return
+		}
+	}
+
+	ref := store.AssignmentRef{UID: req.UID, NodeRef: req.NodeRef, Generation: *req.AssignmentGeneration}
+	err = h.store.RecordBackupCompletion(traceCtx, name, ref, v1.BackupCompletion{
+		BackupID:    backupID,
+		AcceptedAt:  time.Now().UTC(),
+		ManifestKey: v1.BackupManifestKey(req.UID, backupID),
+		Items:       req.Items,
+	})
+	h.writeEvidenceResult(traceCtx, w, logger, name, "BackupCompletion", err)
 }
 
 func hasManagedVolume(spec v1.ProjectSpec, volume string) bool {

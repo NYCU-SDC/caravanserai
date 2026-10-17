@@ -329,6 +329,14 @@ func describeProject(w io.Writer, project *v1.Project) {
 		}
 		printField(w, "  Stanzas", strings.Join(names, ", "))
 	}
+	if last := project.Status.Backup.LastCompletion(); last != nil {
+		parts := make([]string, 0, len(last.Items))
+		for _, it := range last.Items {
+			parts = append(parts, it.Volume+" "+it.Type+" "+it.Label)
+		}
+		printField(w, "  Last Backup", fmt.Sprintf("%s at %s (%s)",
+			last.BackupID, last.AcceptedAt.Format(time.RFC3339), strings.Join(parts, ", ")))
+	}
 
 	// Recovery — shown only once recovery has recorded something, so the
 	// common case prints exactly what it did before.

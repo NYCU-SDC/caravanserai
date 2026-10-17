@@ -179,9 +179,10 @@ const (
 
 	// ConditionTypeBackupActive says whether the Project's backup is enabled
 	// and has had at least one successful backup accepted. Status=False with
-	// Reason=ReasonStrategyNotActive means a strategy the Project selected,
-	// such as PostgresDifferential, does not run yet, so nothing protects its
-	// data even though the manifest asks for backups.
+	// Reason=ReasonNoAcceptedBackup means no backup of the strategy the Project
+	// selected, such as PostgresDifferential, has been accepted yet, so nothing
+	// protects its data even though the manifest asks for backups.
+	// Status=True with Reason=ReasonBackupAccepted follows the first one.
 	//
 	// It is server-owned; agents cannot write it. It does not say the Project
 	// can be restored automatically, nor that the latest backup is recent.
@@ -198,10 +199,15 @@ const (
 	ConditionTypeMemoryPressure ConditionType = "MemoryPressure"
 )
 
-// ReasonStrategyNotActive is the BackupActive reason for a Project whose
-// selected backup strategy has not produced an accepted backup because it does
-// not run yet.
-const ReasonStrategyNotActive = "StrategyNotActive"
+// BackupActive reasons.
+const (
+	// ReasonNoAcceptedBackup: the Project's selected strategy has not had a
+	// backup accepted by the server yet.
+	ReasonNoAcceptedBackup = "NoAcceptedBackup"
+	// ReasonBackupAccepted: the server has accepted at least one backup of
+	// the Project's current lifetime.
+	ReasonBackupAccepted = "BackupAccepted"
+)
 
 // MaintenanceStaleAfter is how long a Maintenance condition stays meaningful.
 // An agent that dies mid-backup leaves the condition behind with nothing to

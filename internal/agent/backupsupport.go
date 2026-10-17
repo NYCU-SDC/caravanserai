@@ -144,7 +144,8 @@ func NewBackupSupport(
 	strategies := strategyRunner{offline: runner}
 	if rt, ok := runtime.(pgRuntimeWithLogs); ok {
 		continuity := pgbackup.NewFileContinuity(cfg.DataRoot, rt)
-		strategies.postgres = pgbackup.NewRunner(coordinator, rt, continuity, nil, logger)
+		strategies.postgres = pgbackup.NewRunner(coordinator, rt, continuity,
+			newCompletionRecorder(client, store, caraVersion), logger)
 	}
 
 	return &BackupSupport{

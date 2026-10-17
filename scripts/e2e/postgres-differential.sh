@@ -18,7 +18,7 @@ set -Eeuo pipefail
 #
 # Scenarios, in order:
 #   A. placement: the Project reaches Running with its stanza recorded and WAL
-#      archived, and reports BackupActive=False/StrategyNotActive
+#      archived, and reports BackupActive=False/NoAcceptedBackup
 #   B. a new assignment of the Project, with no local data, is refused with
 #      StrategyRestoreUnavailable; no container, no PGDATA
 #   C. the same with no object store configured on the agent
@@ -373,8 +373,8 @@ wait_until 60 "$pg's PostgreSQL to accept connections" pg_accepts "$pg"
 uid="$(uid_of "$pg")"
 [[ -n "$uid" ]] || fail "$pg has no UID"
 stanza="$uid-pgdata"
-[[ "$(project_field "$pg" 'cond("BackupActive").get("reason", "")')" == "StrategyNotActive" ]] ||
-	fail "$pg: BackupActive reason is not StrategyNotActive"
+[[ "$(project_field "$pg" 'cond("BackupActive").get("reason", "")')" == "NoAcceptedBackup" ]] ||
+	fail "$pg: BackupActive reason is not NoAcceptedBackup"
 [[ "$(project_field "$pg" '[s["name"] for s in p["status"]["backup"]["stanzas"]]')" == "['$stanza']" ]] ||
 	fail "$pg: the stanza inventory does not list $stanza"
 [[ "$(db_sql 'SHOW archive_mode')" == "on" ]] || fail "$pg: archive_mode is not on"

@@ -33,6 +33,72 @@
       ],
       "description": "AssignmentIdentity names one assignment of one Project lifetime."
     },
+    "BackupCompletion": {
+      "properties": {
+        "backupID": {
+          "type": "string"
+        },
+        "nodeRef": {
+          "type": "string",
+          "description": "NodeRef and AssignmentGeneration are the assignment it completed under."
+        },
+        "assignmentGeneration": {
+          "type": "integer"
+        },
+        "acceptedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "manifestKey": {
+          "type": "string",
+          "description": "ManifestKey is where the Agent wrote the backup's manifest."
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/BackupCompletionItem"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "backupID",
+        "nodeRef",
+        "assignmentGeneration",
+        "acceptedAt",
+        "manifestKey",
+        "items"
+      ],
+      "description": "BackupCompletion is one backup the server accepted."
+    },
+    "BackupCompletionItem": {
+      "properties": {
+        "volume": {
+          "type": "string"
+        },
+        "stanza": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string",
+          "description": "Label is the pgBackRest backup label."
+        },
+        "type": {
+          "type": "string",
+          "description": "Type is full or diff."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "volume",
+        "stanza",
+        "label",
+        "type"
+      ],
+      "description": "BackupCompletionItem is the backup of one volume within a completion."
+    },
     "BackupItem": {
       "properties": {
         "volume": {
@@ -380,6 +446,13 @@
           },
           "type": "array",
           "description": "Stanzas lists every pgBackRest stanza this lifetime has created,\nincluding those of volumes later removed from the spec. It only grows:\ndeleting a lifetime's backups has to find every stanza it ever wrote."
+        },
+        "completions": {
+          "items": {
+            "$ref": "#/$defs/BackupCompletion"
+          },
+          "type": "array",
+          "description": "Completions lists the most recent backups the server accepted from this\nlifetime's assigned Agents, oldest first, at most MaxBackupCompletions.\nAccepted means the backup completed under the assignment current at\nthe time; it does not make the backup a restore source."
         }
       },
       "additionalProperties": false,

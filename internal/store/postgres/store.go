@@ -1195,6 +1195,52 @@ func (s *Store) RecordStanza(ctx context.Context, name string, ref store.Assignm
 	})
 }
 
+// RecordBackupCompletion implements store.ProjectStore.
+//
+// It is pinned to the lifetime by UID only, so a retry can find its backupID
+// after a reassignment; the rest of the fence is checked here on the snapshot
+// the UID- and version-pinned swap is based on.
+func (s *Store) RecordBackupCompletion(ctx context.Context, name string, ref store.AssignmentRef, completion v1.BackupCompletion) error {
+	return s.updateProjectStatusForUID(ctx, name, ref.UID, func(status *v1.ProjectStatus) error {
+		if status.Backup.Completion(completion.BackupID) != nil {
+			return nil
+		}
+		if status.NodeRef != ref.NodeRef || status.AssignmentGeneration != ref.Generation {
+			return fmt.Errorf("%w: project %q is not assigned to %s at generation %d",
+				store.ErrStaleAssignment, name, ref.NodeRef, ref.Generation)
+		}
+		if status.Phase != v1.ProjectPhaseRunning {
+			return fmt.Errorf("%w: project %q is %s; backups are accepted only while Running",
+				store.ErrConflictState, name, status.Phase)
+		}
+		if status.Backup == nil {
+			status.Backup = &v1.ProjectBackupStatus{}
+		}
+		completion.NodeRef, completion.AssignmentGeneration = ref.NodeRef, ref.Generation
+		status.Backup.Completions = append(status.Backup.Completions, completion)
+		if over := len(status.Backup.Completions) - v1.MaxBackupCompletions; over > 0 {
+			status.Backup.Completions = slices.Delete(status.Backup.Completions, 0, over)
+		}
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypeBackupActive,
+			Status:             v1.ConditionTrue,
+			LastTransitionTime: completion.AcceptedAt,
+			Reason:             v1.ReasonBackupAccepted,
+			Message:            "A backup of this Project has been accepted",
+		}, !backupActive(status.Conditions))
+		return nil
+	}, nil)
+}
+
+func backupActive(conds []v1.Condition) bool {
+	for _, c := range conds {
+		if c.Type == v1.ConditionTypeBackupActive {
+			return c.Status == v1.ConditionTrue
+		}
+	}
+	return false
+}
+
 // RecordResourcesRemoved implements store.ProjectStore.
 //
 // The owner is any cleanup obligation in the list, which no single-row fence

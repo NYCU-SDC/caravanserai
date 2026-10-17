@@ -153,6 +153,7 @@ var describeProjectCoveredFields = newStringSet(
 	"Status.Recovery.CommittedBackup.BackupID",
 	"Status.Recovery.WorkloadStopped.Assignment.ProjectUID",
 	"Status.Backup.Stanzas",
+	"Status.Backup.Completions",
 	"Status.Conditions",
 )
 
