@@ -322,6 +322,13 @@ func describeProject(w io.Writer, project *v1.Project) {
 	printField(w, "  Failed Nodes", stringOrNone(strings.Join(project.Status.FailedNodes, ", ")))
 	printField(w, "  Assignment Generation", fmt.Sprintf("%d", project.Status.AssignmentGeneration))
 	printField(w, "  Assignment History", stringOrNone(string(project.Status.AssignmentHistory)))
+	if b := project.Status.Backup; b != nil && len(b.Stanzas) > 0 {
+		names := make([]string, 0, len(b.Stanzas))
+		for _, st := range b.Stanzas {
+			names = append(names, st.Name+" ("+st.Volume+")")
+		}
+		printField(w, "  Stanzas", strings.Join(names, ", "))
+	}
 
 	// Recovery — shown only once recovery has recorded something, so the
 	// common case prints exactly what it did before.

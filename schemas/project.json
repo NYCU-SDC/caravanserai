@@ -372,6 +372,20 @@
       ],
       "description": "ProjectBackupConfig configures periodic object-store backup of a Project's Managed volumes."
     },
+    "ProjectBackupStatus": {
+      "properties": {
+        "stanzas": {
+          "items": {
+            "$ref": "#/$defs/StanzaRecord"
+          },
+          "type": "array",
+          "description": "Stanzas lists every pgBackRest stanza this lifetime has created,\nincluding those of volumes later removed from the spec. It only grows:\ndeleting a lifetime's backups has to find every stanza it ever wrote."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ProjectBackupStatus is the backup state of one Project lifetime."
+    },
     "ProjectPhase": {
       "type": "string",
       "enum": [
@@ -516,6 +530,10 @@
         "recovery": {
           "$ref": "#/$defs/ProjectRecoveryStatus",
           "description": "Recovery is the durable state of cross-Node recovery: retry bookkeeping\nand the evidence that lets an assignment be released or a record be\ndeleted. It lives here rather than in Condition messages because it must\nsurvive server restarts and duplicate controller events, and because code\nmust never recover a counter or an identity by parsing a message.\n\nServer-owned; not a user manifest field. Nil until recovery first records\nsomething."
+        },
+        "backup": {
+          "$ref": "#/$defs/ProjectBackupStatus",
+          "description": "Backup is the backup state of this Project lifetime. Server-owned: the\nAPI resets it on create and only the assigned Agent's fenced reports\nchange it."
         }
       },
       "additionalProperties": false,
@@ -594,6 +612,28 @@
         "image"
       ],
       "description": "ServiceDef describes a single container (analogous to a Compose service)."
+    },
+    "StanzaRecord": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "volume": {
+          "type": "string"
+        },
+        "recordedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "volume",
+        "recordedAt"
+      ],
+      "description": "StanzaRecord is one pgBackRest stanza a Project lifetime created."
     },
     "VolumeDef": {
       "properties": {

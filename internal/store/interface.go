@@ -385,6 +385,13 @@ type ProjectStore interface {
 	// no status-write or workload-start authority.
 	RecordResourcesRemoved(ctx context.Context, name string, owner AssignmentRef, observedAt time.Time) error
 
+	// RecordStanza records that the assigned Agent is about to create the
+	// pgBackRest stanza for volume, named from the Project UID. The fence is
+	// checked atomically with the write and the Project must be Scheduled or
+	// Running. Recording a stanza already listed is a no-op. Returns
+	// ErrStaleAssignment for a fence that is not current.
+	RecordStanza(ctx context.Context, name string, ref AssignmentRef, volume string, observedAt time.Time) error
+
 	// UpdateProjectSpec writes only the user-mutable fields of a Project
 	// (spec, labels, annotations). Status is preserved. The update is only
 	// allowed when the project's current phase is Pending or Failed; returns

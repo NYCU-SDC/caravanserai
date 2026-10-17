@@ -466,6 +466,50 @@ func (c *Client) CommitBackup(ctx context.Context, projectName string, fence Ass
 	}
 }
 
+// stanzaRequest is the body of PUT /api/v1/projects/{name}/backup/stanzas.
+type stanzaRequest struct {
+	evidenceRequest
+	Volume string `json:"volume"`
+}
+
+// RecordStanza tells the server, under the assignment fence, that this Agent
+// is about to create the pgBackRest stanza for volume. It must succeed before
+// the stanza is created, so the lifetime's inventory never misses one. A 409
+// means the fence is no longer current (ErrStaleAssignment).
+func (c *Client) RecordStanza(ctx context.Context, projectName string, fence AssignmentFence, volume string) error {
+	gen := fence.Generation
+	body, err := json.Marshal(stanzaRequest{
+		evidenceRequest: evidenceRequest{UID: fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &gen},
+		Volume:          volume,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal stanza request: %w", err)
+	}
+	url := fmt.Sprintf("%s/api/v1/projects/%s/backup/stanzas", c.serverURL, projectName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build stanza request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("stanza request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("record stanza: unexpected status %s", resp.Status)
+	}
+}
+
 // conditionPatchRequest is the body sent to
 // PATCH /api/v1/projects/{name}/conditions/{type}. The uid/nodeRef/generation
 // triple is the assignment fence the server validates atomically.

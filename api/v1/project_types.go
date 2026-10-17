@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"slices"
 	"time"
 
 	"github.com/invopop/jsonschema"
@@ -596,6 +597,56 @@ type ProjectStatus struct {
 	// Server-owned; not a user manifest field. Nil until recovery first records
 	// something.
 	Recovery *ProjectRecoveryStatus `json:"recovery,omitempty" yaml:"recovery,omitempty"`
+
+	// Backup is the backup state of this Project lifetime. Server-owned: the
+	// API resets it on create and only the assigned Agent's fenced reports
+	// change it.
+	Backup *ProjectBackupStatus `json:"backup,omitempty" yaml:"backup,omitempty"`
+}
+
+// ProjectBackupStatus is the backup state of one Project lifetime.
+type ProjectBackupStatus struct {
+	// Stanzas lists every pgBackRest stanza this lifetime has created,
+	// including those of volumes later removed from the spec. It only grows:
+	// deleting a lifetime's backups has to find every stanza it ever wrote.
+	Stanzas []StanzaRecord `json:"stanzas,omitempty" yaml:"stanzas,omitempty"`
+}
+
+// StanzaRecord is one pgBackRest stanza a Project lifetime created.
+type StanzaRecord struct {
+	Name       string    `json:"name" yaml:"name"`
+	Volume     string    `json:"volume" yaml:"volume"`
+	RecordedAt time.Time `json:"recordedAt" yaml:"recordedAt"`
+}
+
+// StanzaName is the pgBackRest stanza for a volume of a Project lifetime. It
+// is derived from the Project UID, never its name, so a same-name successor
+// never writes into its predecessor's backups.
+func StanzaName(projectUID, volume string) string {
+	return projectUID + "-" + volume
+}
+
+// HasStanza reports whether name is already recorded.
+func (b *ProjectBackupStatus) HasStanza(name string) bool {
+	if b == nil {
+		return false
+	}
+	for _, s := range b.Stanzas {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// DeepCopy returns an independent copy.
+func (b *ProjectBackupStatus) DeepCopy() *ProjectBackupStatus {
+	if b == nil {
+		return nil
+	}
+	out := *b
+	out.Stanzas = slices.Clone(b.Stanzas)
+	return &out
 }
 
 // ProjectRecoveryStatus is the structured recovery state of a Project.

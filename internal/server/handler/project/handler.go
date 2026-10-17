@@ -16,6 +16,7 @@
 //	PUT    /api/v1/projects/{name}/recovery/managed-data-quarantined — cleanup owner records that its local data left the active path
 //	POST   /api/v1/projects/{name}/recovery/takeover           — operator overrides the release gate (operator token)
 //	GET    /api/v1/projects/{name}/recovery/takeover-audit     — recorded takeovers of the Project (operator token)
+//	PUT    /api/v1/projects/{name}/backup/stanzas  — assigned Agent records a pgBackRest stanza before creating it
 package project
 
 import (
@@ -103,6 +104,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("PATCH /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.patchCondition))
 	mux.HandleFunc("DELETE /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.deleteCondition))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/workload-stopped", mid.HandlerFunc(h.putWorkloadStopped))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/backup/stanzas", mid.HandlerFunc(h.putStanza))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/resources-removed", mid.HandlerFunc(h.putResourcesRemoved))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/committed-backup", mid.HandlerFunc(h.putCommittedBackup))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/managed-data-quarantined", mid.HandlerFunc(h.putManagedDataQuarantined))
@@ -1213,6 +1215,64 @@ type evidenceRequest struct {
 	UID                  string `json:"uid"`
 	NodeRef              string `json:"nodeRef"`
 	AssignmentGeneration *int64 `json:"assignmentGeneration"`
+}
+
+// stanzaRequest is the body of PUT /api/v1/projects/{name}/backup/stanzas: the
+// assignment fence, and the volume whose stanza the Agent is about to create.
+type stanzaRequest struct {
+	evidenceRequest
+	Volume string `json:"volume"`
+}
+
+// putStanza handles PUT /api/v1/projects/{name}/backup/stanzas.
+//
+// The Agent records a stanza before creating it, so the inventory a deleted
+// lifetime's cleanup reads lists every stanza that may exist. The fence is
+// required in full and checked atomically with the write; the volume must be
+// a PostgresDifferential item of the Project, which cannot change after
+// creation, so checking it on a separate read is sound.
+func (h *Handler) putStanza(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putStanza")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	var req stanzaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return
+	}
+	if req.UID == "" || req.NodeRef == "" || req.AssignmentGeneration == nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			fmt.Errorf("%w: project %q: a stanza requires a complete assignment fence", store.ErrStaleAssignment, name), logger)
+		return
+	}
+
+	project, err := h.store.GetProject(traceCtx, name)
+	if err != nil {
+		h.writeEvidenceResult(traceCtx, w, logger, name, "Stanza", err)
+		return
+	}
+	if project.Spec.BackupStrategyFor(req.Volume) != v1.BackupStrategyPostgresDifferential || !hasManagedVolume(project.Spec, req.Volume) {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("volume", req.Volume,
+				"volume "+req.Volume+" is not a PostgresDifferential volume of project "+name), logger)
+		return
+	}
+
+	ref := store.AssignmentRef{UID: req.UID, NodeRef: req.NodeRef, Generation: *req.AssignmentGeneration}
+	err = h.store.RecordStanza(traceCtx, name, ref, req.Volume, time.Now().UTC())
+	h.writeEvidenceResult(traceCtx, w, logger, name, "Stanza", err)
+}
+
+func hasManagedVolume(spec v1.ProjectSpec, volume string) bool {
+	for _, v := range spec.Volumes {
+		if v.Name == volume && v.Type == v1.VolumeTypeManaged {
+			return true
+		}
+	}
+	return false
 }
 
 // decodeEvidenceFence reads an evidenceRequest and requires a complete fence.
