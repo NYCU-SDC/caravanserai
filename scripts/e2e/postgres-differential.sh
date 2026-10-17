@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Isolated PostgresDifferential rehearsal: a PostgreSQL Project is placed so
-# that it archives WAL through the Node's pgBackRest repo host before it is
-# reported Running; nothing backs it up yet and nothing may restore it.
+# Isolated PostgresDifferential rehearsal: a PostgreSQL Project archives WAL
+# through the Node's pgBackRest repo host, is backed up full and then
+# differential while it runs, and the differential restores into an isolated
+# container with the rows written before it.
 #
 # Real cara-server and cara-agent, a real Docker daemon (Docker-in-Docker) and a
 # real object store (MinIO over TLS with a private CA, since pgBackRest reaches
@@ -19,13 +20,19 @@ set -Eeuo pipefail
 # Scenarios, in order:
 #   A. placement: the Project reaches Running with its stanza recorded and WAL
 #      archived, and reports BackupActive=False/NoAcceptedBackup
-#   B. a new assignment of the Project, with no local data, is refused with
+#   B. backups: a full, then a differential after more rows, each accepted with
+#      a manifest under the Project UID; BackupActive turns True; PostgreSQL is
+#      never stopped, and nothing is written under the v1 layout
+#   C. verification restore: the differential restores into a throwaway
+#      container, with archiving off, holding every row; the stanza's backups
+#      and timeline are unchanged by it
+#   D. a new assignment of the Project, with no local data, is refused with
 #      StrategyRestoreUnavailable; no container, no PGDATA
-#   C. the same with no object store configured on the agent
-#   D. with no object store, a new PostgresDifferential Project is held with
+#   E. the same with no object store configured on the agent
+#   F. with no object store, a new PostgresDifferential Project is held with
 #      BackupRepositoryUnavailable and nothing is started
 #
-# B and C stand in for a reassignment by writing what the Scheduler writes
+# D and E stand in for a reassignment by writing what the Scheduler writes
 # (Scheduled, the same Node, the next generation) directly into the isolated
 # control-plane database. Moving a Project between real Nodes is exercised by
 # the managed-failover rehearsal; what this one checks is the agent's decision
@@ -374,7 +381,7 @@ uid="$(uid_of "$pg")"
 [[ -n "$uid" ]] || fail "$pg has no UID"
 stanza="$uid-pgdata"
 [[ "$(project_field "$pg" 'cond("BackupActive").get("reason", "")')" == "NoAcceptedBackup" ]] ||
-	fail "$pg: BackupActive reason is not NoAcceptedBackup"
+	fail "$pg: BackupActive reason is not NoAcceptedBackup before any backup"
 [[ "$(project_field "$pg" '[s["name"] for s in p["status"]["backup"]["stanzas"]]')" == "['$stanza']" ]] ||
 	fail "$pg: the stanza inventory does not list $stanza"
 [[ "$(db_sql 'SHOW archive_mode')" == "on" ]] || fail "$pg: archive_mode is not on"
@@ -382,16 +389,75 @@ dind exec -u postgres "$pg-db" pgbackrest --stanza="$stanza" check >/dev/null ||
 pg_started="$(dind inspect -f '{{.State.StartedAt}}' "$pg-db")" || fail "cannot inspect $pg-db"
 log "A: PASS — Running with $stanza archiving through the repo host"
 
-# ── B. Reassignment without local data, object store configured ───────────────
-log "B: reassigning $pg with its local data gone (object store configured)"
+# ── B. Full, then differential, while PostgreSQL runs ───────────────────────────
+log "B: writing rows and waiting for a full backup"
+db_sql "CREATE TABLE notes (id int PRIMARY KEY)" >/dev/null
+db_sql "INSERT INTO notes SELECT generate_series(1, 1000)" >/dev/null
+wait_until 120 "the first accepted backup" completions_at_least "$pg" 1
+[[ "$(completion_field "$pg" 0 'c["items"][0]["type"]')" == "full" ]] || fail "$pg: the first backup is not full"
+full_label="$(completion_field "$pg" 0 'c["items"][0]["label"]')"
+[[ "$(project_field "$pg" 'cond("BackupActive").get("status", "")')" == "True" ]] ||
+	fail "$pg: BackupActive is not True after an accepted backup"
+
+db_sql "INSERT INTO notes SELECT generate_series(1001, 2000)" >/dev/null
+seen="$(completions "$pg")"
+wait_until 120 "a backup started after the second write" completions_at_least "$pg" $((seen + 1))
+diff_label="$(completion_field "$pg" "$seen" 'c["items"][0]["label"]')"
+[[ "$(completion_field "$pg" "$seen" 'c["items"][0]["type"]')" == "diff" ]] || fail "$pg: the backup after the full is not differential"
+[[ "$diff_label" == "${full_label}_"* ]] || fail "$pg: $diff_label does not depend on $full_label"
+backup_id="$(completion_field "$pg" "$seen" 'c["backupID"]')"
+
+bucket_has "cara/v2/projects/$uid/generations/$backup_id/manifest\.json\$" || fail "$pg: no manifest for $backup_id"
+bucket_has "cara/v2/projects/$uid/latest\.json\$" && fail "$pg: a v2 latest.json was written"
+bucket_has "cara/v1/projects/default/$pg/" && fail "$pg: something was written under the v1 layout"
+[[ "$(dind inspect -f '{{.State.StartedAt}}' "$pg-db")" == "$pg_started" ]] ||
+	fail "$pg-db was restarted: something stopped PostgreSQL for a backup"
+log "B: PASS — $full_label, then $diff_label, accepted with a manifest; PostgreSQL kept running"
+
+# ── C. The differential restores, without touching the stanza ───────────────────
+log "C: restoring $diff_label into an isolated container"
+info_before="$(stanza_info)" || fail "cannot read the stanza before verification"
+verify_net="cara-pgdiff-verify-$suffix"
+dind network create "$verify_net" >/dev/null || fail "cannot create the verification network"
+dind network connect --alias pgbackrest-repo "$verify_net" cara-pgbackrest-repo ||
+	fail "cannot attach the repo host to the verification network"
+identity="$data_root/pgbackrest/projects/$uid"
+restored="$(dind run --rm --network "$verify_net" --user 999:999 --entrypoint sh \
+	-v "$identity/conf:/etc/pgbackrest:ro" -v "$identity/tls:/etc/cara/pgbackrest/tls:ro" \
+	"$pg_image" -c '
+		set -e
+		mkdir -m 700 /tmp/restore
+		pgbackrest --stanza="$1" --set="$2" --pg1-path=/tmp/restore \
+			--type=immediate --target-action=promote --archive-mode=off restore >/dev/null
+		pg_ctl -D /tmp/restore -o "-c listen_addresses= -c archive_mode=off" -w -t 120 -l /tmp/pg.log start >/dev/null
+		until [ "$(psql -X -qtA -U postgres -d postgres -c "SELECT pg_is_in_recovery()")" = f ]; do sleep 1; done
+		psql -X -qtA -U postgres -d postgres -c "SELECT count(*) FROM notes"' sh "$stanza" "$diff_label")" ||
+	fail "the verification restore failed"
+dind network disconnect "$verify_net" cara-pgbackrest-repo >/dev/null || fail "cannot detach the repo host"
+dind network rm "$verify_net" >/dev/null || fail "cannot remove the verification network"
+[[ "$restored" == "2000" ]] || fail "the restored database holds $restored rows, not 2000"
+
+info_after="$(stanza_info)" || fail "cannot read the stanza after verification"
+python3 - "$info_before" "$info_after" <<'PY' || fail "the verification changed the stanza"
+import json, sys
+before, after = (json.loads(a)[0] for a in sys.argv[1:3])
+labels = lambda s: [b["label"] for b in s["backup"]]
+assert labels(after) == labels(before), (labels(before), labels(after))
+timelines = {a["max"][:8] for a in after["archive"]} | {a["min"][:8] for a in after["archive"]}
+assert timelines == {"00000001"}, timelines
+PY
+log "C: PASS — the differential holds all 2000 rows; the stanza is unchanged"
+
+# ── D. Reassignment without local data, object store configured ───────────────
+log "D: reassigning $pg with its local data gone (object store configured)"
 stop_agent
 reassign_without_data "$pg"
 start_agent with-s3
 assert_refused "$pg"
-log "B: PASS — refused with StrategyRestoreUnavailable; no container, no empty database"
+log "D: PASS — refused with StrategyRestoreUnavailable; no container, no empty database"
 
-# ── C. The same with no object store ────────────────────────────────────────────
-log "C: reassigning $pg again, agent restarted without an object store"
+# ── E. The same with no object store ────────────────────────────────────────────
+log "E: reassigning $pg again, agent restarted without an object store"
 stop_agent
 reassign_without_data "$pg"
 start_agent without-s3
@@ -400,16 +466,16 @@ start_agent without-s3
 wait_until 30 "the agent to start without an object store" \
 	grep -q "Object store not configured" "$test_root/agent-without-s3.log"
 assert_refused "$pg"
-log "C: PASS — refused without an object store as well"
+log "E: PASS — refused without an object store as well"
 
-# ── D. No object store, no placement ────────────────────────────────────────────
+# ── F. No object store, no placement ────────────────────────────────────────────
 fresh=pgdiff-fresh
-log "D: creating $fresh on the agent without an object store"
+log "F: creating $fresh on the agent without an object store"
 create_project "$(pg_project "$fresh")"
 wait_until 60 "$fresh blocked with BackupRepositoryUnavailable" blocked_is "$fresh" BackupRepositoryUnavailable
 sleep 5
 phase_is "$fresh" Scheduled || fail "$fresh: phase moved to $(project_field "$fresh" 'p["status"]["phase"]')"
 [[ -z "$(dind ps -aq --filter "name=^$fresh-db$")" ]] || fail "$fresh: a container was started without a repository"
-log "D: PASS — held with BackupRepositoryUnavailable; nothing started"
+log "F: PASS — held with BackupRepositoryUnavailable; nothing started"
 
 log "all scenarios passed"
