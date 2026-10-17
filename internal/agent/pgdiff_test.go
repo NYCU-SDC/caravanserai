@@ -89,11 +89,11 @@ type pgFakeRuntime struct {
 	clientVersion string
 	// hangVersion makes `pgbackrest version` run until its caller gives up.
 	hangVersion bool
-	archiveMode   string
-	archiveCmd    string
-	pendingMode   string
-	pendingCmd    string
-	checkFails    bool
+	archiveMode string
+	archiveCmd  string
+	pendingMode string
+	pendingCmd  string
+	checkFails  bool
 }
 
 func newPgFakeRuntime() *pgFakeRuntime {
