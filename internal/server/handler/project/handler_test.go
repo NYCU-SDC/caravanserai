@@ -368,6 +368,27 @@ func TestValidateProjectSpecBackupItems(t *testing.T) {
 			wantErr: "POSTGRES_INITDB_ARGS may only contain",
 		},
 		{
+			name: "WAL directory smuggled through shell expansion in a value",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "POSTGRES_INITDB_ARGS", Value: "--encoding=UTF8${IFS}--waldir=/tmp/wal"}}
+			}),
+			wantErr: "POSTGRES_INITDB_ARGS may only contain",
+		},
+		{
+			name: "command substitution in a value",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "POSTGRES_INITDB_ARGS", Value: "--locale=$(echo C)"}}
+			}),
+			wantErr: "POSTGRES_INITDB_ARGS may only contain",
+		},
+		{
+			name: "quoted value",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "POSTGRES_INITDB_ARGS", Value: `--encoding="UTF8 --waldir=/tmp/wal"`}}
+			}),
+			wantErr: "POSTGRES_INITDB_ARGS may only contain",
+		},
+		{
 			name: "initdb setting with its value as a separate word",
 			spec: with(func(s *v1.ProjectSpec) {
 				s.Services[0].Env = []v1.EnvVar{{Name: "POSTGRES_INITDB_ARGS", Value: "--encoding UTF8"}}

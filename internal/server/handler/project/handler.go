@@ -401,16 +401,23 @@ var initdbSettings = map[string]bool{
 	"--wal-segsize":     true,
 }
 
+// initdbValue is what a setting's value may contain. The image's entrypoint
+// passes POSTGRES_INITDB_ARGS through eval, so a value is shell input: "$",
+// quotes, backslashes and the like would let it expand into further arguments
+// (--encoding=UTF8${IFS}--waldir=/tmp/x is two of them). Every encoding,
+// locale, authentication method and segment size is spelled with these.
+var initdbValue = regexp.MustCompile(`^[A-Za-z0-9_.@-]+$`)
+
 // allowedInitdbArg reports whether arg is a flag initdb may be given for a
 // PostgresDifferential volume: -k or --data-checksums, or a setting from
-// initdbSettings written as --NAME=VALUE with a non-empty value. Anything else,
+// initdbSettings written as --NAME=VALUE with a literal value. Anything else,
 // including a value given as a separate word, is refused rather than parsed.
 func allowedInitdbArg(arg string) bool {
 	if arg == "-k" || arg == "--data-checksums" {
 		return true
 	}
 	name, value, ok := strings.Cut(arg, "=")
-	return ok && initdbSettings[name] && value != ""
+	return ok && initdbSettings[name] && initdbValue.MatchString(value)
 }
 
 // validateEnvVar enforces the EnvVar contract from CARA-57: value and

@@ -186,6 +186,7 @@ func TestBackupStrategyDataCannotLeaveTheVolume(t *testing.T) {
 		{Name: "POSTGRES_INITDB_WALDIR", Value: "/tmp/wal"},
 		{Name: "POSTGRES_INITDB_ARGS", Value: "--waldir=/tmp/wal"},
 		{Name: "POSTGRES_INITDB_ARGS", Value: "--wald=/tmp/other-wal"},
+		{Name: "POSTGRES_INITDB_ARGS", Value: "--encoding=UTF8${IFS}--waldir=/tmp/wal"},
 	} {
 		resp := doRequest(t, http.MethodPost, "/api/v1/projects", mustMarshal(t, moved("e2e-pgdiff-moved", env)))
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "create with %s=%s", env.Name, env.Value)
@@ -197,6 +198,10 @@ func TestBackupStrategyDataCannotLeaveTheVolume(t *testing.T) {
 	resp := doRequest(t, http.MethodPut, "/api/v1/projects/"+name,
 		mustMarshal(t, moved(name, v1.EnvVar{Name: "PGDATA", Value: "/tmp/other-db"})))
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "update moving PGDATA")
+	drainBody(resp)
+	resp = doRequest(t, http.MethodPut, "/api/v1/projects/"+name,
+		mustMarshal(t, moved(name, v1.EnvVar{Name: "POSTGRES_INITDB_ARGS", Value: "--encoding=UTF8${IFS}--waldir=/tmp/wal"})))
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "update moving the WAL through shell expansion")
 	drainBody(resp)
 	assert.Empty(t, getProject(t, name).Spec.Services[0].Env, "the rejected update must not be stored")
 }
