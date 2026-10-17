@@ -1,9 +1,13 @@
 package docker
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +22,7 @@ import (
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/pkg/stdcopy"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,6 +48,15 @@ type fakeDocker struct {
 	volumeLabels map[string]map[string]string
 	// networks maps network name → its labels, for NetworkInspect.
 	networks map[string]map[string]string
+	// endpoints maps network name → the containers attached to it.
+	endpoints map[string]map[string]bool
+
+	// execs maps a command (its words joined by spaces) to what running it
+	// produces. A command not listed exits 0 with no output.
+	execs map[string]ExecResult
+	// lastExec is the command and user of the most recent exec.
+	lastExec     []string
+	lastExecUser string
 
 	// mutations records every call that changes Docker state, in order.
 	mutations []string
@@ -175,7 +189,62 @@ func (f *fakeDocker) NetworkInspect(_ context.Context, networkID string, _ netwo
 	if !ok {
 		return network.Inspect{}, errFakeNotFound
 	}
-	return network.Inspect{ID: "net-" + networkID, Name: networkID, Labels: labels}, nil
+	containers := map[string]network.EndpointResource{}
+	for c := range f.endpoints[networkID] {
+		containers["id-"+c] = network.EndpointResource{Name: c}
+	}
+	return network.Inspect{ID: "net-" + networkID, Name: networkID, Labels: labels, Containers: containers}, nil
+}
+
+func (f *fakeDocker) NetworkConnect(_ context.Context, networkID, containerID string, _ *network.EndpointSettings) error {
+	f.record("NetworkConnect:" + networkID + ":" + containerID)
+	if _, ok := f.networks[networkID]; !ok {
+		return errFakeNotFound
+	}
+	if f.endpoints == nil {
+		f.endpoints = map[string]map[string]bool{}
+	}
+	if f.endpoints[networkID] == nil {
+		f.endpoints[networkID] = map[string]bool{}
+	}
+	f.endpoints[networkID][containerID] = true
+	return nil
+}
+
+func (f *fakeDocker) NetworkDisconnect(_ context.Context, networkID, containerID string, _ bool) error {
+	f.record("NetworkDisconnect:" + networkID + ":" + containerID)
+	delete(f.endpoints[networkID], containerID)
+	return nil
+}
+
+func (f *fakeDocker) ContainerKill(_ context.Context, containerID, signal string) error {
+	f.record("ContainerKill:" + containerID + ":" + signal)
+	return nil
+}
+
+// fakeExecs carries an exec's planned result from create to inspect.
+var fakeExecs = map[string]ExecResult{}
+
+func (f *fakeDocker) ContainerExecCreate(_ context.Context, containerID string, options container.ExecOptions) (types.IDResponse, error) {
+	f.record("ContainerExecCreate:" + containerID)
+	f.lastExec, f.lastExecUser = options.Cmd, options.User
+	id := fmt.Sprintf("exec-%d", len(fakeExecs))
+	fakeExecs[id] = f.execs[strings.Join(options.Cmd, " ")]
+	return types.IDResponse{ID: id}, nil
+}
+
+func (f *fakeDocker) ContainerExecAttach(_ context.Context, execID string, _ container.ExecAttachOptions) (types.HijackedResponse, error) {
+	result := fakeExecs[execID]
+	var stream bytes.Buffer
+	_, _ = stdcopy.NewStdWriter(&stream, stdcopy.Stdout).Write([]byte(result.Stdout))
+	_, _ = stdcopy.NewStdWriter(&stream, stdcopy.Stderr).Write([]byte(result.Stderr))
+	conn, peer := net.Pipe()
+	_ = peer.Close()
+	return types.HijackedResponse{Conn: conn, Reader: bufio.NewReader(&stream)}, nil
+}
+
+func (f *fakeDocker) ContainerExecInspect(_ context.Context, execID string) (container.ExecInspect, error) {
+	return container.ExecInspect{ExecID: execID, ExitCode: fakeExecs[execID].ExitCode}, nil
 }
 
 func (f *fakeDocker) NetworkCreate(_ context.Context, name string, options network.CreateOptions) (network.CreateResponse, error) {
