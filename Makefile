@@ -103,6 +103,8 @@ test-recovery-e2e:
 		&& echo -e "==> $(BLUE)Local-recovery rehearsal passed$(NC)" \
 		|| (echo -e "==> $(RED)Local-recovery rehearsal failed$(NC)" && exit 1)
 
+# PGDIFF_IMAGE=<reference> runs it against a copy of cara-postgres published
+# somewhere other than GHCR.
 test-pgdiff-e2e:
 	@echo -e ":: $(GREEN)Running isolated PostgresDifferential rehearsal (about 5 minutes)...$(NC)"
 	@./scripts/e2e/postgres-differential.sh \

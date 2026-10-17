@@ -51,15 +51,37 @@ type Handler struct {
 	// operatorToken guards the takeover routes until ADR-0018 settles API
 	// access control. Empty disables them.
 	operatorToken string
+
+	// postgresImage is the image a PostgresDifferential volume's service must
+	// run (see WithPostgresDifferentialImage).
+	postgresImage string
 }
 
 // NewHandler creates a Project Handler.
-func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter) *Handler {
-	return &Handler{
+func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter, opts ...Option) *Handler {
+	h := &Handler{
 		logger:        logger,
 		store:         s,
 		tracer:        otel.Tracer("project/handler"),
 		problemWriter: pw,
+		postgresImage: v1.PostgresDifferentialImage,
+	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// Option configures a Handler.
+type Option func(*Handler)
+
+// WithPostgresDifferentialImage replaces the image a PostgresDifferential
+// volume's service must use. An empty reference keeps the published one.
+func WithPostgresDifferentialImage(ref string) Option {
+	return func(h *Handler) {
+		if ref != "" {
+			h.postgresImage = ref
+		}
 	}
 }
 
@@ -93,6 +115,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 // validateProjectSpec validates the project spec, returning a handlerutil.ValidationError
 // if any rule is violated, or nil if the spec is valid.
 func validateProjectSpec(spec v1.ProjectSpec) error {
+	return validateProjectSpecFor(spec, v1.PostgresDifferentialImage)
+}
+
+// validateProjectSpecFor is validateProjectSpec with the image a
+// PostgresDifferential volume's service must use.
+func validateProjectSpecFor(spec v1.ProjectSpec, postgresImage string) error {
 	if len(spec.Services) == 0 {
 		return handlerutil.NewValidationError("spec.services", nil, "spec.services must contain at least one service")
 	}
@@ -153,7 +181,7 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 			return handlerutil.NewValidationError("spec.backup.onMissing", spec.Backup.OnMissing,
 				"spec.backup.onMissing must be \"InitializeEmpty\"")
 		}
-		if err := validateBackupItems(spec, volumeNames, managedVolumes); err != nil {
+		if err := validateBackupItems(spec, volumeNames, managedVolumes, postgresImage); err != nil {
 			return err
 		}
 	}
@@ -217,7 +245,7 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 // Cara starts that PostgreSQL, creates its stanza and enables archiving in it.
 // Mixing strategies in one Project is rejected until a backup generation can
 // hold both kinds of item.
-func validateBackupItems(spec v1.ProjectSpec, volumeNames, managedVolumes map[string]bool) error {
+func validateBackupItems(spec v1.ProjectSpec, volumeNames, managedVolumes map[string]bool, postgresImage string) error {
 	seen := make(map[string]bool, len(spec.Backup.Items))
 	for _, item := range spec.Backup.Items {
 		switch {
@@ -247,7 +275,7 @@ func validateBackupItems(spec v1.ProjectSpec, volumeNames, managedVolumes map[st
 				return handlerutil.NewValidationError("spec.backup.items[].retainFull", n,
 					fmt.Sprintf("backup item %s: retainFull must be between %d and %d", item.Volume, v1.MinRetainFull, v1.MaxRetainFull))
 			}
-			if err := validatePostgresDifferentialMount(spec, item.Volume); err != nil {
+			if err := validatePostgresDifferentialMount(spec, item.Volume, postgresImage); err != nil {
 				return err
 			}
 		default:
@@ -270,7 +298,7 @@ func validateBackupItems(spec v1.ProjectSpec, volumeNames, managedVolumes map[st
 
 // validatePostgresDifferentialMount requires volume to be mounted by exactly one
 // service, running PostgresDifferentialImage, at PostgresDifferentialDataPath.
-func validatePostgresDifferentialMount(spec v1.ProjectSpec, volume string) error {
+func validatePostgresDifferentialMount(spec v1.ProjectSpec, volume, postgresImage string) error {
 	var mounts []string
 	for _, svc := range spec.Services {
 		for _, vm := range svc.VolumeMounts {
@@ -278,10 +306,10 @@ func validatePostgresDifferentialMount(spec v1.ProjectSpec, volume string) error
 				continue
 			}
 			mounts = append(mounts, svc.Name)
-			if svc.Image != v1.PostgresDifferentialImage {
+			if svc.Image != postgresImage {
 				return handlerutil.NewValidationError("spec.services[].image", svc.Image,
 					fmt.Sprintf("service %s mounts PostgresDifferential volume %s, so its image must be %q",
-						svc.Name, volume, v1.PostgresDifferentialImage))
+						svc.Name, volume, postgresImage))
 			}
 			if vm.MountPath != v1.PostgresDifferentialDataPath {
 				return handlerutil.NewValidationError("spec.services[].volumeMounts[].mountPath", vm.MountPath,
@@ -447,7 +475,7 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		project.Namespace = v1.DefaultNamespace
 	}
 
-	if err := validateProjectSpec(project.Spec); err != nil {
+	if err := validateProjectSpecFor(project.Spec, h.postgresImage); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
@@ -525,7 +553,7 @@ func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request) {
 		project.Namespace = v1.DefaultNamespace
 	}
 
-	if err := validateProjectSpec(project.Spec); err != nil {
+	if err := validateProjectSpecFor(project.Spec, h.postgresImage); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}

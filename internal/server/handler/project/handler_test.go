@@ -408,3 +408,21 @@ func TestValidateProjectSpecBackupItems(t *testing.T) {
 		})
 	}
 }
+
+// An environment that cannot pull the published image runs a copy from another
+// registry; the configured reference then replaces the published one rather
+// than being accepted alongside it.
+func TestValidateProjectSpecConfiguredPostgresImage(t *testing.T) {
+	const copied = "docker.io/example/cara-postgres:16"
+	item := v1.BackupItem{Volume: "pgdata", Strategy: v1.BackupStrategyPostgresDifferential}
+
+	onCopy := postgresSpec(item)
+	onCopy.Services[0].Image = copied
+	assert.NoError(t, validateProjectSpecFor(onCopy, copied))
+	assert.ErrorContains(t, validateProjectSpecFor(postgresSpec(item), copied), "its image must be")
+
+	h := NewHandler(nil, nil, nil, false, WithPostgresDifferentialImage(""))
+	assert.Equal(t, v1.PostgresDifferentialImage, h.postgresImage, "an empty setting keeps the published image")
+	h = NewHandler(nil, nil, nil, false, WithPostgresDifferentialImage(copied))
+	assert.Equal(t, copied, h.postgresImage)
+}

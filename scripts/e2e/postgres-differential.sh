@@ -5,9 +5,11 @@ set -Eeuo pipefail
 # accepted and runs, but nothing backs it up yet and nothing may restore it.
 #
 # Real cara-server and cara-agent, a real Docker daemon (Docker-in-Docker) and a
-# real object store (MinIO). The image ghcr.io/nycu-sdc/cara-postgres:16 must
-# already exist on the host (make build-cara-postgres-image, CARA-125); it is
-# loaded into the isolated daemon.
+# real object store (MinIO). The PostgreSQL image is pulled by the Agent like
+# any other image, so it must be published somewhere the isolated daemon can
+# pull it anonymously. PGDIFF_IMAGE names it (default: the published
+# ghcr.io/nycu-sdc/cara-postgres:16); the server is configured to accept the
+# same reference.
 #
 # Scenarios, in order:
 #   A. with an object store: the PostgreSQL accepts connections and the Project
@@ -34,9 +36,15 @@ for command in docker curl go python3; do
 	command -v "$command" >/dev/null 2>&1 || fail "missing required command: $command"
 done
 
-pg_image="ghcr.io/nycu-sdc/cara-postgres:16"
-docker image inspect "$pg_image" >/dev/null 2>&1 ||
-	fail "$pg_image not found on the host; build it with make build-cara-postgres-image (CARA-125)"
+pg_image="${PGDIFF_IMAGE:-ghcr.io/nycu-sdc/cara-postgres:16}"
+# Asked anonymously, as the Agent will: a reference that needs a login would
+# pass here only to fail inside the isolated daemon.
+anonymous_config="$(mktemp -d)"
+pullable=yes
+DOCKER_CONFIG="$anonymous_config" docker manifest inspect "$pg_image" >/dev/null 2>&1 || pullable=no
+rm -rf -- "$anonymous_config"
+[[ "$pullable" == yes ]] ||
+	fail "$pg_image cannot be pulled anonymously; publish it or set PGDIFF_IMAGE to a copy that can be"
 
 shared_root="${E2E_SHARED_ROOT:-/var/tmp}"
 [[ -d "$shared_root" && -w "$shared_root" ]] || fail "E2E_SHARED_ROOT is not a writable directory: $shared_root"
@@ -281,7 +289,6 @@ docker run -d --privileged --name "$dind_name" -e DOCKER_TLS_CERTDIR= \
 dind_port="$(docker port "$dind_name" 2375/tcp | head -1)"; dind_port="${dind_port##*:}"
 dind_host="tcp://127.0.0.1:$dind_port"
 wait_until 90 "Docker-in-Docker readiness" dind_ready
-docker save "$pg_image" | dind load >/dev/null
 dind pull nginx:alpine >/dev/null
 
 log "building cara-server and cara-agent"
@@ -293,6 +300,7 @@ server_url="http://127.0.0.1:$server_port"
 (
 	cd "$test_root/server-run"
 	env HOST=127.0.0.1 PORT="$server_port" UID_ENFORCEMENT=true \
+		POSTGRES_DIFFERENTIAL_IMAGE="$pg_image" \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &
