@@ -104,7 +104,8 @@ test-recovery-e2e:
 		|| (echo -e "==> $(RED)Local-recovery rehearsal failed$(NC)" && exit 1)
 
 # PGDIFF_IMAGE=<reference> runs it against a copy of cara-postgres published
-# somewhere other than GHCR.
+# somewhere other than GHCR; E2E_INSECURE_REGISTRY=<host:port> lets the
+# isolated daemon pull that copy from a plain-HTTP registry.
 test-pgdiff-e2e:
 	@echo -e ":: $(GREEN)Running isolated PostgresDifferential rehearsal (about 5 minutes)...$(NC)"
 	@./scripts/e2e/postgres-differential.sh \
