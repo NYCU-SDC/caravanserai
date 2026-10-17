@@ -247,6 +247,7 @@ func Run(ctx context.Context, cfg RunConfig) {
 		if err := cfg.RepoHost.Reconcile(ctx); err != nil {
 			logger.Warn("Failed to rebuild the pgBackRest repo host", zap.Error(err))
 		}
+		go superviseRepoHost(ctx, cfg.RepoHost, repoHostCheckInterval, repoHostCheckTimeout, repoHostMaxBackoff, logger)
 	}
 	if cleaner == nil {
 		logger.Warn("Runtime cannot remove a single assignment; cleanup obligations will not be resolved by this agent")
