@@ -59,6 +59,8 @@ type fakeDocker struct {
 	lastExecUser string
 	// waitCode is the exit code ContainerWait reports.
 	waitCode int64
+	// missingImages are images not on the Node until pulled.
+	missingImages map[string]bool
 
 	// mutations records every call that changes Docker state, in order.
 	mutations []string
@@ -127,6 +129,9 @@ func (f *fakeDocker) ContainerInspect(_ context.Context, containerID string) (ty
 
 func (f *fakeDocker) ContainerCreate(_ context.Context, cfg *container.Config, _ *container.HostConfig,
 	_ *network.NetworkingConfig, _ *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+	if cfg != nil && f.missingImages[cfg.Image] {
+		return container.CreateResponse{}, errdefs.NotFound(fmt.Errorf("No such image: %s", cfg.Image))
+	}
 	f.record("ContainerCreate:" + containerName)
 	var labels map[string]string
 	if cfg != nil {
@@ -276,6 +281,7 @@ func (f *fakeDocker) ImagePull(_ context.Context, refStr string, _ image.PullOpt
 	if err := f.pullErr[refStr]; err != nil {
 		return nil, err
 	}
+	delete(f.missingImages, refStr)
 	return io.NopCloser(strings.NewReader("")), nil
 }
 

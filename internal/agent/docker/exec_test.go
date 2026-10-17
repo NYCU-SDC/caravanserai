@@ -78,3 +78,24 @@ func (f *fakeDocker) mutationsWithPrefix(prefix string) []string {
 	}
 	return out
 }
+
+// A helper or Node service can be the first thing on a Node to need its image:
+// a missing image is pulled once, and one already present is not pulled.
+func TestNodeContainersPullAMissingImage(t *testing.T) {
+	f := newFakeDocker()
+	f.missingImages = map[string]bool{"cara-postgres:16": true}
+	r := newExecRuntime(f)
+
+	_, err := r.RunToCompletion(context.Background(), "cara-postgres:16", "0", nil, []string{"true"})
+	require.NoError(t, err)
+	_, err = r.EnsureNodeContainer(context.Background(), NodeContainerSpec{Name: "repo", Image: "cara-postgres:16", Network: "n"})
+	require.NoError(t, err)
+
+	pulls := 0
+	for _, m := range f.mutations {
+		if m == "ImagePull:cara-postgres:16" {
+			pulls++
+		}
+	}
+	assert.Equal(t, 1, pulls)
+}

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"time"
 
@@ -164,10 +165,12 @@ func (r *DockerRuntime) RunToCompletion(ctx context.Context, image, user string,
 	}
 	name := "cara-helper-" + hex.EncodeToString(suffix)
 
-	created, err := r.client.ContainerCreate(ctx,
-		&container.Config{Image: image, User: user, Entrypoint: cmd[:1], Cmd: cmd[1:], Labels: map[string]string{labelHelper: "true"}},
-		&container.HostConfig{Binds: slices.Clone(binds), NetworkMode: "none"},
-		nil, nil, name)
+	created, err := r.createPulling(ctx, image, func() (container.CreateResponse, error) {
+		return r.client.ContainerCreate(ctx,
+			&container.Config{Image: image, User: user, Entrypoint: cmd[:1], Cmd: cmd[1:], Labels: map[string]string{labelHelper: "true"}},
+			&container.HostConfig{Binds: slices.Clone(binds), NetworkMode: "none"},
+			nil, nil, name)
+	})
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("docker: create helper from %s: %w", image, err)
 	}
@@ -204,4 +207,21 @@ func (r *DockerRuntime) RunToCompletion(ctx context.Context, image, user string,
 		return ExecResult{}, fmt.Errorf("docker: read helper output: %w", err)
 	}
 	return ExecResult{ExitCode: int(code), Stdout: stdout.String(), Stderr: stderr.String()}, nil
+}
+
+// createPulling runs create, and when it fails because image is not on the
+// Node, pulls image and runs it once more. A Node service or helper can be
+// needed before any Project container has brought its image to the Node.
+func (r *DockerRuntime) createPulling(ctx context.Context, image string, create func() (container.CreateResponse, error)) (container.CreateResponse, error) {
+	created, err := create()
+	if err == nil || !isNotFound(err) {
+		return created, err
+	}
+	rc, pullErr := r.client.ImagePull(ctx, image, pullOptions())
+	if pullErr != nil {
+		return created, fmt.Errorf("pull image %q: %w", image, pullErr)
+	}
+	_, _ = io.Copy(io.Discard, rc)
+	_ = rc.Close()
+	return create()
 }

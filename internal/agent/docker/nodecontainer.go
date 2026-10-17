@@ -85,14 +85,16 @@ func (r *DockerRuntime) EnsureNodeContainer(ctx context.Context, spec NodeContai
 		labels = map[string]string{}
 	}
 	labels[labelNodeService] = spec.Name
-	created, err := r.client.ContainerCreate(ctx,
-		&container.Config{Image: spec.Image, User: spec.User, Cmd: slices.Clone(spec.Cmd), Labels: labels},
-		&container.HostConfig{
-			Binds:         slices.Clone(spec.Binds),
-			NetworkMode:   container.NetworkMode(spec.Network),
-			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
-		},
-		nil, nil, spec.Name)
+	created, err := r.createPulling(ctx, spec.Image, func() (container.CreateResponse, error) {
+		return r.client.ContainerCreate(ctx,
+			&container.Config{Image: spec.Image, User: spec.User, Cmd: slices.Clone(spec.Cmd), Labels: labels},
+			&container.HostConfig{
+				Binds:         slices.Clone(spec.Binds),
+				NetworkMode:   container.NetworkMode(spec.Network),
+				RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+			},
+			nil, nil, spec.Name)
+	})
 	if err != nil {
 		return NodeContainerState{}, fmt.Errorf("docker: create %s: %w", spec.Name, err)
 	}
