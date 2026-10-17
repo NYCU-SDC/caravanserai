@@ -89,6 +89,13 @@ const (
 	// generation while the volume directories are absent or empty. The two
 	// statements cannot both be true, so neither is trusted.
 	BlockMissingData BlockReason = "MissingData"
+
+	// BlockStrategyRestoreUnavailable means the Project would have to be
+	// restored from the object store, but a volume uses a backup strategy
+	// whose data cannot be restored yet (PostgresDifferential). The offline
+	// archive path must not stand in for it: those archives are addressed by
+	// namespace and name, and can belong to an earlier same-name Project.
+	BlockStrategyRestoreUnavailable BlockReason = "StrategyRestoreUnavailable"
 )
 
 // PlacementState is what the agent found on disk for one Project.

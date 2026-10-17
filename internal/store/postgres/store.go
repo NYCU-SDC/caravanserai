@@ -1542,6 +1542,16 @@ func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) erro
 	if err != nil {
 		return fmt.Errorf("postgres: marshal project annotations: %w", err)
 	}
+	// Backup items are fixed at creation. Comparing them inside the UPDATE,
+	// rather than only in the handler beforehand, is what keeps two concurrent
+	// updates from changing a strategy between one's check and the other's
+	// write. NULL on both sides means neither has items.
+	var items any
+	if project.Spec.Backup != nil && len(project.Spec.Backup.Items) > 0 {
+		if items, err = json.Marshal(project.Spec.Backup.Items); err != nil {
+			return fmt.Errorf("postgres: marshal project backup items: %w", err)
+		}
+	}
 
 	// Applying a Project again starts its retry budget over: whoever applies it
 	// has seen it fail and may have fixed what was wrong, so the nodes it failed
@@ -1554,19 +1564,25 @@ func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) erro
 		    status = (status - 'failedNodes') || jsonb_build_object('conditions',
 		        COALESCE((SELECT jsonb_agg(c) FROM jsonb_array_elements(COALESCE(status->'conditions', '[]'::jsonb)) c
 		                  WHERE c->>'type' <> $9), '[]'::jsonb))
-		WHERE kind = $5 AND namespace = $6 AND name = $7 AND phase = ANY($8)`,
+		WHERE kind = $5 AND namespace = $6 AND name = $7 AND phase = ANY($8)
+		  AND spec->'backup'->'items' IS NOT DISTINCT FROM $10::jsonb`,
 		spec, labels, annotations, now, kindProject, project.ObjectMeta.Namespace, project.Name,
 		[]string{string(v1.ProjectPhasePending), string(v1.ProjectPhaseFailed)},
 		string(v1.ConditionTypeRescheduleExhausted),
+		items,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: update project spec %q: %w", project.Name, err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Distinguish "not found" from "wrong phase" by checking existence.
-		_, getErr := s.getProject(ctx, project.Name)
+		// Distinguish "not found", "items changed" and "wrong phase".
+		current, getErr := s.getProject(ctx, project.Name)
 		if getErr != nil {
 			return fmt.Errorf("%w: project %q", store.ErrNotFound, project.Name)
+		}
+		if !v1.SameBackupItems(current.Spec, project.Spec) {
+			return fmt.Errorf("%w: project %q: spec.backup.items cannot change after the Project is created",
+				store.ErrConflictState, project.Name)
 		}
 		return fmt.Errorf("%w: project %q is not in Pending or Failed phase", store.ErrConflictState, project.Name)
 	}

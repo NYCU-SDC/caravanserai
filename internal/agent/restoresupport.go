@@ -20,14 +20,19 @@ import (
 // unknown or known to be wrong, and running containers against that is worse
 // than not running them at all.
 //
-// A nil restorer means this agent has no object store configured. Managed
-// volumes still work — they persist locally — they are simply never restored.
+// objectStore false means this agent has no object store configured. Managed
+// volumes still work — they persist locally — they are simply never restored,
+// and placement is not decided for them. A PostgresDifferential Project is the
+// exception: it is decided from local provenance on every agent, because
+// starting its PostgreSQL on an empty directory would initialize a new
+// database in place of one it used to have.
 // The dangerous case, a Project that asks to be backed up landing on a node
 // that cannot back it up, is already failed by the backup path.
 func ensureVolumeData(
 	ctx context.Context,
 	restorer *restore.Restorer,
 	coordinator *backup.Coordinator,
+	objectStore bool,
 	dataRoot string,
 	nodeName string,
 	p *v1.Project,
@@ -40,6 +45,10 @@ func ensureVolumeData(
 		return nil
 	}
 	if !hasManagedVolume(p.Spec.Volumes) {
+		return nil
+	}
+	postgresDifferential := p.Spec.HasPostgresDifferential()
+	if !objectStore && !postgresDifferential {
 		return nil
 	}
 
@@ -78,6 +87,15 @@ func ensureVolumeData(
 		return restorer.InitializeEmpty(p)
 
 	case restore.DecisionRestore:
+		if postgresDifferential {
+			// Decided before anything reads latest.json: the offline archives
+			// it points to are not this Project's backups, and may not even
+			// be this Project's.
+			return &restore.PlacementBlockedError{
+				Reason: restore.BlockStrategyRestoreUnavailable,
+				Detail: "this Project's PostgresDifferential data would have to be restored from the object store, which is not supported yet",
+			}
+		}
 		return runRestore(ctx, restorer, p, log)
 
 	default:

@@ -103,6 +103,12 @@ test-recovery-e2e:
 		&& echo -e "==> $(BLUE)Local-recovery rehearsal passed$(NC)" \
 		|| (echo -e "==> $(RED)Local-recovery rehearsal failed$(NC)" && exit 1)
 
+test-pgdiff-e2e:
+	@echo -e ":: $(GREEN)Running isolated PostgresDifferential rehearsal (about 5 minutes)...$(NC)"
+	@./scripts/e2e/postgres-differential.sh \
+		&& echo -e "==> $(BLUE)PostgresDifferential rehearsal passed$(NC)" \
+		|| (echo -e "==> $(RED)PostgresDifferential rehearsal failed$(NC)" && exit 1)
+
 schemas:
 	@echo -e ":: $(GREEN)Generating JSON Schemas...$(NC)"
 	@go run ./cmd/schemagen \
@@ -173,6 +179,6 @@ install-hooks:
 		&& echo -e "==> $(BLUE)Git hooks installed (using .githooks/)$(NC)" \
 		|| (echo -e "==> $(RED)Failed to configure git hooks$(NC)" && exit 1)
 
-.PHONY: all prepare build run-server run-agent run-cli test test-integration test-orphan-e2e test-recovery-e2e test-managed-failover-e2e schemas
+.PHONY: all prepare build run-server run-agent run-cli test test-integration test-orphan-e2e test-recovery-e2e test-managed-failover-e2e test-pgdiff-e2e schemas
 .PHONY: dev-up dev-down dev-reset dev-server dev-logs install-hooks
 .PHONY: walg-backup walg-restore walg-verify

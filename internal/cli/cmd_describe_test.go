@@ -132,6 +132,7 @@ var describeProjectCoveredFields = newStringSet(
 	"Spec.Volumes",
 	"Spec.Backup.Interval",
 	"Spec.Backup.OnMissing",
+	"Spec.Backup.Items",
 	"Spec.Ingress",
 	"Spec.ExpireAt",
 	// Status
@@ -307,6 +308,31 @@ func TestDescribeProjectSize(t *testing.T) {
 			assert.Regexp(t, `(?m)^  Size:\s+`+regexp.QuoteMeta(tt.want)+`$`, buf.String())
 		})
 	}
+}
+
+func TestDescribeProjectBackupStrategies(t *testing.T) {
+	retain := 6
+	project := &v1.Project{Spec: v1.ProjectSpec{
+		Volumes: []v1.VolumeDef{
+			{Name: "pgdata", Type: v1.VolumeTypeManaged},
+			{Name: "wal", Type: v1.VolumeTypeManaged},
+			{Name: "uploads", Type: v1.VolumeTypeManaged},
+			{Name: "cache", Type: v1.VolumeTypeEphemeral},
+		},
+		Backup: &v1.ProjectBackupConfig{Interval: "24h", Items: []v1.BackupItem{
+			{Volume: "pgdata", Strategy: v1.BackupStrategyPostgresDifferential, RetainFull: &retain},
+			{Volume: "wal", Strategy: v1.BackupStrategyPostgresDifferential},
+		}},
+	}}
+
+	var buf bytes.Buffer
+	describeProject(&buf, project)
+	out := buf.String()
+
+	assert.Contains(t, out, "      pgdata: PostgresDifferential, retain 6 full\n")
+	assert.Contains(t, out, "      wal: PostgresDifferential, retain 4 full (default)\n")
+	assert.Contains(t, out, "      uploads: Offline (default)\n")
+	assert.NotContains(t, out, "cache:", "Ephemeral volumes have no backup strategy")
 }
 
 func TestDescribeProjectFailedNodes(t *testing.T) {

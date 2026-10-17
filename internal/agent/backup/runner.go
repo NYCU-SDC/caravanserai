@@ -487,12 +487,15 @@ func classifyExit(ctx context.Context, err error) ExitReason {
 	}
 }
 
-// managedVolumes returns only the Managed volumes in spec; Ephemeral volumes
-// are never backed up.
+// managedVolumes returns the Managed volumes this runner backs up: those using
+// the Offline strategy. Ephemeral volumes are never backed up, and a
+// PostgresDifferential volume is never stopped and archived as a directory —
+// that would produce a second, offline backup history for a database whose
+// backups belong to pgBackRest.
 func managedVolumes(spec v1.ProjectSpec) []v1.VolumeDef {
 	var out []v1.VolumeDef
 	for _, v := range spec.Volumes {
-		if v.Type == v1.VolumeTypeManaged {
+		if v.Type == v1.VolumeTypeManaged && spec.BackupStrategyFor(v.Name) == v1.BackupStrategyOffline {
 			out = append(out, v)
 		}
 	}

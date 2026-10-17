@@ -293,6 +293,20 @@ func TestRunSkipsProjectWithoutManagedVolumes(t *testing.T) {
 	assert.Empty(t, h.store.keys())
 }
 
+func TestRunNeverTouchesPostgresDifferentialVolumes(t *testing.T) {
+	// Stopping PostgreSQL and archiving PGDATA would give the database a
+	// second, offline backup history alongside pgBackRest's, and the offline
+	// one is addressed by name.
+	h := newHarness(t, "pgdata")
+	h.project.Spec.Backup.Items = []v1.BackupItem{{Volume: "pgdata", Strategy: v1.BackupStrategyPostgresDifferential}}
+
+	err := h.runner.Run(context.Background(), h.project)
+
+	assert.ErrorIs(t, err, ErrNoManagedVolumes)
+	assert.Empty(t, h.containers.history(), "containers must never be stopped for a PostgresDifferential volume")
+	assert.Empty(t, h.store.keys(), "nothing may be uploaded for a PostgresDifferential volume")
+}
+
 func TestRunFailsClosedWithoutObjectStore(t *testing.T) {
 	// A Project whose data is meant to be backed up must never run silently
 	// unbacked, and finding out must not cost downtime.

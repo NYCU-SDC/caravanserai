@@ -198,3 +198,213 @@ func TestValidateProjectSpecSize(t *testing.T) {
 		})
 	}
 }
+
+// postgresSpec is a valid PostgresDifferential Project: one Managed volume,
+// mounted as PGDATA by one service on the supported image.
+func postgresSpec(item v1.BackupItem) v1.ProjectSpec {
+	return v1.ProjectSpec{
+		Services: []v1.ServiceDef{{
+			Name:         "db",
+			Image:        v1.PostgresDifferentialImage,
+			VolumeMounts: []v1.VolumeMount{{Name: "pgdata", MountPath: v1.PostgresDifferentialDataPath}},
+		}},
+		Volumes: []v1.VolumeDef{{Name: "pgdata", Type: v1.VolumeTypeManaged}},
+		Backup:  &v1.ProjectBackupConfig{Interval: "24h", Items: []v1.BackupItem{item}},
+	}
+}
+
+func TestValidateProjectSpecBackupItems(t *testing.T) {
+	pg := v1.BackupItem{Volume: "pgdata", Strategy: v1.BackupStrategyPostgresDifferential}
+	retain := func(n int) *int { return &n }
+	with := func(mutate func(*v1.ProjectSpec)) v1.ProjectSpec {
+		spec := postgresSpec(pg)
+		mutate(&spec)
+		return spec
+	}
+
+	tests := []struct {
+		name    string
+		spec    v1.ProjectSpec
+		wantErr string // empty means valid
+	}{
+		{name: "PostgresDifferential on the supported image and path", spec: postgresSpec(pg)},
+		{
+			name: "retainFull at the lower bound",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Backup.Items[0].RetainFull = retain(v1.MinRetainFull)
+			}),
+		},
+		{
+			name: "retainFull at the upper bound",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Backup.Items[0].RetainFull = retain(v1.MaxRetainFull)
+			}),
+		},
+		{
+			name: "explicit Offline item",
+			spec: specWithBackup([]v1.VolumeDef{{Name: "data", Type: v1.VolumeTypeManaged}},
+				&v1.ProjectBackupConfig{Interval: "1h", Items: []v1.BackupItem{{Volume: "data", Strategy: v1.BackupStrategyOffline}}}),
+		},
+		{
+			name:    "retainFull below the lower bound",
+			spec:    with(func(s *v1.ProjectSpec) { s.Backup.Items[0].RetainFull = retain(0) }),
+			wantErr: "retainFull must be between 1 and 12",
+		},
+		{
+			name:    "retainFull above the upper bound",
+			spec:    with(func(s *v1.ProjectSpec) { s.Backup.Items[0].RetainFull = retain(13) }),
+			wantErr: "retainFull must be between 1 and 12",
+		},
+		{
+			name: "retainFull on an Offline item",
+			spec: specWithBackup([]v1.VolumeDef{{Name: "data", Type: v1.VolumeTypeManaged}},
+				&v1.ProjectBackupConfig{Interval: "1h", Items: []v1.BackupItem{{Volume: "data", Strategy: v1.BackupStrategyOffline, RetainFull: retain(4)}}}),
+			wantErr: "retainFull applies only to strategy",
+		},
+		{
+			name:    "item naming an undeclared volume",
+			spec:    with(func(s *v1.ProjectSpec) { s.Backup.Items[0].Volume = "nope" }),
+			wantErr: "undeclared volume nope",
+		},
+		{
+			name:    "item without a volume",
+			spec:    with(func(s *v1.ProjectSpec) { s.Backup.Items[0].Volume = "" }),
+			wantErr: "must name a volume",
+		},
+		{
+			name: "item naming an Ephemeral volume",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Volumes = append(s.Volumes, v1.VolumeDef{Name: "cache", Type: v1.VolumeTypeEphemeral})
+				s.Backup.Items = append(s.Backup.Items, v1.BackupItem{Volume: "cache", Strategy: v1.BackupStrategyPostgresDifferential})
+			}),
+			wantErr: "only a Managed volume",
+		},
+		{
+			name:    "duplicate item",
+			spec:    with(func(s *v1.ProjectSpec) { s.Backup.Items = append(s.Backup.Items, pg) }),
+			wantErr: "duplicate backup item",
+		},
+		{
+			name:    "unknown strategy",
+			spec:    with(func(s *v1.ProjectSpec) { s.Backup.Items[0].Strategy = "Snapshot" }),
+			wantErr: "strategy must be",
+		},
+		{
+			name:    "another image",
+			spec:    with(func(s *v1.ProjectSpec) { s.Services[0].Image = "postgres:16" }),
+			wantErr: "its image must be",
+		},
+		{
+			name: "another mount path",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].VolumeMounts[0].MountPath = "/data"
+			}),
+			wantErr: "it must be mounted at",
+		},
+		{
+			name: "mounted by two services",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services = append(s.Services, v1.ServiceDef{
+					Name: "replica", Image: v1.PostgresDifferentialImage,
+					VolumeMounts: []v1.VolumeMount{{Name: "pgdata", MountPath: v1.PostgresDifferentialDataPath}},
+				})
+			}),
+			wantErr: "mounted by exactly one service, found 2",
+		},
+		{
+			name:    "not mounted at all",
+			spec:    with(func(s *v1.ProjectSpec) { s.Services[0].VolumeMounts = nil }),
+			wantErr: "not mounted by any service",
+		},
+		{
+			name: "PGDATA at the fixed path",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "PGDATA", Value: v1.PostgresDifferentialDataPath}}
+			}),
+		},
+		{
+			name: "other initdb arguments",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "POSTGRES_INITDB_ARGS", Value: "--data-checksums --encoding=UTF8"}}
+			}),
+		},
+		{
+			name:    "PGDATA moved out of the volume",
+			spec:    with(func(s *v1.ProjectSpec) { s.Services[0].Env = []v1.EnvVar{{Name: "PGDATA", Value: "/tmp/other-db"}} }),
+			wantErr: "PGDATA must be",
+		},
+		{
+			name: "PGDATA from a Secret",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "PGDATA", ValueFrom: &v1.EnvVarSource{SecretKeyRef: &v1.SecretKeySelector{Name: "s", Key: "k"}}}}
+			}),
+			wantErr: "must be a literal value",
+		},
+		{
+			name: "WAL directory moved",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "POSTGRES_INITDB_WALDIR", Value: "/tmp/wal"}}
+			}),
+			wantErr: "WAL directory cannot be moved",
+		},
+		{
+			name: "WAL directory moved through initdb arguments",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "POSTGRES_INITDB_ARGS", Value: "--data-checksums --waldir=/tmp/wal"}}
+			}),
+			wantErr: "POSTGRES_INITDB_ARGS may only contain",
+		},
+		{
+			name: "allowed initdb arguments",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "POSTGRES_INITDB_ARGS", Value: "-k --encoding=UTF8 --locale=C.UTF-8 --auth-host=scram-sha-256"}}
+			}),
+		},
+		{
+			name: "WAL directory moved through an abbreviated option",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "POSTGRES_INITDB_ARGS", Value: "--wald=/tmp/other-wal"}}
+			}),
+			wantErr: "POSTGRES_INITDB_ARGS may only contain",
+		},
+		{
+			name: "initdb setting with its value as a separate word",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "POSTGRES_INITDB_ARGS", Value: "--encoding UTF8"}}
+			}),
+			wantErr: "POSTGRES_INITDB_ARGS may only contain",
+		},
+		{
+			name: "unknown initdb option",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "POSTGRES_INITDB_ARGS", Value: "--pgdata=/tmp/db"}}
+			}),
+			wantErr: "POSTGRES_INITDB_ARGS may only contain",
+		},
+		{
+			name: "WAL directory moved through the short flag",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Services[0].Env = []v1.EnvVar{{Name: "POSTGRES_INITDB_ARGS", Value: "-X /tmp/wal"}}
+			}),
+			wantErr: "POSTGRES_INITDB_ARGS may only contain",
+		},
+		{
+			name: "mixed with an Offline Managed volume",
+			spec: with(func(s *v1.ProjectSpec) {
+				s.Volumes = append(s.Volumes, v1.VolumeDef{Name: "uploads", Type: v1.VolumeTypeManaged})
+			}),
+			wantErr: "cannot mix strategies",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateProjectSpec(tt.spec)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}

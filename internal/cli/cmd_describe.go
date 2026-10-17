@@ -177,6 +177,16 @@ func describeNode(w io.Writer, node *v1.Node) {
 	printConditions(w, node.Status.Conditions)
 }
 
+// backupItemFor returns the item naming volume, if any.
+func backupItemFor(items []v1.BackupItem, volume string) (v1.BackupItem, bool) {
+	for _, item := range items {
+		if item.Volume == volume {
+			return item, true
+		}
+	}
+	return v1.BackupItem{}, false
+}
+
 // describeProjectSize shows the declared size, marking an omitted one with the
 // default it resolves to.
 func describeProjectSize(spec v1.ProjectSpec) string {
@@ -258,6 +268,28 @@ func describeProject(w io.Writer, project *v1.Project) {
 			onMissing = string(v1.VolumeOnMissingInitializeEmpty) + " (default)"
 		}
 		printField(w, "    On Missing", onMissing)
+
+		// Every Managed volume, so the default Offline strategy is visible
+		// rather than implied by an item's absence.
+		fmt.Fprintln(w, "    Strategies:")
+		for _, vol := range project.Spec.Volumes {
+			if vol.Type != v1.VolumeTypeManaged {
+				continue
+			}
+			line := string(project.Spec.BackupStrategyFor(vol.Name))
+			item, listed := backupItemFor(project.Spec.Backup.Items, vol.Name)
+			switch {
+			case !listed:
+				line += " (default)"
+			case item.Strategy == v1.BackupStrategyPostgresDifferential:
+				retain := fmt.Sprintf("retain %d full", item.EffectiveRetainFull())
+				if item.RetainFull == nil {
+					retain += " (default)"
+				}
+				line += ", " + retain
+			}
+			fmt.Fprintf(w, "      %s: %s\n", vol.Name, line)
+		}
 	}
 
 	// Ingress

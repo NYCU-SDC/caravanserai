@@ -33,6 +33,37 @@
       ],
       "description": "AssignmentIdentity names one assignment of one Project lifetime."
     },
+    "BackupItem": {
+      "properties": {
+        "volume": {
+          "type": "string",
+          "description": "Volume names a Managed volume declared in spec.volumes."
+        },
+        "strategy": {
+          "$ref": "#/$defs/BackupStrategy",
+          "description": "Strategy is how the volume is backed up."
+        },
+        "retainFull": {
+          "type": "integer",
+          "description": "RetainFull is how many full backups pgBackRest keeps, each with the\ndifferential backups that depend on it. Only valid for\nPostgresDifferential; DefaultRetainFull when omitted. It is a count, not\na time guarantee: extra full backups and failed runs change how far back\nthe retained backups reach."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "volume",
+        "strategy"
+      ],
+      "description": "BackupItem selects the backup strategy of one Managed volume."
+    },
+    "BackupStrategy": {
+      "type": "string",
+      "enum": [
+        "Offline",
+        "PostgresDifferential"
+      ],
+      "description": "How a Managed volume is backed up."
+    },
     "CleanupObligation": {
       "properties": {
         "assignment": {
@@ -325,6 +356,13 @@
         "onMissing": {
           "$ref": "#/$defs/VolumeOnMissing",
           "description": "OnMissing selects behaviour when no backup exists at restore time.\nDefaults to InitializeEmpty when empty."
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/BackupItem"
+          },
+          "type": "array",
+          "description": "Items selects a backup strategy per Managed volume. A Managed volume not\nlisted here uses BackupStrategyOffline. Items are fixed when the Project\nis created: switching a live volume between strategies would leave two\nbackup histories for the same data, and nothing can yet choose between\nthem at restore time."
         }
       },
       "additionalProperties": false,

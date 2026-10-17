@@ -54,6 +54,9 @@
 //
 //	  ConditionTypeTeardownBlocked — set by the agent while it cannot finish
 //	  removing a Terminating Project's resources, and cleared once it has.
+//
+//	  ConditionTypeBackupActive — server-owned, part of the initial status of
+//	  a Project whose backup uses a strategy that is not running yet.
 package v1
 
 import "time"
@@ -174,6 +177,16 @@ const (
 	// server logs. It is cleared when the Project is applied again.
 	ConditionTypeRescheduleExhausted ConditionType = "RescheduleExhausted"
 
+	// ConditionTypeBackupActive says whether the Project's backup is enabled
+	// and has had at least one successful backup accepted. Status=False with
+	// Reason=ReasonStrategyNotActive means a strategy the Project selected,
+	// such as PostgresDifferential, does not run yet, so nothing protects its
+	// data even though the manifest asks for backups.
+	//
+	// It is server-owned; agents cannot write it. It does not say the Project
+	// can be restored automatically, nor that the latest backup is recent.
+	ConditionTypeBackupActive ConditionType = "BackupActive"
+
 	// ConditionTypeDiskPressure indicates whether the node's disk usage is
 	// approaching capacity. Set by the NodeConditionController based on
 	// the Agent's reported Capacity and Allocatable values.
@@ -184,6 +197,11 @@ const (
 	// the Agent's reported Capacity and Allocatable values.
 	ConditionTypeMemoryPressure ConditionType = "MemoryPressure"
 )
+
+// ReasonStrategyNotActive is the BackupActive reason for a Project whose
+// selected backup strategy has not produced an accepted backup because it does
+// not run yet.
+const ReasonStrategyNotActive = "StrategyNotActive"
 
 // MaintenanceStaleAfter is how long a Maintenance condition stays meaningful.
 // An agent that dies mid-backup leaves the condition behind with nothing to
