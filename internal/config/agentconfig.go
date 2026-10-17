@@ -116,6 +116,10 @@ type S3Config struct {
 	Region    string `yaml:"region"`
 	AccessKey string `yaml:"access_key"`
 	SecretKey string `yaml:"secret_key"`
+	// CAFile is a CA certificate the endpoint's certificate is signed by, for
+	// an object store with a private CA. pgBackRest, which reaches the store
+	// only over HTTPS, trusts it; the Agent's own uploads use the system pool.
+	CAFile string `yaml:"ca_file"`
 }
 
 // Enabled reports whether object-store backups are configured.  Managed
@@ -146,6 +150,9 @@ func mergeS3(base, override S3Config) S3Config {
 	}
 	if override.SecretKey != "" {
 		base.SecretKey = override.SecretKey
+	}
+	if override.CAFile != "" {
+		base.CAFile = override.CAFile
 	}
 	return base
 }
@@ -269,6 +276,7 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 			Region:    os.Getenv("S3_REGION"),
 			AccessKey: os.Getenv("S3_ACCESS_KEY"),
 			SecretKey: os.Getenv("S3_SECRET_KEY"),
+			CAFile:    os.Getenv("S3_CA_FILE"),
 		},
 	}
 

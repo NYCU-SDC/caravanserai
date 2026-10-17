@@ -12,6 +12,7 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/pgbackrest"
 	"NYCU-SDC/caravanserai/internal/agent/restore"
 
 	"go.uber.org/zap"
@@ -130,6 +131,10 @@ type RunConfig struct {
 	// Nil disables proxy route maintenance.
 	Routes RouteUpdater
 
+	// RepoHost runs the Node's pgBackRest repo host for PostgresDifferential
+	// Projects. Nil when no object store is configured.
+	RepoHost *pgbackrest.RepoHost
+
 	// Backups schedules Managed volume backups per Project and makes the poll
 	// loop skip Projects with an operation in flight. Nil disables backups.
 	Backups *BackupSupport
@@ -234,7 +239,15 @@ func Run(ctx context.Context, cfg RunConfig) {
 	// Every resource kind this Agent can hold for an assignment. Cleanup
 	// tasks and termination both remove through it and report
 	// ResourcesRemoved only when it finds nothing left.
-	cleaner := defaultCleaner(runtime, routes, cfg.DataRoot)
+	cleaner := defaultCleaner(runtime, routes, cfg.RepoHost, cfg.DataRoot)
+	if cfg.RepoHost != nil {
+		// Rebuild the repo host from its durable state before any Project is
+		// placed: an Agent that restarted may have authorized Projects whose
+		// databases are already archiving through it.
+		if err := cfg.RepoHost.Reconcile(ctx); err != nil {
+			logger.Warn("Failed to rebuild the pgBackRest repo host", zap.Error(err))
+		}
+	}
 	if cleaner == nil {
 		logger.Warn("Runtime cannot remove a single assignment; cleanup obligations will not be resolved by this agent")
 	}

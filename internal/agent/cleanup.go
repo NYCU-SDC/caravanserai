@@ -9,6 +9,7 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/pgbackrest"
 	"NYCU-SDC/caravanserai/internal/agent/restore"
 
 	"go.uber.org/zap"
@@ -114,14 +115,38 @@ func (proxyRoutes) Remaining(context.Context, docker.Assignment) ([]string, erro
 // defaultCleaner registers the kinds every Agent has. It returns nil when the
 // runtime cannot remove a single assignment, which leaves cleanup tasks
 // unhandled rather than handled by a broader removal.
-func defaultCleaner(runtime docker.Runtime, routes RouteUpdater, dataRoot string) *assignmentCleaner {
+func defaultCleaner(runtime docker.Runtime, routes RouteUpdater, repo *pgbackrest.RepoHost, dataRoot string) *assignmentCleaner {
 	ar, ok := runtime.(assignmentRuntime)
 	if !ok {
 		return nil
 	}
-	cleaner := newAssignmentCleaner(dockerResources{runtime: ar}, proxyRoutes{routes: routes})
+	resources := []CleanupResource{dockerResources{runtime: ar}, proxyRoutes{routes: routes}}
+	if repo != nil {
+		// First: the repo host is attached to the Project's network, and
+		// Docker refuses to remove a network with an endpoint still on it.
+		resources = append([]CleanupResource{repoHostResources{repo: repo}}, resources...)
+	}
+	cleaner := newAssignmentCleaner(resources...)
 	cleaner.dataRoot = dataRoot
 	return cleaner
+}
+
+// repoHostResources is the pgBackRest repo host's share of an assignment: the
+// lifetime's authorization and the repo host's attachment to its network.
+// Both belong to the Project lifetime rather than one generation, so every
+// assignment of it removes them.
+type repoHostResources struct {
+	repo *pgbackrest.RepoHost
+}
+
+func (repoHostResources) Kind() string { return "pgbackrest" }
+
+func (r repoHostResources) Remove(ctx context.Context, a docker.Assignment) error {
+	return r.repo.Revoke(ctx, a.UID, docker.NetworkName(a.Project))
+}
+
+func (r repoHostResources) Remaining(ctx context.Context, a docker.Assignment) ([]string, error) {
+	return r.repo.Remaining(ctx, a.UID, docker.NetworkName(a.Project))
 }
 
 func assignmentOf(namespace, project string, id v1.AssignmentIdentity) docker.Assignment {

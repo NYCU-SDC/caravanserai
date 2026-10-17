@@ -15,6 +15,7 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/pgbackrest"
 	"NYCU-SDC/caravanserai/internal/agent/restore"
 
 	"github.com/stretchr/testify/assert"
@@ -571,4 +572,33 @@ func TestTerminateProceedsWhenTheClearFails(t *testing.T) {
 	terminateOne(context.Background(), client, teardownRuntime(), nil, nil, newAssignmentCleaner(&fakeResource{}), p, zap.NewNop())
 
 	assert.Equal(t, []string{"clear TeardownBlocked", "ResourcesRemoved", string(v1.ProjectPhaseTerminated)}, *writes)
+}
+
+// removalOnlyRuntime satisfies docker.Runtime for defaultCleaner by embedding
+// the interface; only the assignment removal methods are ever called.
+type removalOnlyRuntime struct {
+	docker.Runtime
+}
+
+func (removalOnlyRuntime) RemoveAssignment(context.Context, docker.Assignment) error { return nil }
+func (removalOnlyRuntime) AssignmentRemaining(context.Context, docker.Assignment) ([]string, error) {
+	return nil, nil
+}
+
+// The repo host must leave a Project's network before Docker removes it:
+// Docker refuses to remove a network that still has an endpoint.
+func TestRepoHostIsCleanedBeforeDockerResources(t *testing.T) {
+	repo := pgbackrest.NewRepoHost(nil, pgbackrest.Config{DataRoot: t.TempDir(), NodeName: "pve1"}, zap.NewNop())
+	cleaner := defaultCleaner(removalOnlyRuntime{}, nil, repo)
+	require.NotNil(t, cleaner)
+	var kinds []string
+	for _, r := range cleaner.resources {
+		kinds = append(kinds, r.Kind())
+	}
+	assert.Equal(t, "pgbackrest", kinds[0], "kinds in order: %v", kinds)
+
+	without := defaultCleaner(removalOnlyRuntime{}, nil, nil)
+	for _, r := range without.resources {
+		assert.NotEqual(t, "pgbackrest", r.Kind(), "no repo host, no repo host kind")
+	}
 }
