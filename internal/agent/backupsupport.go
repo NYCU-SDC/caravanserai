@@ -97,6 +97,7 @@ func NewBackupSupport(
 		Secure:    secure,
 		AccessKey: cfg.S3.AccessKey,
 		SecretKey: cfg.S3.SecretKey,
+		CAFile:    cfg.S3.CAFile,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("agent: create object store: %w", err)

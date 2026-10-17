@@ -117,8 +117,8 @@ type S3Config struct {
 	AccessKey string `yaml:"access_key"`
 	SecretKey string `yaml:"secret_key"`
 	// CAFile is a CA certificate the endpoint's certificate is signed by, for
-	// an object store with a private CA. pgBackRest, which reaches the store
-	// only over HTTPS, trusts it; the Agent's own uploads use the system pool.
+	// an object store with a private CA. Both the Agent's own uploads and
+	// pgBackRest, which reaches the store only over HTTPS, trust it.
 	CAFile string `yaml:"ca_file"`
 }
 
