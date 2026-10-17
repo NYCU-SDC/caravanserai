@@ -61,6 +61,11 @@ type fakeDocker struct {
 	waitCode int64
 	// missingImages are images not on the Node until pulled.
 	missingImages map[string]bool
+	// removedVolumesOf lists the containers removed with their anonymous
+	// volumes.
+	removedVolumesOf []string
+	// waitHangs makes ContainerWait never report an exit.
+	waitHangs bool
 	// execHangs makes every exec run on without output or end.
 	execHangs bool
 	hungPeers []net.Conn
@@ -155,8 +160,11 @@ func (f *fakeDocker) ContainerStart(_ context.Context, containerID string, _ con
 	return nil
 }
 
-func (f *fakeDocker) ContainerRemove(_ context.Context, containerID string, _ container.RemoveOptions) error {
+func (f *fakeDocker) ContainerRemove(_ context.Context, containerID string, opts container.RemoveOptions) error {
 	f.record("ContainerRemove:" + containerID)
+	if opts.RemoveVolumes {
+		f.removedVolumesOf = append(f.removedVolumesOf, containerID)
+	}
 	// A removed container stops existing, so a later inspect must miss it.
 	// Without this the dead-container path would look like it repaired a
 	// container it had just destroyed.
@@ -229,7 +237,9 @@ func (f *fakeDocker) NetworkDisconnect(_ context.Context, networkID, containerID
 
 func (f *fakeDocker) ContainerWait(_ context.Context, containerID string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
 	ch := make(chan container.WaitResponse, 1)
-	ch <- container.WaitResponse{StatusCode: f.waitCode}
+	if !f.waitHangs {
+		ch <- container.WaitResponse{StatusCode: f.waitCode}
+	}
 	return ch, make(chan error)
 }
 

@@ -115,3 +115,31 @@ func TestExecReturnsAtTheDeadlineOfASilentCommand(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Less(t, time.Since(start), time.Second)
 }
+
+// A helper is removed with its anonymous volumes whether it succeeds, fails
+// or is abandoned by its caller.
+func TestHelperIsRemovedWithItsVolumes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*fakeDocker)
+		ctx   func() (context.Context, context.CancelFunc)
+	}{
+		{"succeeds", func(*fakeDocker) {}, nil},
+		{"fails", func(f *fakeDocker) { f.waitCode = 1 }, nil},
+		{"abandoned", func(f *fakeDocker) { f.waitHangs = true }, func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 50*time.Millisecond)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeDocker()
+			tc.setup(f)
+			ctx, cancel := context.Background(), context.CancelFunc(func() {})
+			if tc.ctx != nil {
+				ctx, cancel = tc.ctx()
+			}
+			defer cancel()
+			_, _ = newExecRuntime(f).RunToCompletion(ctx, "cara-postgres:16", "0", nil, []string{"true"})
+			assert.Len(t, f.removedVolumesOf, 1)
+		})
+	}
+}

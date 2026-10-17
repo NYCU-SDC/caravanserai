@@ -190,9 +190,12 @@ func (r *DockerRuntime) RunToCompletion(ctx context.Context, image, user string,
 		return ExecResult{}, fmt.Errorf("docker: create helper from %s: %w", image, err)
 	}
 	// Removed on every path, with a context of its own: a caller that gave up
-	// must not leave the helper behind.
+	// must not leave the helper behind. Its anonymous volumes go with it: an
+	// image such as PostgreSQL's declares one, which every helper run would
+	// otherwise leave on the Node.
 	defer func() {
-		_ = r.client.ContainerRemove(context.WithoutCancel(ctx), created.ID, container.RemoveOptions{Force: true})
+		_ = r.client.ContainerRemove(context.WithoutCancel(ctx), created.ID,
+			container.RemoveOptions{Force: true, RemoveVolumes: true})
 	}()
 
 	waitCh, errCh := r.client.ContainerWait(ctx, created.ID, container.WaitConditionNextExit)

@@ -5,6 +5,7 @@ package pgbackrest
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,4 +30,27 @@ func TestExecHonoursTheDeadlineOfASilentCommand(t *testing.T) {
 	_, err = runtime.Exec(ctx, name, "postgres", []string{"sleep", "5"})
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Less(t, time.Since(start), 2*time.Second)
+}
+
+// The PostgreSQL image declares PGDATA a volume, so every helper run from it
+// gets an anonymous one; removing the helper must remove that too.
+func TestHelperLeavesNoVolumeBehind(t *testing.T) {
+	requireImage(t)
+	runtime := newRuntime(t)
+	volumes := func() map[string]bool {
+		out, err := dockerRun(t, "volume", "ls", "-q")
+		require.NoError(t, err, out)
+		set := map[string]bool{}
+		for _, v := range strings.Fields(out) {
+			set[v] = true
+		}
+		return set
+	}
+	before := volumes()
+	res, err := runtime.RunToCompletion(context.Background(), image(), "0", nil, []string{"true"})
+	require.NoError(t, err)
+	require.Zero(t, res.ExitCode)
+	for v := range volumes() {
+		assert.True(t, before[v], "volume %s was left by the helper", v)
+	}
 }
