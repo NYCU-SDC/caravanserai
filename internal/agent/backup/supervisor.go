@@ -21,16 +21,26 @@ import (
 // rescheduler would move the very Project being backed up — the backup would
 // cause the failure it exists to protect against.
 type Supervisor struct {
-	runner *Runner
+	runner ProjectRunner
 	logger *zap.Logger
 
 	mu      sync.Mutex
 	entries map[ResourceKey]*supervisorEntry
 }
 
+// ProjectRunner takes one backup of a Project. *Runner is the Offline one.
+type ProjectRunner interface {
+	Run(ctx context.Context, project *v1.Project) error
+}
+
 type supervisorEntry struct {
 	cancel   context.CancelFunc
 	interval time.Duration
+	// uid and generation identify the assignment the work belongs to. A
+	// Project deleted and recreated under the same name, or reassigned, is
+	// other work: its backups belong to another lifetime or fence.
+	uid        string
+	generation int64
 
 	// mu guards project, which Sync refreshes on every poll so a run always
 	// archives the current spec rather than whatever was current when the
@@ -52,7 +62,7 @@ func (e *supervisorEntry) update(p *v1.Project) {
 }
 
 // NewSupervisor creates a Supervisor driving runner.
-func NewSupervisor(runner *Runner, logger *zap.Logger) *Supervisor {
+func NewSupervisor(runner ProjectRunner, logger *zap.Logger) *Supervisor {
 	return &Supervisor{
 		runner:  runner,
 		logger:  logger,
@@ -100,19 +110,24 @@ func (s *Supervisor) Sync(ctx context.Context, projects []*v1.Project) {
 		}
 
 		if entry, ok := s.entries[key]; ok {
-			if entry.interval == interval {
+			if entry.interval == interval && entry.uid == project.ObjectMeta.UID &&
+				entry.generation == project.Status.AssignmentGeneration {
 				// Already supervised at the right cadence; just refresh the
 				// spec the next run will use.
 				entry.update(project)
 				continue
 			}
-			// The interval changed, so the timer must be rebuilt.
+			// The interval or the assignment changed: cancel the old work, and
+			// start again from this snapshot.
 			entry.cancel()
 			delete(s.entries, key)
 		}
 
 		runCtx, cancel := context.WithCancel(ctx)
-		entry := &supervisorEntry{cancel: cancel, interval: interval, project: project}
+		entry := &supervisorEntry{
+			cancel: cancel, interval: interval, project: project,
+			uid: project.ObjectMeta.UID, generation: project.Status.AssignmentGeneration,
+		}
 		s.entries[key] = entry
 
 		go s.loop(runCtx, key, entry)
@@ -166,7 +181,7 @@ func (s *Supervisor) loop(ctx context.Context, key ResourceKey, entry *superviso
 
 // shouldSupervise reports whether a Project needs a backup goroutine: it must
 // be Running on this node, declare a backup policy, and have at least one
-// Managed volume to capture.
+// Managed volume to capture, offline or with PostgresDifferential.
 func shouldSupervise(p *v1.Project) bool {
 	if p.Status.Phase != v1.ProjectPhaseRunning {
 		return false
@@ -174,7 +189,7 @@ func shouldSupervise(p *v1.Project) bool {
 	if p.Spec.Backup == nil {
 		return false
 	}
-	return len(managedVolumes(p.Spec)) > 0
+	return len(managedVolumes(p.Spec)) > 0 || p.Spec.HasPostgresDifferential()
 }
 
 // backupInterval parses a Project's configured backup cadence.

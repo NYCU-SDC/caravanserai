@@ -189,7 +189,7 @@ Placing such a Project needs the Agent's object store to be reached over HTTPS (
 | `ArchivingNotReady` | Creating the stanza or the archive check failed |
 | `PostgresPlacementPending` | Another placement step failed, for example the server was unreachable |
 
-Backups themselves do not run yet: such a Project shows `BackupActive=False` (reason `StrategyNotActive`), and a placement that would need its data restored from the object store is refused with `StrategyRestoreUnavailable`.
+Once `Running`, the Project's `interval` takes a pgBackRest backup of the database without stopping any service: full when the stanza has none, when the newest full is seven days old, or when the database is on a new timeline, and differential otherwise. Backups are not reported to the server yet, so such a Project still shows `BackupActive=False` (reason `StrategyNotActive`), and a placement that would need its data restored from the object store is refused with `StrategyRestoreUnavailable`.
 
 ### Node manifest (manual registration)
 

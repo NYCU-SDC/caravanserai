@@ -8,6 +8,7 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/pgbackup"
 	"NYCU-SDC/caravanserai/internal/agent/restore"
 	"NYCU-SDC/caravanserai/internal/config"
 	"NYCU-SDC/caravanserai/internal/objectstore"
@@ -140,12 +141,35 @@ func NewBackupSupport(
 		NodeName:     cfg.NodeName,
 	}, logger)
 
+	strategies := strategyRunner{offline: runner}
+	if rt, ok := runtime.(pgbackup.Runtime); ok {
+		strategies.postgres = pgbackup.NewRunner(coordinator, rt, nil, nil, logger)
+	}
+
 	return &BackupSupport{
-		Supervisor:  backup.NewSupervisor(runner, logger),
+		Supervisor:  backup.NewSupervisor(strategies, logger),
 		Coordinator: coordinator,
 		Restorer:    restorer,
 		DataRoot:    cfg.DataRoot,
 		NodeName:    cfg.NodeName,
 		ObjectStore: true,
 	}, nil
+}
+
+// strategyRunner sends each Project's backup to the runner of its strategy. A
+// Project uses one strategy for every Managed volume, which validation
+// enforces.
+type strategyRunner struct {
+	offline  *backup.Runner
+	postgres *pgbackup.Runner
+}
+
+func (s strategyRunner) Run(ctx context.Context, project *v1.Project) error {
+	if project.Spec.HasPostgresDifferential() {
+		if s.postgres == nil {
+			return fmt.Errorf("agent: this Node's container runtime cannot run PostgreSQL backups for %s", project.Name)
+		}
+		return s.postgres.Run(ctx, project)
+	}
+	return s.offline.Run(ctx, project)
 }
