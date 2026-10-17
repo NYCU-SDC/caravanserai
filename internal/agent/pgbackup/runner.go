@@ -53,7 +53,7 @@ type Continuity interface {
 	Check(ctx context.Context, db Database) (known bool, version uint64, err error)
 	// FullAccepted records that a full backup which started at version was
 	// accepted. A gap seen since keeps continuity unknown.
-	FullAccepted(db Database, version uint64) error
+	FullAccepted(ctx context.Context, db Database, version uint64) error
 }
 
 // Item is one confirmed backup of a run.
@@ -145,7 +145,7 @@ func (r *Runner) Run(ctx context.Context, project *v1.Project) error {
 		if r.continuity == nil {
 			break
 		}
-		if err := r.continuity.FullAccepted(dbs[i], version); err != nil {
+		if err := r.continuity.FullAccepted(ctx, dbs[i], version); err != nil {
 			// The latch stays set: one more full than needed, nothing lost.
 			log.Warn("Failed to clear the continuity latch", zap.String("volume", dbs[i].Volume), zap.Error(err))
 		}

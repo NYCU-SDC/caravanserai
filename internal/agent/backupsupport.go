@@ -142,8 +142,9 @@ func NewBackupSupport(
 	}, logger)
 
 	strategies := strategyRunner{offline: runner}
-	if rt, ok := runtime.(pgbackup.Runtime); ok {
-		strategies.postgres = pgbackup.NewRunner(coordinator, rt, nil, nil, logger)
+	if rt, ok := runtime.(pgRuntimeWithLogs); ok {
+		continuity := pgbackup.NewFileContinuity(cfg.DataRoot, rt)
+		strategies.postgres = pgbackup.NewRunner(coordinator, rt, continuity, nil, logger)
 	}
 
 	return &BackupSupport{
@@ -154,6 +155,13 @@ func NewBackupSupport(
 		NodeName:    cfg.NodeName,
 		ObjectStore: true,
 	}, nil
+}
+
+// pgRuntimeWithLogs is what PostgreSQL backups need from the runtime: running
+// commands in the database container and reading its log.
+type pgRuntimeWithLogs interface {
+	pgbackup.Runtime
+	pgbackup.LogReader
 }
 
 // strategyRunner sends each Project's backup to the runner of its strategy. A

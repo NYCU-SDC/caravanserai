@@ -157,7 +157,7 @@ func (c *fakeContinuity) Check(context.Context, Database) (bool, uint64, error) 
 	return c.known, c.version, c.checkErr
 }
 
-func (c *fakeContinuity) FullAccepted(_ Database, v uint64) error {
+func (c *fakeContinuity) FullAccepted(_ context.Context, _ Database, v uint64) error {
 	c.cleared = append(c.cleared, v)
 	return nil
 }

@@ -189,7 +189,7 @@ Placing such a Project needs the Agent's object store to be reached over HTTPS (
 | `ArchivingNotReady` | Creating the stanza or the archive check failed |
 | `PostgresPlacementPending` | Another placement step failed, for example the server was unreachable |
 
-Once `Running`, the Project's `interval` takes a pgBackRest backup of the database without stopping any service: full when the stanza has none, when the newest full is seven days old, or when the database is on a new timeline, and differential otherwise. Backups are not reported to the server yet, so such a Project still shows `BackupActive=False` (reason `StrategyNotActive`), and a placement that would need its data restored from the object store is refused with `StrategyRestoreUnavailable`.
+Once `Running`, the Project's `interval` takes a pgBackRest backup of the database without stopping any service: full when the stanza has none, when the newest full is seven days old, when the database is on a new timeline, or when the Agent cannot prove WAL archiving was continuous since, and differential otherwise. Continuity is read from the database container's Docker log: a `dropped WAL file` warning (the archive queue passed its 4 GiB bound), a replaced container, or a log that was rotated, truncated or cannot be read each make the next backup full. On a Node whose Docker logging driver keeps no readable log, every backup is full. Backups are not reported to the server yet, so such a Project still shows `BackupActive=False` (reason `StrategyNotActive`), and a placement that would need its data restored from the object store is refused with `StrategyRestoreUnavailable`.
 
 ### Node manifest (manual registration)
 

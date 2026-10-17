@@ -155,7 +155,7 @@ func TestPostgresPlacementArchivesThroughTheRepoHost(t *testing.T) {
 
 	// Backups while PostgreSQL runs: full first, then differential.
 	rec := &itemRecorder{}
-	runner := pgbackup.NewRunner(backups.Coordinator, runtime, alwaysContinuous{}, rec, zap.NewNop())
+	runner := pgbackup.NewRunner(backups.Coordinator, runtime, pgbackup.NewFileContinuity(dataRoot, runtime), rec, zap.NewNop())
 	running.Status.Phase = v1.ProjectPhaseRunning
 	sql := func(q string) string {
 		out, err := psql(ctx, runtime, db, q)
@@ -169,7 +169,12 @@ func TestPostgresPlacementArchivesThroughTheRepoHost(t *testing.T) {
 	require.NoError(t, runner.Run(ctx, running))
 	require.Len(t, rec.items, 2)
 	assert.Equal(t, pgbackup.TypeFull, rec.items[0][0].Type)
-	assert.Equal(t, pgbackup.TypeDiff, rec.items[1][0].Type)
+	assert.Equal(t, pgbackup.TypeDiff, rec.items[1][0].Type,
+		"the log continued from the first backup to the second, so continuity is known")
+	logs, err := runtime.LogLines(ctx, db)
+	require.NoError(t, err)
+	assert.Contains(t, strings.Join(logs, "\n"), "archive-push",
+		"archive-push reports through PostgreSQL's log, where a dropped-WAL warning would appear")
 	assert.True(t, strings.HasPrefix(rec.items[1][0].Label, rec.items[0][0].Label+"_"),
 		"the differential depends on the full: %s, %s", rec.items[0][0].Label, rec.items[1][0].Label)
 	assert.Equal(t, 16, rec.items[0][0].PGMajor)
@@ -192,13 +197,6 @@ func TestPostgresPlacementArchivesThroughTheRepoHost(t *testing.T) {
 	// And the next run is not blocked by it.
 	require.NoError(t, runner.Run(ctx, running))
 }
-
-type alwaysContinuous struct{}
-
-func (alwaysContinuous) Check(context.Context, pgbackup.Database) (bool, uint64, error) {
-	return true, 0, nil
-}
-func (alwaysContinuous) FullAccepted(pgbackup.Database, uint64) error { return nil }
 
 type itemRecorder struct{ items [][]pgbackup.Item }
 
