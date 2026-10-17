@@ -1,6 +1,7 @@
 package pgbackrest
 
 import (
+	"errors"
 	"context"
 	"os"
 	"path/filepath"
@@ -27,6 +28,8 @@ type fakeRepoDocker struct {
 	networks  map[string]bool // networks the repo host is attached to
 	calls     []string
 	failPings int
+	// failSignals fails that many signals before delivering any.
+	failSignals int
 }
 
 func newFakeRepoDocker() *fakeRepoDocker { return &fakeRepoDocker{networks: map[string]bool{}} }
@@ -80,6 +83,10 @@ func (f *fakeRepoDocker) RemoveContainer(context.Context, string) error {
 func (f *fakeRepoDocker) Signal(_ context.Context, _, sig string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failSignals > 0 {
+		f.failSignals--
+		return errors.New("signal not delivered")
+	}
 	f.record("signal:" + sig)
 	return nil
 }
@@ -156,7 +163,15 @@ func readConfig(t *testing.T, h *RepoHost) string {
 	require.NoError(t, err)
 	applied, err := os.ReadFile(h.appliedPath())
 	require.NoError(t, err)
-	require.Equal(t, string(data), string(applied), "the Agent's copy matches what the server reads")
+	require.Equal(t, string(data), string(applied), "what the server reads is confirmed served")
+	return string(data)
+}
+
+// confirmed is the configuration the repo host is confirmed to serve.
+func confirmed(t *testing.T, h *RepoHost) string {
+	t.Helper()
+	data, err := os.ReadFile(h.appliedPath())
+	require.NoError(t, err)
 	return string(data)
 }
 
@@ -361,7 +376,7 @@ func TestARevocationRolledBackIsCompletedByItsRetry(t *testing.T) {
 
 	left, err := h.Remaining(ctx, "uid-a", "cara-a")
 	require.NoError(t, err)
-	assert.Contains(t, left, "pgbackrest authorization uid-a in the served configuration")
+	assert.Contains(t, left, "pgbackrest authorization uid-a in the repo host configuration")
 
 	require.NoError(t, h.Revoke(ctx, "uid-a", "cara-a"))
 	assert.Equal(t, []string{"tls-server-auth=uid-b=uid-b-pgdata"}, authLines(readConfig(t, h)))
@@ -386,4 +401,90 @@ func TestARevocationReachesAStoppedRepoHost(t *testing.T) {
 	left, err := h.Remaining(ctx, "uid-a", "cara-a")
 	require.NoError(t, err)
 	assert.Empty(t, left)
+}
+
+// A reload that was never delivered leaves the server on the old
+// configuration although the file holds the new one. Nothing may then report
+// the revocation done, and both its retry and the background repair must
+// deliver the reload.
+func TestARevocationWhoseReloadWasNotDeliveredIsReloadedAgain(t *testing.T) {
+	for _, retry := range []string{"revoke", "reconcile"} {
+		t.Run(retry, func(t *testing.T) {
+			d := newFakeRepoDocker()
+			h := newTestRepoHost(t, d)
+			ctx := context.Background()
+			require.NoError(t, h.Authorize(ctx, "uid-a", Authorization{Stanzas: []string{"uid-a-pgdata"}, Network: "cara-a"}, testImage))
+			require.NoError(t, h.Authorize(ctx, "uid-b", Authorization{Stanzas: []string{"uid-b-pgdata"}, Network: "cara-b"}, testImage))
+			hups := len(d.callsWith("signal:HUP"))
+
+			d.mu.Lock()
+			d.failSignals = 1
+			d.mu.Unlock()
+			require.Error(t, h.Revoke(ctx, "uid-a", "cara-a"))
+			assert.Contains(t, authLines(confirmed(t, h)), "tls-server-auth=uid-a=uid-a-pgdata")
+			left, err := h.Remaining(ctx, "uid-a", "cara-a")
+			require.NoError(t, err)
+			assert.Contains(t, left, "pgbackrest authorization uid-a in the repo host configuration")
+
+			if retry == "revoke" {
+				require.NoError(t, h.Revoke(ctx, "uid-a", "cara-a"))
+			} else {
+				require.NoError(t, h.Reconcile(ctx))
+			}
+			assert.Len(t, d.callsWith("signal:HUP"), hups+1, "the reload is delivered")
+			assert.Equal(t, []string{"tls-server-auth=uid-b=uid-b-pgdata"}, authLines(readConfig(t, h)))
+			left, err = h.Remaining(ctx, "uid-a", "cara-a")
+			require.NoError(t, err)
+			assert.NotContains(t, left, "pgbackrest authorization uid-a in the repo host configuration")
+		})
+	}
+}
+
+// An Agent killed between writing the configuration and reloading the server
+// reloads it when it starts again.
+func TestAnAgentRestartedBeforeTheReloadReloads(t *testing.T) {
+	d := newFakeRepoDocker()
+	h := newTestRepoHost(t, d)
+	ctx := context.Background()
+	require.NoError(t, h.Authorize(ctx, "uid-a", Authorization{Stanzas: []string{"uid-a-pgdata"}, Network: "cara-a"}, testImage))
+	require.NoError(t, h.Authorize(ctx, "uid-b", Authorization{Stanzas: []string{"uid-b-pgdata"}, Network: "cara-b"}, testImage))
+
+	// The state and the file say uid-a is gone; the process died before HUP.
+	st, err := h.loadState()
+	require.NoError(t, err)
+	delete(st.Authorizations, "uid-a")
+	require.NoError(t, h.saveState(st))
+	next, err := renderServerConfig(st.Authorizations, testS3)
+	require.NoError(t, err)
+	require.NoError(t, h.writeConfig(ctx, next, testImage))
+	hups := len(d.callsWith("signal:HUP"))
+
+	restarted := NewRepoHost(d, h.cfg, zap.NewNop())
+	left, err := restarted.Remaining(ctx, "uid-a", "")
+	require.NoError(t, err)
+	assert.NotEmpty(t, left, "not confirmed served yet")
+	require.NoError(t, restarted.Reconcile(ctx))
+	assert.Len(t, d.callsWith("signal:HUP"), hups+1)
+	assert.Equal(t, []string{"tls-server-auth=uid-b=uid-b-pgdata"}, authLines(readConfig(t, restarted)))
+}
+
+// A change whose reload failed, followed by one that returns to the
+// configuration still served, rewrites the file and reloads: the file must
+// not keep the change nobody confirmed.
+func TestAFileAheadOfTheServerIsBroughtBack(t *testing.T) {
+	d := newFakeRepoDocker()
+	h := newTestRepoHost(t, d)
+	ctx := context.Background()
+	require.NoError(t, h.Authorize(ctx, "uid-a", Authorization{Stanzas: []string{"uid-a-pgdata"}, Network: "cara-a"}, testImage))
+	served := confirmed(t, h)
+
+	d.mu.Lock()
+	d.failSignals = 1
+	d.mu.Unlock()
+	require.Error(t, h.Authorize(ctx, "uid-b", Authorization{Stanzas: []string{"uid-b-pgdata"}, Network: "cara-b"}, testImage))
+	hups := len(d.callsWith("signal:HUP"))
+
+	require.NoError(t, h.Revoke(ctx, "uid-b", "cara-b"))
+	assert.Len(t, d.callsWith("signal:HUP"), hups+1)
+	assert.Equal(t, served, readConfig(t, h))
 }

@@ -109,11 +109,21 @@ func (h *RepoHost) caDir() string     { return filepath.Join(h.root(), "ca") }
 func (h *RepoHost) confDir() string   { return filepath.Join(h.root(), "server", "conf") }
 func (h *RepoHost) confPath() string  { return filepath.Join(h.confDir(), "pgbackrest.conf") }
 
-// appliedPath keeps the Agent's own copy of the configuration last written.
-// The mounted file belongs to the image's user and may not be readable by an
-// Agent that is not root, so comparisons and rollbacks read this copy.
+// appliedPath keeps the Agent's own copy of the configuration the repo host is
+// confirmed to serve. It is written only once a reload was delivered and the
+// server answers again, or while no server runs, so whatever starts one next
+// reads the configuration file. A configuration written but not confirmed
+// (a failed reload, an Agent killed in between) leaves this copy behind, and
+// the next apply reloads again. The mounted file belongs to the image's user
+// and may not be readable by an Agent that is not root, so comparisons,
+// rollbacks and Remaining read this copy.
 func (h *RepoHost) appliedPath() string { return filepath.Join(h.root(), "server", "applied.conf") }
 func (h *RepoHost) tlsDir() string      { return filepath.Join(h.root(), "server", "tls") }
+
+// writtenPath keeps the Agent's copy of the configuration file as last
+// written, which may be ahead of the confirmed one.
+func (h *RepoHost) writtenPath() string { return filepath.Join(h.root(), "server", "written.conf") }
+
 func (h *RepoHost) projectDir(uid string) string {
 	return filepath.Join(h.root(), "projects", uid)
 }
@@ -253,20 +263,31 @@ func (h *RepoHost) applyWithout(ctx context.Context, st repoState, uid string) e
 	if err != nil {
 		return err
 	}
-	return h.writeConfig(ctx, desired, st.Image)
+	if err := h.writeConfig(ctx, desired, st.Image); err != nil {
+		return err
+	}
+	// No server runs, so none serves the old one; the next to start reads
+	// this file.
+	return h.confirmApplied(desired)
 }
 
-// servesUID reports whether the configuration last written for the repo host
-// authorizes uid.
+// servesUID reports whether the repo host may serve uid: the configuration
+// confirmed served authorizes it, or the file written for the next reload or
+// start does.
 func (h *RepoHost) servesUID(uid string) (bool, error) {
-	applied, err := os.ReadFile(h.appliedPath())
-	if os.IsNotExist(err) {
-		return false, nil
+	for _, path := range []string{h.appliedPath(), h.writtenPath()} {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("pgbackrest: read repo host configuration: %w", err)
+		}
+		if bytes.Contains(data, []byte("\ntls-server-auth="+uid+"=")) {
+			return true, nil
+		}
 	}
-	if err != nil {
-		return false, fmt.Errorf("pgbackrest: read repo host configuration: %w", err)
-	}
-	return bytes.Contains(applied, []byte("\ntls-server-auth="+uid+"=")), nil
+	return false, nil
 }
 
 // networkInUse reports whether another authorization still reaches the repo
@@ -295,7 +316,7 @@ func (h *RepoHost) Remaining(ctx context.Context, uid, network string) ([]string
 	} else if served, err := h.servesUID(uid); err != nil {
 		return nil, err
 	} else if served {
-		left = append(left, "pgbackrest authorization "+uid+" in the served configuration")
+		left = append(left, "pgbackrest authorization "+uid+" in the repo host configuration")
 	}
 	if network != "" && !h.networkInUse(st, network) {
 		attached, err := h.docker.NetworkAttached(ctx, network, h.cfg.ContainerName)
@@ -358,7 +379,15 @@ func (h *RepoHost) apply(ctx context.Context, st repoState) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("pgbackrest: read repo host configuration: %w", err)
 	}
-	changed := !bytes.Equal(previous, desired)
+	written, err := os.ReadFile(h.writtenPath())
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("pgbackrest: read repo host configuration: %w", err)
+	}
+	// Reloaded when what is confirmed served differs, so a write whose reload
+	// failed is reloaded again; and whenever the file is written, since a
+	// reload whose outcome is unknown may have left the server on what the
+	// file held before.
+	changed := !bytes.Equal(previous, desired) || !bytes.Equal(written, desired)
 	if changed {
 		if err := h.writeConfig(ctx, desired, st.Image); err != nil {
 			return err
@@ -386,6 +415,11 @@ func (h *RepoHost) apply(ctx context.Context, st repoState) error {
 			return fmt.Errorf("pgbackrest: repo host not ready (%v), and restoring it failed: %w", err, rerr)
 		}
 		return fmt.Errorf("pgbackrest: repo host rejected the new configuration and was restored: %w", err)
+	}
+	if changed {
+		if err := h.confirmApplied(desired); err != nil {
+			return err
+		}
 	}
 
 	for _, uid := range sortedUIDs(st.Authorizations) {
@@ -480,6 +514,11 @@ func (h *RepoHost) writeConfig(ctx context.Context, data []byte, image string) e
 	if err := NewChowner(h.docker, image).Give(ctx, h.cfg.Owner, h.confPath()); err != nil {
 		return err
 	}
+	return writeFile(h.writtenPath(), data, keyFileMode)
+}
+
+// confirmApplied records data as the configuration the repo host serves.
+func (h *RepoHost) confirmApplied(data []byte) error {
 	return writeFile(h.appliedPath(), data, keyFileMode)
 }
 
