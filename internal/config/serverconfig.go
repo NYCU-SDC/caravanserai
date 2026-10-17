@@ -157,6 +157,8 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		HeadscaleUser:       os.Getenv("HEADSCALE_USER"),
 		OperatorToken:       os.Getenv("OPERATOR_TOKEN"),
 		GraceExpiredRelease: os.Getenv("GRACE_EXPIRED_RELEASE") == "true",
+
+		PostgresDifferentialImage: os.Getenv("POSTGRES_DIFFERENTIAL_IMAGE"),
 	}
 
 	if raw := os.Getenv("RUNNING_GRACE_PERIOD"); raw != "" {
