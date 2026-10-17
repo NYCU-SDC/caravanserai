@@ -61,6 +61,9 @@ type fakeDocker struct {
 	waitCode int64
 	// missingImages are images not on the Node until pulled.
 	missingImages map[string]bool
+	// execHangs makes every exec run on without output or end.
+	execHangs bool
+	hungPeers []net.Conn
 
 	// mutations records every call that changes Docker state, in order.
 	mutations []string
@@ -248,6 +251,13 @@ func (f *fakeDocker) ContainerExecCreate(_ context.Context, containerID string, 
 
 func (f *fakeDocker) ContainerExecAttach(_ context.Context, execID string, _ container.ExecAttachOptions) (types.HijackedResponse, error) {
 	result := fakeExecs[execID]
+	if f.execHangs {
+		// A command that runs on without writing: the read ends only when
+		// the connection is closed.
+		conn, peer := net.Pipe()
+		f.hungPeers = append(f.hungPeers, peer)
+		return types.HijackedResponse{Conn: conn, Reader: bufio.NewReader(conn)}, nil
+	}
 	var stream bytes.Buffer
 	_, _ = stdcopy.NewStdWriter(&stream, stdcopy.Stdout).Write([]byte(result.Stdout))
 	_, _ = stdcopy.NewStdWriter(&stream, stdcopy.Stderr).Write([]byte(result.Stderr))

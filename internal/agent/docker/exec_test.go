@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -98,4 +99,19 @@ func TestNodeContainersPullAMissingImage(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, pulls)
+}
+
+// A command that runs on without writing anything still returns as soon as
+// the caller's deadline passes.
+func TestExecReturnsAtTheDeadlineOfASilentCommand(t *testing.T) {
+	f := newFakeDocker()
+	f.execHangs = true
+	r := newExecRuntime(f)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := r.Exec(ctx, "db", "postgres", []string{"sleep", "infinity"})
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), time.Second)
 }

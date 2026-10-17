@@ -35,9 +35,10 @@ const execPollInterval = 50 * time.Millisecond
 // command could not be run or its outcome could not be determined, which is
 // never the same as success.
 //
-// Cancelling ctx stops waiting but does not stop the command: Docker keeps an
-// exec running after its client goes away. A caller that needs the command
-// gone must stop it inside the container.
+// Cancelling ctx stops waiting at once, also while the command runs without
+// writing anything, but does not stop the command: Docker keeps an exec
+// running after its client goes away. A caller that needs the command gone
+// must stop it inside the container.
 func (r *DockerRuntime) Exec(ctx context.Context, containerID, user string, cmd []string) (ExecResult, error) {
 	created, err := r.client.ContainerExecCreate(ctx, containerID, container.ExecOptions{
 		User:         user,
@@ -55,9 +56,23 @@ func (r *DockerRuntime) Exec(ctx context.Context, containerID, user string, cmd 
 	}
 	defer attached.Close()
 
+	// The output is read until the command ends, which a cancelled ctx would
+	// not interrupt: closing the attached connection is what ends the read.
 	var stdout, stderr bytes.Buffer
-	if _, err := stdcopy.StdCopy(&stdout, &stderr, attached.Reader); err != nil {
-		return ExecResult{}, fmt.Errorf("docker: read exec output in %s: %w", containerID, err)
+	copied := make(chan error, 1)
+	go func() {
+		_, err := stdcopy.StdCopy(&stdout, &stderr, attached.Reader)
+		copied <- err
+	}()
+	select {
+	case err := <-copied:
+		if err != nil {
+			return ExecResult{}, fmt.Errorf("docker: read exec output in %s: %w", containerID, err)
+		}
+	case <-ctx.Done():
+		attached.Close()
+		<-copied
+		return ExecResult{}, fmt.Errorf("docker: wait for exec in %s: %w", containerID, ctx.Err())
 	}
 
 	for {
