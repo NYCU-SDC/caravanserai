@@ -34,6 +34,11 @@ const (
 // connections after a start or restart.
 const pgReadyTimeout = 90 * time.Second
 
+// pgStepTimeout bounds each half of a placement, prepare and finish. Both run
+// in the poll loop, so a command that never returns must not hold it; a step
+// cut short is blocked and retried like any other failure.
+var pgStepTimeout = 5 * time.Minute
+
 // pgBlockedError holds a placement back with a reason the user can see.
 type pgBlockedError struct {
 	reason, detail string
@@ -295,7 +300,10 @@ func placePostgres(ctx context.Context, client *Client, runtime docker.Runtime, 
 		return false
 	}
 	if start != nil {
-		if err := preparePostgresDifferential(ctx, repo, rt, p); err != nil {
+		stepCtx, cancel := context.WithTimeout(ctx, pgStepTimeout)
+		err := preparePostgresDifferential(stepCtx, repo, rt, p)
+		cancel()
+		if err != nil {
 			reportPostgresBlocked(ctx, client, p, err, log)
 			return false
 		}
@@ -303,7 +311,9 @@ func placePostgres(ctx context.Context, client *Client, runtime docker.Runtime, 
 			return false
 		}
 	}
-	if err := finishPostgresDifferential(ctx, client, repo, rt, p); err != nil {
+	stepCtx, cancel := context.WithTimeout(ctx, pgStepTimeout)
+	defer cancel()
+	if err := finishPostgresDifferential(stepCtx, client, repo, rt, p); err != nil {
 		reportPostgresBlocked(ctx, client, p, err, log)
 		return false
 	}

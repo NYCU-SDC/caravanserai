@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent/backup"
@@ -86,6 +87,8 @@ type pgFakeRuntime struct {
 	// "restart" and each command run, joined by spaces.
 	events        []string
 	clientVersion string
+	// hangVersion makes `pgbackrest version` run until its caller gives up.
+	hangVersion bool
 	archiveMode   string
 	archiveCmd    string
 	pendingMode   string
@@ -132,8 +135,12 @@ func (r *pgFakeRuntime) RestartContainer(_ context.Context, name string) error {
 	return nil
 }
 
-func (r *pgFakeRuntime) Exec(_ context.Context, container, _ string, cmd []string) (docker.ExecResult, error) {
+func (r *pgFakeRuntime) Exec(ctx context.Context, container, _ string, cmd []string) (docker.ExecResult, error) {
 	line := strings.Join(cmd, " ")
+	if line == "pgbackrest version" && r.hangVersion {
+		<-ctx.Done()
+		return docker.ExecResult{}, ctx.Err()
+	}
 	if cmd[0] == "sh" {
 		line = "psql " + cmd[len(cmd)-1]
 	}
@@ -324,4 +331,30 @@ func TestPostgresPlacementWaitsForTheClaim(t *testing.T) {
 	assert.Empty(t, rt.seen())
 	assert.Empty(t, gs.updates)
 	assert.Empty(t, gs.conditionWrites)
+}
+
+// A command in the database that never returns is cut off, and the placement
+// blocked and left for the next poll, rather than holding the poll loop.
+func TestPostgresPlacementGivesUpOnAStuckCommand(t *testing.T) {
+	defer func(d time.Duration) { pgStepTimeout = d }(pgStepTimeout)
+	pgStepTimeout = 100 * time.Millisecond
+	p := pgProject()
+	gs, client := newGateServer(t, pgProject())
+	rt := newPgFakeRuntime()
+	rt.hangVersion = true
+
+	done := make(chan struct{})
+	go func() {
+		reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, &fakeRepo{version: pgVersion}), p, zap.NewNop())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("placement did not give up on a stuck command")
+	}
+	blocks := gs.writes("patch", v1.ConditionTypeRecoveryBlocked)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, pgBlockedPlacement, blocks[0].Reason)
+	assert.Empty(t, gs.updates)
 }
