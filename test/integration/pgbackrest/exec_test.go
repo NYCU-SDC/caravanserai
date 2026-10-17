@@ -37,8 +37,10 @@ func TestExecHonoursTheDeadlineOfASilentCommand(t *testing.T) {
 func TestHelperLeavesNoVolumeBehind(t *testing.T) {
 	requireImage(t)
 	runtime := newRuntime(t)
+	// Only volumes no container uses: other packages' tests may be creating
+	// and using volumes at the same time.
 	volumes := func() map[string]bool {
-		out, err := dockerRun(t, "volume", "ls", "-q")
+		out, err := dockerRun(t, "volume", "ls", "-q", "-f", "dangling=true")
 		require.NoError(t, err, out)
 		set := map[string]bool{}
 		for _, v := range strings.Fields(out) {
