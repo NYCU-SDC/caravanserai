@@ -382,6 +382,18 @@ func (s ProjectSpec) EffectiveSize() ProjectSize {
 	return s.Size
 }
 
+// InitialProjectStatus is the status every Project is created with: Pending,
+// generation zero, NeverAssigned, and nothing else. It is a whole value rather
+// than a list of fields to clear, so a field added to ProjectStatus later starts
+// empty on create without anyone remembering to reset it.
+func InitialProjectStatus() ProjectStatus {
+	return ProjectStatus{
+		Phase:                ProjectPhasePending,
+		AssignmentGeneration: 0,
+		AssignmentHistory:    AssignmentHistoryNeverAssigned,
+	}
+}
+
 // ProjectStatus is written by the Controller Manager and Agent.
 type ProjectStatus struct {
 	// Phase is the high-level lifecycle state.
