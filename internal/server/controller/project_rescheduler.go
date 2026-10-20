@@ -13,11 +13,10 @@ import (
 )
 
 const (
-	// terminatingTimeout is the maximum time a Project is allowed to stay in
-	// Terminating phase after its node went NotReady before the rescheduler
-	// forcefully transitions it to Terminated.  Docker resources on the dead
-	// node may be left behind; operators are expected to clean those up
-	// manually.
+	// terminatingTimeout is how long a Terminating Project's node may stay
+	// NotReady before the rescheduler marks the Project TerminationBlocked.
+	// Expiry never finalizes the Project: only its node can confirm that the
+	// resources are gone, and the record has to outlive them.
 	terminatingTimeout = 10 * time.Minute
 
 	// reschedulerResyncInterval is how often the Seed loop re-enqueues all
@@ -79,8 +78,7 @@ type ReschedulerProjectStore interface {
 
 	// SetTerminatingAt writes (or replaces) a TerminatingAt condition on the
 	// Project to record when the rescheduler first observed the node as
-	// NotReady.  This timestamp is used to calculate the force-termination
-	// timeout.
+	// NotReady.  This timestamp is used to calculate the termination timeout.
 	SetTerminatingAt(ctx context.Context, name string, at time.Time) error
 
 	// SetNotReadyAt writes (or replaces) a NotReadyAt condition on the
@@ -89,14 +87,15 @@ type ReschedulerProjectStore interface {
 	// calculate the running grace period before trying to release it.
 	SetNotReadyAt(ctx context.Context, name string, at time.Time) error
 
-	// ForceTerminated transitions the Project to Terminated phase and records a
-	// Phase condition with reason=TerminationTimeout.  The
-	// ProjectTerminationController will delete the record shortly after.
-	ForceTerminated(ctx context.Context, name string) error
+	// SetTerminationBlocked writes (or replaces) a TerminationBlocked condition
+	// stamped at, on a Project that is still Terminating. The phase does not
+	// change: the Project stays Terminating until its node returns and reports
+	// the resources removed.
+	SetTerminationBlocked(ctx context.Context, name, nodeRef string, at time.Time) error
 
-	// ClearRescheduleClocks removes the NotReadyAt, TerminatingAt and
-	// TakeoverRequired conditions from the Project without touching its
-	// phase.  Called when the node recovers before the Project was released.
+	// ClearRescheduleClocks removes the outage conditions (see
+	// IsOutageCondition) from the Project without touching its phase. Called
+	// when the node recovers before the Project was released.
 	//
 	// It must ignore a Project no longer assigned to nodeRef, and a condition
 	// stamped after notAfter — that one belongs to an outage which began after
@@ -115,8 +114,9 @@ type ReschedulerNodeStore interface {
 	ListNotReadyNodeNames(ctx context.Context) ([]string, error)
 }
 
-// ProjectReschedulerController reacts to nodes going NotReady and reschedules
-// or force-terminates the Projects that were running on them.
+// ProjectReschedulerController reacts to nodes going NotReady: it reschedules
+// the Projects that were running on them, and reports the deletions they hold
+// up.
 //
 // For Scheduled/Running projects:
 //   - Release the assignment so the ProjectSchedulerController can place them
@@ -126,9 +126,9 @@ type ReschedulerNodeStore interface {
 //
 // For Terminating projects (node died mid-teardown):
 //   - First observation: record TerminatingAt condition to start the clock.
-//   - Subsequent observations: once the TerminatingAt age exceeds
-//     terminatingTimeout, force-transition to Terminated so that
-//     ProjectTerminationController can delete the DB record.
+//   - Once the TerminatingAt age exceeds terminatingTimeout, mark the Project
+//     TerminationBlocked. It stays Terminating: the record is deleted only
+//     after the node confirms its resources are removed.
 type ProjectReschedulerController struct {
 	logger       *zap.Logger
 	projects     ReschedulerProjectStore
@@ -323,17 +323,21 @@ func hasRescheduleClock(p *ProjectSnapshot) bool {
 }
 
 // IsOutageCondition reports whether t is one of the conditions this controller
-// writes for a single Node outage: the two reschedule clocks, and the
-// TakeoverRequired mark left by a refused release. All three describe that
-// outage only, so a Node that recovers before its Projects were released takes
-// all three with it.
+// writes for a single Node outage: the two reschedule clocks, the
+// TakeoverRequired mark left by a refused release, and the TerminationBlocked
+// mark left by an expired termination timeout. All four describe that outage
+// only, so a Node that recovers before its Projects were released takes all
+// four with it.
 //
 // TakeoverRequired is listed even though it is not a clock: a Scheduled
 // Project is released on first sight with no clock at all, and without this it
-// would keep reporting a takeover that is no longer needed.
+// would keep reporting a takeover that is no longer needed. TerminationBlocked
+// likewise: once the Node is back, its Agent resumes the teardown, and the mark
+// would otherwise keep saying that nothing can.
 func IsOutageCondition(t v1.ConditionType) bool {
 	switch t {
-	case v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt, v1.ConditionTypeTakeoverRequired:
+	case v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt, v1.ConditionTypeTakeoverRequired,
+		v1.ConditionTypeTerminationBlocked:
 		return true
 	default:
 		return false
@@ -374,12 +378,16 @@ func incidentClock(
 
 // handleTerminating processes a single Terminating project on a NotReady node.
 // Returns (true, nil) if the project still needs to be checked again later.
-// The timeout it governs ends in force-termination, which declares the Project
-// Terminated without the agent confirming teardown and may strand Docker
-// resources on the node. That is the reason the clock must belong to this
-// outage: a node that recovers, starts a slow teardown and fails again part-way
-// would otherwise be force-terminated against the previous outage's clock,
-// reaching the destructive outcome without the wait that exists to avoid it.
+//
+// The timeout it governs ends in TerminationBlocked, never in Terminated. The
+// node is the only party that can confirm its resources are gone, and a record
+// deleted before that confirmation would leave whatever still runs there with
+// nothing that knows it exists. So the Project waits, visibly, for the node to
+// return — or, once it exists, for an audited force-finalize.
+//
+// The clock still belongs to one outage, so the mark does too: a node that
+// recovers, starts a slow teardown and fails again part-way is reported blocked
+// only after this outage has lasted the full timeout.
 func (c *ProjectReschedulerController) handleTerminating(
 	ctx context.Context,
 	log *zap.Logger,
@@ -420,19 +428,23 @@ func (c *ProjectReschedulerController) handleTerminating(
 		return true, nil
 	}
 
-	// Timeout exceeded — force to Terminated.
-	log.Info("Termination timeout exceeded, forcing project to Terminated",
+	// Timeout exceeded. Report it once per outage; the periodic resync keeps
+	// enqueueing the node, and re-marking on every pass would only bump the
+	// Project's version.
+	if _, marked := incidentClock(p.Conditions, v1.ConditionTypeTerminationBlocked, lastHeartbeat); marked {
+		return false, nil
+	}
+	log.Warn("Termination timeout exceeded; keeping the project Terminating until its node returns",
 		zap.Duration("elapsed", elapsed),
 		zap.Duration("timeout", terminatingTimeout),
 	)
-	if err := c.projects.ForceTerminated(ctx, p.Name); err != nil {
+	if err := c.projects.SetTerminationBlocked(ctx, p.Name, p.NodeRef, c.clock.Now().UTC()); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			log.Debug("Project disappeared before ForceTerminated, skipping")
+			log.Debug("Project disappeared before TerminationBlocked write, skipping")
 			return false, nil
 		}
 		return false, err
 	}
-	log.Info("Project force-terminated", zap.String("project", p.Name))
 	return false, nil
 }
 

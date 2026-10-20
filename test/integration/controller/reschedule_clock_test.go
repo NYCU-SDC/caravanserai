@@ -180,5 +180,86 @@ func TestSetNotReadyAtRestartsTheClockInTheStore(t *testing.T) {
 	require.NoError(t, projects.SetTerminatingAt(ctx, "clk-restart", first))
 	require.NoError(t, projects.SetTerminatingAt(ctx, "clk-restart", second))
 	assert.WithinDuration(t, second, readClock(t, v1.ConditionTypeTerminatingAt), time.Millisecond,
-		"the same holds for the force-termination clock")
+		"the same holds for the termination clock")
+}
+
+// An expired termination timeout must leave the record in place: only the
+// Project's node can confirm its resources are gone. The mark is per outage
+// like the clocks, so it restamps on a new outage and goes with them when the
+// node returns.
+func TestTerminationBlockedKeepsTheProjectTerminating(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+
+	ctx := context.Background()
+	projects := adapter.NewProjectStoreAdapter(s.Store)
+
+	create := func(t *testing.T, name string, phase v1.ProjectPhase) {
+		t.Helper()
+		p := &v1.Project{
+			TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"},
+			ObjectMeta: v1.ObjectMeta{Name: name},
+			Status:     v1.ProjectStatus{Phase: phase, NodeRef: "node-a"},
+		}
+		require.NoError(t, s.Store.CreateProject(ctx, p))
+		require.NoError(t, s.Store.UpdateProjectStatus(ctx, name, p.Status))
+	}
+	blockedAt := func(t *testing.T, name string) (time.Time, bool) {
+		t.Helper()
+		got, err := s.Store.GetProject(ctx, name)
+		require.NoError(t, err)
+		for _, c := range got.Status.Conditions {
+			if c.Type == v1.ConditionTypeTerminationBlocked {
+				return c.LastTransitionTime.UTC(), true
+			}
+		}
+		return time.Time{}, false
+	}
+
+	first := time.Now().UTC().Truncate(time.Millisecond)
+	second := first.Add(4 * time.Hour)
+
+	t.Run("the phase stays Terminating and a new outage restamps the mark", func(t *testing.T) {
+		create(t, "blocked", v1.ProjectPhaseTerminating)
+
+		require.NoError(t, projects.SetTerminationBlocked(ctx, "blocked", "node-a", first))
+		got, err := s.Store.GetProject(ctx, "blocked")
+		require.NoError(t, err)
+		assert.Equal(t, v1.ProjectPhaseTerminating, got.Status.Phase,
+			"an expired timeout must not finalize the project")
+		at, ok := blockedAt(t, "blocked")
+		require.True(t, ok)
+		assert.WithinDuration(t, first, at, time.Millisecond)
+
+		require.NoError(t, projects.SetTerminationBlocked(ctx, "blocked", "node-a", second))
+		at, _ = blockedAt(t, "blocked")
+		assert.WithinDuration(t, second, at, time.Millisecond)
+	})
+
+	t.Run("a Project that left Terminating is not marked", func(t *testing.T) {
+		create(t, "not-terminating", v1.ProjectPhaseRunning)
+
+		require.NoError(t, projects.SetTerminationBlocked(ctx, "not-terminating", "node-a", first))
+		_, ok := blockedAt(t, "not-terminating")
+		assert.False(t, ok)
+	})
+
+	t.Run("the mark goes with the clocks when the node returns", func(t *testing.T) {
+		create(t, "recovered", v1.ProjectPhaseTerminating)
+		require.NoError(t, projects.SetTerminatingAt(ctx, "recovered", first.Add(-time.Hour)))
+		require.NoError(t, projects.SetTerminationBlocked(ctx, "recovered", "node-a", first))
+
+		// A cleanup decided on a heartbeat older than the mark leaves it:
+		// the mark belongs to an outage that began after that heartbeat.
+		require.NoError(t, projects.ClearRescheduleClocks(ctx, "recovered", "node-a", first.Add(-time.Minute)))
+		_, ok := blockedAt(t, "recovered")
+		require.True(t, ok)
+
+		require.NoError(t, projects.ClearRescheduleClocks(ctx, "recovered", "node-a", first.Add(time.Minute)))
+		_, ok = blockedAt(t, "recovered")
+		assert.False(t, ok)
+		got, err := s.Store.GetProject(ctx, "recovered")
+		require.NoError(t, err)
+		assert.Equal(t, v1.ProjectPhaseTerminating, got.Status.Phase)
+	})
 }

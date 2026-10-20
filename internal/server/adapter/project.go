@@ -239,7 +239,8 @@ func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controll
 }
 
 // ClearRescheduleClocks satisfies controller.ReschedulerProjectStore.
-// Removes the outage conditions (NotReadyAt, TerminatingAt, TakeoverRequired)
+// Removes the outage conditions (NotReadyAt, TerminatingAt, TakeoverRequired,
+// TerminationBlocked)
 // from a Project still assigned to nodeRef, ending the reschedule clocks
 // without touching the phase.
 //
@@ -294,7 +295,7 @@ func (a *ProjectStoreAdapter) SetTerminatingAt(ctx context.Context, name string,
 			Type:               v1.ConditionTypeTerminatingAt,
 			Status:             v1.ConditionTrue,
 			Reason:             "NodeNotReady",
-			Message:            "Node went NotReady while project was Terminating; force-termination timeout clock started",
+			Message:            "Node went NotReady while project was Terminating; termination timeout clock started",
 			LastTransitionTime: at,
 			// true, not false: every field but the timestamp is a fixed
 			// string, so an unchanged-content check would keep the previous
@@ -325,21 +326,28 @@ func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at
 	})
 }
 
-// ForceTerminated satisfies controller.ReschedulerProjectStore.
-// Transitions the project to Terminated and records a Phase condition with
-// reason=TerminationTimeout.
-func (a *ProjectStoreAdapter) ForceTerminated(ctx context.Context, name string) error {
-	now := time.Now().UTC()
+// SetTerminationBlocked satisfies controller.ReschedulerProjectStore.
+// Marks a Terminating Project whose Node stayed NotReady past the termination
+// timeout. The phase is left alone: the record must outlive the resources it
+// represents, and nothing can confirm those are gone while the Node is away.
+//
+// A Project that has left Terminating since the controller read it is not
+// written, so the mark never lands on a phase it does not describe.
+func (a *ProjectStoreAdapter) SetTerminationBlocked(ctx context.Context, name, nodeRef string, at time.Time) error {
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
-		transitioned := status.Phase != v1.ProjectPhaseTerminated
-		status.Phase = v1.ProjectPhaseTerminated
+		if status.Phase != v1.ProjectPhaseTerminating {
+			return nil
+		}
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
-			Type:               v1.ConditionTypePhase,
-			Status:             v1.ConditionTrue,
-			Reason:             "TerminationTimeout",
-			Message:            "Node was NotReady for too long; project force-terminated. Docker resources on the node may need manual cleanup.",
-			LastTransitionTime: now,
-		}, transitioned)
+			Type:   v1.ConditionTypeTerminationBlocked,
+			Status: v1.ConditionTrue,
+			Reason: "NodeNotReady",
+			Message: fmt.Sprintf("Node %s has been NotReady past the termination timeout; "+
+				"the project is kept until the node returns and confirms its resources are removed", nodeRef),
+			LastTransitionTime: at,
+			// true, for the same reason as SetTerminatingAt: the timestamp is
+			// what says which outage this mark belongs to.
+		}, true)
 		return nil
 	})
 }

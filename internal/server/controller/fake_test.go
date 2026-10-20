@@ -75,9 +75,12 @@ type setNotReadyAtCall struct {
 	At   time.Time
 }
 
-// forceTerminatedCall records a single invocation of ForceTerminated.
-type forceTerminatedCall struct {
-	Name string
+// setTerminationBlockedCall records a single invocation of
+// SetTerminationBlocked.
+type setTerminationBlockedCall struct {
+	Name    string
+	NodeRef string
+	At      time.Time
 }
 
 // ---------------------------------------------------------------------------
@@ -383,11 +386,11 @@ type fakeReschedulerProjectStore struct {
 	projects map[string]*ProjectSnapshot
 	errs     map[string]error
 
-	ReleaseAssignmentCalls    []releaseAssignmentCall
-	SetTerminatingAtCalls     []setTerminatingAtCall
-	SetNotReadyAtCalls        []setNotReadyAtCall
-	ForceTerminatedCalls      []forceTerminatedCall
-	ClearRescheduleClockCalls []clearRescheduleClocksCall
+	ReleaseAssignmentCalls     []releaseAssignmentCall
+	SetTerminatingAtCalls      []setTerminatingAtCall
+	SetNotReadyAtCalls         []setNotReadyAtCall
+	SetTerminationBlockedCalls []setTerminationBlockedCall
+	ClearRescheduleClockCalls  []clearRescheduleClocksCall
 
 	// unconfirmed names Projects whose release the fake refuses, as the
 	// adapter does when no WorkloadStopped evidence matches the assignment.
@@ -580,7 +583,9 @@ func (f *fakeReschedulerProjectStore) SetNotReadyAt(_ context.Context, name stri
 	return nil
 }
 
-func (f *fakeReschedulerProjectStore) ForceTerminated(_ context.Context, name string) error {
+// SetTerminationBlocked mirrors the adapter: only a Terminating Project is
+// marked, and the phase never changes.
+func (f *fakeReschedulerProjectStore) SetTerminationBlocked(_ context.Context, name, nodeRef string, at time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -588,11 +593,23 @@ func (f *fakeReschedulerProjectStore) ForceTerminated(_ context.Context, name st
 		return err
 	}
 
-	f.ForceTerminatedCalls = append(f.ForceTerminatedCalls, forceTerminatedCall{Name: name})
+	f.SetTerminationBlockedCalls = append(f.SetTerminationBlockedCalls,
+		setTerminationBlockedCall{Name: name, NodeRef: nodeRef, At: at})
 
-	if p, ok := f.projects[name]; ok {
-		p.Phase = v1.ProjectPhaseTerminated
+	p, ok := f.projects[name]
+	if !ok || p.Phase != v1.ProjectPhaseTerminating {
+		return nil
 	}
+	for i, c := range p.Conditions {
+		if c.Type == v1.ConditionTypeTerminationBlocked {
+			p.Conditions[i].LastTransitionTime = at
+			return nil
+		}
+	}
+	p.Conditions = append(p.Conditions, ConditionSnapshot{
+		Type:               v1.ConditionTypeTerminationBlocked,
+		LastTransitionTime: at,
+	})
 	return nil
 }
 
