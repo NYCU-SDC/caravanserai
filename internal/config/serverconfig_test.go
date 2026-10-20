@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,6 +22,27 @@ func TestServerFromEnvLoadsOverlayFields(t *testing.T) {
 	assert.Equal(t, "/etc/cara/preauth.key", got.PreauthKeyFile)
 	assert.Equal(t, "cara-server-1", got.OverlayHostname)
 	assert.Equal(t, "/var/lib/cara-server/tsnet", got.OverlayStateDir)
+}
+
+func TestServerFromEnvLoadsTerminatingTimeout(t *testing.T) {
+	t.Setenv("TERMINATING_TIMEOUT", "45s")
+
+	got, err := FromEnv(&Config{}, NewConfigLogger())
+	require.NoError(t, err)
+	assert.Equal(t, 45*time.Second, got.TerminatingTimeout)
+
+	t.Setenv("TERMINATING_TIMEOUT", "soon")
+	got, err = FromEnv(&Config{}, NewConfigLogger())
+	require.NoError(t, err)
+	assert.Zero(t, got.TerminatingTimeout, "an unparsable value is ignored, leaving the default")
+}
+
+func TestServerConfig_Validate_TerminatingTimeout(t *testing.T) {
+	cfg := Config{DatabaseURL: "postgres://localhost/cara", TerminatingTimeout: -time.Second}
+	assert.Error(t, cfg.Validate())
+
+	cfg.TerminatingTimeout = 0
+	assert.NoError(t, cfg.Validate(), "zero means the default")
 }
 
 func TestServerConfig_Validate_Overlay(t *testing.T) {

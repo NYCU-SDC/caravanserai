@@ -208,6 +208,28 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		assert.Len(t, ps.SetTerminationBlockedCalls, 1, "the same outage is marked once")
 	})
 
+	t.Run("a configured termination timeout replaces the default", func(t *testing.T) {
+		clk := newFakeClock()
+		ns := newFakeReschedulerNodeStore()
+		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
+		ps := newFakeReschedulerProjectStore()
+		ps.projects["app-1"] = &ProjectSnapshot{
+			Name:    "app-1",
+			Phase:   v1.ProjectPhaseTerminating,
+			NodeRef: "node-1",
+			Conditions: []ConditionSnapshot{
+				{Type: v1.ConditionTypeTerminatingAt, LastTransitionTime: clk.Time.Add(-time.Minute)},
+			},
+		}
+		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil,
+			WithClock(clk), WithTerminatingTimeout(30*time.Second))
+
+		_, err := ctrl.Reconcile(context.Background(), "node-1")
+		require.NoError(t, err)
+		assert.Len(t, ps.SetTerminationBlockedCalls, 1,
+			"a minute exceeds the configured 30s, though not the 10m default")
+	})
+
 	t.Run("a blocked termination is cleared when the node returns", func(t *testing.T) {
 		clk := newFakeClock()
 		blockedAt := clk.Time.Add(-time.Minute)

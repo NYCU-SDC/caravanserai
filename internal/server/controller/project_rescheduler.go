@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	// terminatingTimeout is how long a Terminating Project's node may stay
-	// NotReady before the rescheduler marks the Project TerminationBlocked.
-	// Expiry never finalizes the Project: only its node can confirm that the
-	// resources are gone, and the record has to outlive them.
+	// terminatingTimeout is the default for how long a Terminating Project's
+	// node may stay NotReady before the rescheduler marks the Project
+	// TerminationBlocked (see WithTerminatingTimeout). Expiry never finalizes
+	// the Project: only its node can confirm that the resources are gone, and
+	// the record has to outlive them.
 	terminatingTimeout = 10 * time.Minute
 
 	// reschedulerResyncInterval is how often the Seed loop re-enqueues all
@@ -126,7 +127,7 @@ type ReschedulerNodeStore interface {
 //
 // For Terminating projects (node died mid-teardown):
 //   - First observation: record TerminatingAt condition to start the clock.
-//   - Once the TerminatingAt age exceeds terminatingTimeout, mark the Project
+//   - Once the TerminatingAt age exceeds the termination timeout, mark the Project
 //     TerminationBlocked. It stays Terminating: the record is deleted only
 //     after the node confirms its resources are removed.
 type ProjectReschedulerController struct {
@@ -136,6 +137,8 @@ type ProjectReschedulerController struct {
 	bus          *event.Bus
 	clock        Clock
 	seedInterval time.Duration
+
+	terminatingTimeout time.Duration
 }
 
 // NewProjectReschedulerController creates a ProjectReschedulerController.
@@ -152,6 +155,10 @@ func NewProjectReschedulerController(
 	if interval == 0 {
 		interval = reschedulerResyncInterval
 	}
+	timeout := o.terminatingTimeout
+	if timeout <= 0 {
+		timeout = terminatingTimeout
+	}
 	return &ProjectReschedulerController{
 		logger:       logger,
 		projects:     projects,
@@ -159,6 +166,8 @@ func NewProjectReschedulerController(
 		bus:          bus,
 		clock:        o.clock,
 		seedInterval: interval,
+
+		terminatingTimeout: timeout,
 	}
 }
 
@@ -419,8 +428,8 @@ func (c *ProjectReschedulerController) handleTerminating(
 	}
 
 	elapsed := c.clock.Since(terminatingAt)
-	if elapsed < terminatingTimeout {
-		remaining := terminatingTimeout - elapsed
+	if elapsed < c.terminatingTimeout {
+		remaining := c.terminatingTimeout - elapsed
 		log.Info("Terminating project waiting for timeout",
 			zap.Duration("elapsed", elapsed),
 			zap.Duration("remaining", remaining),
@@ -436,7 +445,7 @@ func (c *ProjectReschedulerController) handleTerminating(
 	}
 	log.Warn("Termination timeout exceeded; keeping the project Terminating until its node returns",
 		zap.Duration("elapsed", elapsed),
-		zap.Duration("timeout", terminatingTimeout),
+		zap.Duration("timeout", c.terminatingTimeout),
 	)
 	if err := c.projects.SetTerminationBlocked(ctx, p.Name, p.NodeRef, c.clock.Now().UTC()); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
