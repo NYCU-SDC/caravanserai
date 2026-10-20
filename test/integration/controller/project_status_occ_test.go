@@ -344,12 +344,16 @@ func (f *occFixture) phaseCondition(t *testing.T) v1.Condition {
 // The path that motivated the transitioned flag, exercised through the real
 // adapter and real SQL rather than the helper in isolation.
 //
-// SetProjectScheduled moves the phase without touching conditions, so a node
-// flapping during scheduling produces Scheduled -> Pending with the Phase
-// condition's Reason unchanged throughout — the reason is hardcoded to
+// A node flapping during scheduling produces Pending -> Scheduled -> Pending,
+// and each release writes a Phase condition with the same hardcoded reason,
 // "NodeNotReady". Comparing only the condition's own fields would keep the
 // timestamp from the previous visit to Pending and misreport when this one
 // began.
+//
+// Each visit is a real transition, and the Phase condition records every one
+// (S9): SetProjectScheduled writes reason Scheduled in the same mutation as the
+// phase, so between the two releases the condition says Scheduled, not the
+// Pending the Project had left.
 func TestScheduledThenPendingRecordsANewTransition(t *testing.T) {
 	f := newOCCFixture(t, "occ-scheduled-then-pending")
 	ctx := context.Background()
@@ -360,14 +364,13 @@ func TestScheduledThenPendingRecordsANewTransition(t *testing.T) {
 	first := f.phaseCondition(t)
 	require.False(t, first.LastTransitionTime.IsZero(), "the first reschedule must stamp a time")
 
-	// The scheduler picks a node. Conditions are left alone — which contradicts
-	// the Phase condition's own specification ("updated on every lifecycle phase
-	// transition", api/v1/condition.go) and is the gap ADR-0016 tracks. This
-	// assertion pins today's behaviour so closing that gap has to come here and
-	// say so, rather than silently changing what the timestamps mean.
+	time.Sleep(2 * time.Millisecond)
+
+	// The scheduler picks a node: the Phase condition follows the phase.
 	require.NoError(t, projects.SetProjectScheduled(ctx, f.name, "node-a"))
-	assert.Equal(t, first.LastTransitionTime, f.phaseCondition(t).LastTransitionTime,
-		"SetProjectScheduled does not currently touch the Phase condition")
+	scheduled := f.phaseCondition(t)
+	assert.Equal(t, "Scheduled", scheduled.Reason, "SetProjectScheduled must record the transition (S9)")
+	assert.True(t, scheduled.LastTransitionTime.After(first.LastTransitionTime))
 
 	time.Sleep(2 * time.Millisecond)
 
@@ -377,9 +380,8 @@ func TestScheduledThenPendingRecordsANewTransition(t *testing.T) {
 
 	require.Equal(t, first.Reason, second.Reason,
 		"the scenario depends on the reason being identical; if this fails the test no longer covers it")
-	assert.True(t, second.LastTransitionTime.After(first.LastTransitionTime),
-		"Scheduled -> Pending is a real transition, so the condition must record when it happened "+
-			"even though its own fields did not change")
+	assert.True(t, second.LastTransitionTime.After(scheduled.LastTransitionTime),
+		"Scheduled -> Pending is a real transition, so the condition must record when it happened")
 }
 
 // Regression guard for the condition helpers. They already behave correctly;

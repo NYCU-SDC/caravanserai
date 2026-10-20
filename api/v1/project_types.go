@@ -599,6 +599,26 @@ func (r *ProjectRecoveryStatus) BlockingObligation() *CleanupObligation {
 	return nil
 }
 
+// ResourcesRemovedFor reports whether the cleanup obligation of the assignment
+// held on node at generation carries ResourcesRemoved. It is what lets that
+// assignment's Agent report the Project Terminated: the phase may say the
+// resources are gone only after the evidence that they are has been recorded.
+//
+// It matches by Node and generation rather than by full identity because the
+// list belongs to one Project record, and create resets status, so every entry
+// in it is of that record's lifetime.
+func (r *ProjectRecoveryStatus) ResourcesRemovedFor(node string, generation int64) bool {
+	if r == nil {
+		return false
+	}
+	for _, o := range r.CleanupObligations {
+		if o.Assignment.NodeName == node && o.Assignment.AssignmentGeneration == generation {
+			return o.Resolved()
+		}
+	}
+	return false
+}
+
 // WorkloadStoppedFor reports whether WorkloadStopped evidence is recorded for
 // exactly assignment. Evidence for any other generation, Node or lifetime says
 // nothing about this one.
