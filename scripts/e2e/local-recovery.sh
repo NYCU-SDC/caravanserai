@@ -31,7 +31,10 @@ set -Eeuo pipefail
 #                               reconciled, and the container survives (CARA-93)
 #   G. a container for a service the spec no longer declares → still blocks the
 #                               new assignment, which no per-service check can see (CARA-93)
-#   H. deleting a Project      → every generation of its lifetime removed, nothing else
+#   H. deleting a Project      → every generation of its lifetime removed, nothing else;
+#                               an earlier Node's open obligation holds it Terminated
+#                               with ResourcesRemoved already recorded, until that Node
+#                               reports (CARA-80)
 #   I. deleting while the node is lost → kept Terminating with TerminationBlocked,
 #                               never finalized; the node returns → cleared, torn
 #                               down and finalized (CARA-80). The server runs with
@@ -529,12 +532,51 @@ foreign_id="$(container_id "$foreign_container")"
 container_running "$container" || fail "H: setup expected generation $label_generation's container to be running"
 dind volume inspect "$scratch_volume" >/dev/null || fail "H: setup expected the Ephemeral volume $scratch_volume"
 
+ghost_uid="$(project_field "$project" 'p["metadata"]["uid"]')"
+[[ -n "$ghost_uid" ]] || fail "H: could not read $project's UID"
+ghost="$(docker exec "$postgres_name" psql -U postgres -d caravanserai -Atc \
+	"UPDATE resources SET status = jsonb_set(status, '{recovery}',
+		COALESCE(status->'recovery', '{}'::jsonb) || jsonb_build_object('cleanupObligations',
+			COALESCE(status->'recovery'->'cleanupObligations', '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
+				'assignment', jsonb_build_object('projectUID', '$ghost_uid', 'nodeName', 'node-ghost', 'assignmentGeneration', 99),
+				'releasedAt', to_jsonb(now()), 'releaseAuthorization', 'WorkloadStopped')))),
+		resource_version = resource_version + 1, updated_at = now()
+	WHERE kind = 'Project' AND name = '$project';")"
+[[ "$ghost" == "UPDATE 1" ]] || fail "H: failed to plant node-ghost's obligation: $ghost"
+held_by_ghost() {
+	phase_is "$project" Terminated &&
+		[[ "$(project_field "$project" 'cond("FinalizationBlocked").get("message", "")')" == *"node node-ghost generation 99"* ]]
+}
+
 log "H: deleting $project"
 delete_status="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$server_url/api/v1/projects/$project")"
 [[ "$delete_status" == "202" ]] || fail "H: delete returned $delete_status, want 202"
 
+# Terminated lasts milliseconds on its own: the record is finalized as soon
+# as the predicate holds, too fast to observe. An earlier Node that still owes
+# its cleanup holds it there, so the order of the reports can be checked at the
+# transition rather than inferred from the final 404. No API adds an
+# obligation, and this rehearsal has one Node, so it is written straight to the
+# store, for a Node that does not exist.
+wait_until 90 "H: $project Terminated and held by node-ghost" held_by_ghost
+
+removal_evidence='p["status"]["phase"] + ("+removed" if any(
+    o.get("resourcesRemoved")
+    and o["assignment"]["nodeName"] == p["status"].get("nodeRef")
+    and o["assignment"].get("assignmentGeneration", 0) == p["status"].get("assignmentGeneration", 0)
+    for o in (p["status"].get("recovery") or {}).get("cleanupObligations") or []) else "")'
+[[ "$(project_field "$project" "$removal_evidence")" == "Terminated+removed" ]] ||
+	fail "H: $project is Terminated without ResourcesRemoved for its own assignment"
+log "H: $project held at Terminated by node-ghost, with ResourcesRemoved already recorded for its assignment"
+
+log "H: node-ghost reports its cleanup done"
+ghost_status="$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
+	"$server_url/api/v1/projects/$project/recovery/resources-removed" -H 'Content-Type: application/json' \
+	-d "{\"uid\":\"$ghost_uid\",\"nodeRef\":\"node-ghost\",\"assignmentGeneration\":99}")"
+[[ "$ghost_status" == 2* ]] || fail "H: node-ghost's ResourcesRemoved report returned $ghost_status"
+
 project_gone() { [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$server_url/api/v1/projects/$project")" == "404" ]]; }
-wait_until 90 "H: $project finalized" project_gone
+wait_until 30 "H: $project finalized once node-ghost reported" project_gone
 
 # A failed listing is not an absent resource: the helpers below return non-zero
 # when the daemon cannot be asked, so wait_until keeps waiting and fails.
