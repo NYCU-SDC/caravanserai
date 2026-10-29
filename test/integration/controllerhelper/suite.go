@@ -62,6 +62,10 @@ func NewSuite(t *testing.T, pool *pgxpool.Pool, databaseURL string, logger *zap.
 
 	pgStore, err := pgstore.New(ctx, databaseURL, logger, bus)
 	require.NoError(t, err, "pgstore.New")
+	// Every suite opens its own pool. Left open, they add up across the
+	// package until PostgreSQL refuses new clients. Registered before Start's
+	// cleanup, so it runs after the manager has stopped using the store.
+	t.Cleanup(pgStore.Close)
 
 	// Merge caller-provided options with the fast seed interval default.
 	// If the caller already provided WithSeedInterval, theirs wins (last
