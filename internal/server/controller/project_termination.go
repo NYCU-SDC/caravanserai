@@ -22,12 +22,19 @@ type TerminationProjectStore interface {
 	// ListProjectNamesByPhase returns the names of all Projects in the given phase.
 	ListProjectNamesByPhase(ctx context.Context, phase v1.ProjectPhase) ([]string, error)
 
-	// GetProjectPhase returns the current phase of the named Project.
-	GetProjectPhase(ctx context.Context, name string) (v1.ProjectPhase, string, error)
+	// GetProjectSnapshot returns the named Project's phase and lifetime.
+	GetProjectSnapshot(ctx context.Context, name string) (*ProjectSnapshot, error)
 
-	// DeleteProject removes the Project record from the store.
-	// Returns store.ErrNotFound if the project no longer exists (safe to ignore).
-	DeleteProject(ctx context.Context, name string) error
+	// FinalizeProject deletes the record of lifetime uid if, at the moment of
+	// deletion, the finalization predicate (v1.FinalizationBlocker) holds.
+	// Returns store.ErrNotFound if it is gone, store.ErrStaleAssignment if
+	// the name belongs to another lifetime, and *store.FinalizationBlockedError
+	// if the predicate refuses.
+	FinalizeProject(ctx context.Context, name, uid string) error
+
+	// SetFinalizationBlocked records on a still-Terminated Project of
+	// lifetime uid why its record is kept.
+	SetFinalizationBlocked(ctx context.Context, name, uid, reason string) error
 }
 
 // ProjectTerminationController performs the final store deletion of Projects
@@ -39,7 +46,11 @@ type TerminationProjectStore interface {
 //     and reports Terminated via PATCH /status.
 //  3. UpdateProjectStatus publishes a TopicProjectUpdated event.
 //  4. This controller's Seed goroutine receives the event and enqueues the name.
-//  5. Reconcile verifies the phase is still Terminated and deletes the record.
+//  5. Reconcile finalizes the record — deletes it only if the finalization
+//     predicate holds on the row at the moment of deletion. A record it may
+//     not delete yet stays, with FinalizationBlocked saying what it waits for;
+//     the ResourcesRemoved report that unblocks it publishes an event that
+//     brings it back here.
 type ProjectTerminationController struct {
 	logger       *zap.Logger
 	projects     TerminationProjectStore
@@ -73,12 +84,14 @@ func (c *ProjectTerminationController) Name() string { return "project-terminati
 
 // Reconcile implements Controller.
 //
-// It checks that the named project is still in Terminated phase (a concurrent
-// operation may have already removed it) and then deletes it from the store.
+// Whether the record may go is decided by the store, on the row it locks for
+// the delete, not on the snapshot read here: the snapshot only says which
+// lifetime the decision is for, so a same-name Project created in between is
+// never the one deleted.
 func (c *ProjectTerminationController) Reconcile(ctx context.Context, name string) (Result, error) {
 	log := c.logger.With(zap.String("controller", c.Name()), zap.String("project", name))
 
-	phase, _, err := c.projects.GetProjectPhase(ctx, name)
+	p, err := c.projects.GetProjectSnapshot(ctx, name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			// Already deleted — nothing to do.
@@ -88,24 +101,38 @@ func (c *ProjectTerminationController) Reconcile(ctx context.Context, name strin
 		return Result{}, err
 	}
 
-	if phase != v1.ProjectPhaseTerminated {
-		log.Debug("Project is not Terminated, skipping", zap.String("phase", string(phase)))
+	if p.Phase != v1.ProjectPhaseTerminated {
+		log.Debug("Project is not Terminated, skipping", zap.String("phase", string(p.Phase)))
 		return Result{}, nil
 	}
 
-	log.Info("Deleting Terminated project from store")
+	err = c.projects.FinalizeProject(ctx, name, p.UID)
+	var blocked *store.FinalizationBlockedError
+	switch {
+	case err == nil:
+		log.Info("Project finalized")
+		return Result{}, nil
 
-	if err := c.projects.DeleteProject(ctx, name); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			// Already deleted by a concurrent reconcile.
-			log.Debug("Project already gone during delete, skipping")
-			return Result{}, nil
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrStaleAssignment):
+		// Finalized by a concurrent reconcile, or the name now belongs to a
+		// newer lifetime that is not this decision's to delete.
+		log.Debug("Project gone or replaced before finalizing, skipping", zap.Error(err))
+		return Result{}, nil
+
+	case errors.As(err, &blocked):
+		// Not an error to retry: nothing changes until an obligation is
+		// resolved, and that report publishes the event that re-enqueues this
+		// Project. The periodic resync covers a dropped event.
+		log.Info("Project cannot be finalized yet", zap.String("reason", blocked.Reason))
+		if err := c.projects.SetFinalizationBlocked(ctx, name, p.UID, blocked.Reason); err != nil &&
+			!errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrStaleAssignment) {
+			return Result{}, err
 		}
+		return Result{}, nil
+
+	default:
 		return Result{}, err
 	}
-
-	log.Info("Project deleted successfully")
-	return Result{}, nil
 }
 
 // Seed implements controller.Seeder.

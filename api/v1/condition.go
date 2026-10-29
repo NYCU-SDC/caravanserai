@@ -30,6 +30,9 @@
 //	  once that clock expires, and removed when the node returns. Same
 //	  per-incident rule.
 //
+//	  ConditionTypeFinalizationBlocked — written by ProjectTerminationController
+//	  when a Terminated Project cannot be finalized yet.
+//
 //	  ConditionTypeNotReadyAt — written by ProjectReschedulerController when it
 //	  observes a Running project on a NotReady node without a clock for the
 //	  current failure. LastTransitionTime is the start of the running
@@ -92,6 +95,13 @@ const (
 	// runs on that Node with nothing that knows it exists. The condition is
 	// removed when the Node returns and the teardown resumes. Server-owned.
 	ConditionTypeTerminationBlocked ConditionType = "TerminationBlocked"
+
+	// ConditionTypeFinalizationBlocked indicates that a Terminated Project's
+	// record is kept because the finalization predicate does not hold yet —
+	// typically an earlier Node has not confirmed that its resources are gone.
+	// The message names what it waits for. It is not cleared: the record is
+	// deleted as soon as the predicate holds. Server-owned.
+	ConditionTypeFinalizationBlocked ConditionType = "FinalizationBlocked"
 
 	// ConditionTypeNotReadyAt records the timestamp at which the rescheduler
 	// first observed a Running project on a NotReady node.

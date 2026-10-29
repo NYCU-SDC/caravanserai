@@ -465,10 +465,22 @@ func (s *Store) GetProject(ctx context.Context, name string) (*v1.Project, error
 }
 
 func (s *Store) getProject(ctx context.Context, name string) (*v1.Project, error) {
-	row := s.pool.QueryRow(ctx, `
+	return readProject(ctx, s.pool, name, "")
+}
+
+// rowQuerier is what readProject needs from a pool or a transaction.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// readProject reads one Project through q. lock is appended to the query
+// verbatim; FinalizeProject passes "FOR UPDATE" to hold the row until its
+// transaction ends.
+func readProject(ctx context.Context, q rowQuerier, name, lock string) (*v1.Project, error) {
+	row := q.QueryRow(ctx, `
 		SELECT namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources
-		WHERE kind = $1 AND namespace = $2 AND name = $3`,
+		WHERE kind = $1 AND namespace = $2 AND name = $3 `+lock,
 		kindProject, defaultNamespace, name,
 	)
 
@@ -656,6 +668,68 @@ func (s *Store) DeleteProject(ctx context.Context, name string) error {
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+	}
+	return nil
+}
+
+// FinalizeProject implements store.ProjectStore.
+func (s *Store) FinalizeProject(ctx context.Context, name, uid string, blocker func(*v1.Project) string) error {
+	return s.finalizeProject(ctx, name, uid, blocker, nil)
+}
+
+// finalizeProject is the finalization point: the one transaction in which a
+// Project's record stops existing. The row is locked FOR UPDATE before blocker
+// reads it, so every other write to it waits until this transaction ends and
+// then finds the row gone — a status write that would have made blocker refuse
+// cannot slip in between the check and the delete.
+//
+// attach runs inside the same transaction after the check and before the
+// delete. Writes that must happen if and only if the record is finalized — the
+// deletion timestamp that starts deleted-Project backup retention, for example
+// — belong there, so they commit or roll back together with it. Production
+// passes nil until such a write exists.
+func (s *Store) finalizeProject(
+	ctx context.Context,
+	name, uid string,
+	blocker func(*v1.Project) string,
+	attach func(ctx context.Context, tx pgx.Tx) error,
+) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin finalize project %q: %w", name, err)
+	}
+	// A no-op once Commit has succeeded.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	project, err := readProject(ctx, tx, name, "FOR UPDATE")
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+		}
+		return err
+	}
+	if project.ObjectMeta.UID != uid {
+		return fmt.Errorf("%w: project %q is no longer lifetime %s", store.ErrStaleAssignment, name, uid)
+	}
+	if reason := blocker(project); reason != "" {
+		return &store.FinalizationBlockedError{Name: name, Reason: reason}
+	}
+
+	if attach != nil {
+		if err := attach(ctx, tx); err != nil {
+			return err
+		}
+	}
+
+	// Pinned to the UID as well, though the lock already makes it redundant:
+	// the statement says on its own which lifetime it removes.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM resources WHERE kind = $1 AND namespace = $2 AND name = $3 AND uid = $4`,
+		kindProject, defaultNamespace, name, uid); err != nil {
+		return fmt.Errorf("postgres: finalize project %q: %w", name, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit finalize project %q: %w", name, err)
 	}
 	return nil
 }

@@ -17,6 +17,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -56,6 +57,22 @@ var ErrVersionConflict = errors.New("resource version conflict")
 // must instead stop and wait for a fresh ownership snapshot.  Handlers map it to
 // HTTP 409 without exposing the underlying identity mismatch.
 var ErrStaleAssignment = errors.New("stale assignment fence")
+
+// FinalizationBlockedError is returned when a Project's record may not be
+// deleted yet: the predicate the delete was guarded by did not hold on the row
+// the store locked. It matches ErrConflictState, since the operation is not
+// allowed in the current state; Reason says what it waits for.
+type FinalizationBlockedError struct {
+	Name   string
+	Reason string
+}
+
+func (e *FinalizationBlockedError) Error() string {
+	return fmt.Sprintf("project %q cannot be finalized: %s", e.Name, e.Reason)
+}
+
+// Is makes errors.Is(err, ErrConflictState) true.
+func (e *FinalizationBlockedError) Is(target error) bool { return target == ErrConflictState }
 
 // AssignmentRef is the ownership fence an Agent presents on every write: the
 // Project UID it was told to run, the Node it believes it is, and the
@@ -207,9 +224,20 @@ type ProjectStore interface {
 	// Returns ErrNotFound if it does not exist.
 	UpdateProject(ctx context.Context, project *v1.Project) error
 
-	// DeleteProject removes a Project by name.
-	// Returns ErrNotFound if it does not exist.
+	// DeleteProject removes a Project by name with no other check. Only the
+	// unaudited force delete uses it; every other delete goes through
+	// FinalizeProject. Returns ErrNotFound if it does not exist.
 	DeleteProject(ctx context.Context, name string) error
+
+	// FinalizeProject deletes the Project record of lifetime uid, but only if
+	// blocker returns "" for the record as it is at the moment of deletion.
+	//
+	// The check and the delete cannot be separated: the row is locked before
+	// blocker reads it and stays locked until the delete commits, so no write
+	// can land in between. Returns ErrNotFound if there is no such Project,
+	// ErrStaleAssignment if the name now belongs to another lifetime, and a
+	// *FinalizationBlockedError (matching ErrConflictState) if blocker refuses.
+	FinalizeProject(ctx context.Context, name, uid string, blocker func(*v1.Project) string) error
 
 	// UpdateProjectStatus writes only the status sub-object of the named
 	// Project.  Used by the Controller Manager to avoid overwriting Spec

@@ -155,8 +155,34 @@ func (a *ProjectStoreAdapter) SetProjectPhase(ctx context.Context, name string, 
 	})
 }
 
-func (a *ProjectStoreAdapter) DeleteProject(ctx context.Context, name string) error {
-	return a.s.DeleteProject(ctx, name)
+// FinalizeProject satisfies controller.TerminationProjectStore. The predicate
+// is v1.FinalizationBlocker, evaluated by the store on the row it locks for the
+// delete.
+func (a *ProjectStoreAdapter) FinalizeProject(ctx context.Context, name, uid string) error {
+	return a.s.FinalizeProject(ctx, name, uid, v1.FinalizationBlocker)
+}
+
+// SetFinalizationBlocked satisfies controller.TerminationProjectStore. It
+// writes only to the lifetime the decision was made for, and only while that
+// Project is still Terminated.
+func (a *ProjectStoreAdapter) SetFinalizationBlocked(ctx context.Context, name, uid, reason string) error {
+	now := time.Now().UTC()
+	return a.s.UpdateProjectStatusForUID(ctx, name, uid, func(status *v1.ProjectStatus) error {
+		if status.Phase != v1.ProjectPhaseTerminated {
+			return nil
+		}
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypeFinalizationBlocked,
+			Status:             v1.ConditionTrue,
+			Reason:             "CleanupPending",
+			Message:            "Record kept: " + reason,
+			LastTransitionTime: now,
+			// false: re-reporting the same reason on every resync must not
+			// bump the version and publish an event that enqueues this Project
+			// again.
+		}, false)
+		return nil
+	})
 }
 
 // ListProjectsByNodeRef satisfies controller.ReschedulerProjectStore.

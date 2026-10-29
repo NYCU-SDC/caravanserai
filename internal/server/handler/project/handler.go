@@ -507,23 +507,56 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 	// otherwise — so it must enter the Terminating cleanup lifecycle, where the
 	// Agent stops and removes resources before the record is dropped.
 	// WorkloadStopped is never a substitute for ResourcesRemoved.
-	if (project.Status.Phase == v1.ProjectPhasePending || project.Status.Phase == v1.ProjectPhaseFailed) &&
-		project.Status.AssignmentHistory == v1.AssignmentHistoryNeverAssigned {
-		if err := h.store.DeleteProject(traceCtx, name); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
+	//
+	// The read above is only a guess. The Scheduler may commit the first
+	// assignment between it and the delete, so the store checks the same
+	// predicate again on the row it locks for the delete. If it no longer
+	// holds, the request is decided again from the current state — normally
+	// that means entering Terminating like any assigned Project — and never
+	// forced through.
+	if v1.ImmediateDeletionBlocker(project) == "" {
+		err := h.store.FinalizeProject(traceCtx, name, project.ObjectMeta.UID, v1.ImmediateDeletionBlocker)
+		switch {
+		case err == nil:
+			logger.Info("Project deleted immediately", zap.String("project", name),
+				zap.String("phase", string(project.Status.Phase)),
+				zap.String("assignmentHistory", string(project.Status.AssignmentHistory)))
+			w.WriteHeader(http.StatusNoContent)
+			return
+		case errors.Is(err, store.ErrNotFound):
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		case errors.Is(err, store.ErrStaleAssignment):
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project %s was deleted and recreated during this request; retry to delete the new one: %w",
+					name, store.ErrConflictState), logger)
+			return
+		case errors.Is(err, store.ErrConflictState):
+			logger.Info("Project changed before it could be deleted immediately; deciding again",
+				zap.String("project", name), zap.Error(err))
+			current, getErr := h.store.GetProject(traceCtx, name)
+			switch {
+			case errors.Is(getErr, store.ErrNotFound):
 				h.problemWriter.WriteError(traceCtx, w,
 					fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
 				return
+			case getErr != nil:
+				logger.Error("GetProject failed during delete", zap.String("name", name), zap.Error(getErr))
+				h.problemWriter.WriteError(traceCtx, w, getErr, logger)
+				return
+			case current.ObjectMeta.UID != project.ObjectMeta.UID:
+				h.problemWriter.WriteError(traceCtx, w,
+					fmt.Errorf("project %s was deleted and recreated during this request; retry to delete the new one: %w",
+						name, store.ErrConflictState), logger)
+				return
 			}
-			logger.Error("DeleteProject failed", zap.String("name", name), zap.Error(err))
+			project = current
+		default:
+			logger.Error("FinalizeProject failed", zap.String("name", name), zap.Error(err))
 			h.problemWriter.WriteError(traceCtx, w, err, logger)
 			return
 		}
-		logger.Info("Project deleted immediately", zap.String("project", name),
-			zap.String("phase", string(project.Status.Phase)),
-			zap.String("assignmentHistory", string(project.Status.AssignmentHistory)))
-		w.WriteHeader(http.StatusNoContent)
-		return
 	}
 
 	switch project.Status.Phase {

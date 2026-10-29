@@ -50,11 +50,6 @@ type setProjectScheduledCall struct {
 	NodeRef string
 }
 
-// deleteProjectCall records a single invocation of DeleteProject.
-type deleteProjectCall struct {
-	Name string
-}
-
 // releaseAssignmentCall records a single invocation of ReleaseAssignment.
 type releaseAssignmentCall struct {
 	Name                 string
@@ -316,12 +311,28 @@ type fakeTerminationProjectStore struct {
 	projects map[string]terminationProjectRecord
 	errs     map[string]error
 
-	DeleteProjectCalls []deleteProjectCall
+	FinalizeCalls               []finalizeCall
+	SetFinalizationBlockedCalls []setFinalizationBlockedCall
 }
 
 type terminationProjectRecord struct {
+	UID     string
 	Phase   v1.ProjectPhase
 	NodeRef string
+	// BlockedBy, when set, is the reason the store's finalization predicate
+	// refuses this record.
+	BlockedBy string
+}
+
+type finalizeCall struct {
+	Name string
+	UID  string
+}
+
+type setFinalizationBlockedCall struct {
+	Name   string
+	UID    string
+	Reason string
 }
 
 var _ TerminationProjectStore = (*fakeTerminationProjectStore)(nil)
@@ -346,34 +357,47 @@ func (f *fakeTerminationProjectStore) ListProjectNamesByPhase(_ context.Context,
 	return names, nil
 }
 
-func (f *fakeTerminationProjectStore) GetProjectPhase(_ context.Context, name string) (v1.ProjectPhase, string, error) {
+func (f *fakeTerminationProjectStore) GetProjectSnapshot(_ context.Context, name string) (*ProjectSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if err, ok := f.errs[name]; ok {
-		return "", "", err
+		return nil, err
 	}
 	r, ok := f.projects[name]
 	if !ok {
-		return "", "", store.ErrNotFound
+		return nil, store.ErrNotFound
 	}
-	return r.Phase, r.NodeRef, nil
+	return &ProjectSnapshot{Name: name, UID: r.UID, Phase: r.Phase, NodeRef: r.NodeRef}, nil
 }
 
-func (f *fakeTerminationProjectStore) DeleteProject(_ context.Context, name string) error {
+// FinalizeProject mirrors the store: it refuses another lifetime, then a
+// record whose predicate does not hold, and deletes otherwise.
+func (f *fakeTerminationProjectStore) FinalizeProject(_ context.Context, name, uid string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if err, ok := f.errs[name]; ok {
-		return err
-	}
+	f.FinalizeCalls = append(f.FinalizeCalls, finalizeCall{Name: name, UID: uid})
 
-	f.DeleteProjectCalls = append(f.DeleteProjectCalls, deleteProjectCall{Name: name})
-
-	if _, ok := f.projects[name]; !ok {
+	r, ok := f.projects[name]
+	switch {
+	case !ok:
 		return store.ErrNotFound
+	case r.UID != uid:
+		return store.ErrStaleAssignment
+	case r.BlockedBy != "":
+		return &store.FinalizationBlockedError{Name: name, Reason: r.BlockedBy}
 	}
 	delete(f.projects, name)
+	return nil
+}
+
+func (f *fakeTerminationProjectStore) SetFinalizationBlocked(_ context.Context, name, uid, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.SetFinalizationBlockedCalls = append(f.SetFinalizationBlockedCalls,
+		setFinalizationBlockedCall{Name: name, UID: uid, Reason: reason})
 	return nil
 }
 
