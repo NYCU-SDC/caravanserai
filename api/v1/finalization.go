@@ -53,7 +53,13 @@ func FinalizationBlocker(p *Project) string {
 		switch s.AssignmentHistory {
 		case AssignmentHistoryNeverAssigned:
 			// Nothing ever ran, so there is nothing to wait for; the list
-			// below is empty or, if not, still has to be resolved.
+			// below is empty or, if not, still has to be resolved. A
+			// generation says otherwise, and the history is then not to be
+			// trusted — the same check ImmediateDeletionBlocker makes, so a
+			// record it refuses cannot pass by entering Terminating first.
+			if s.AssignmentGeneration != 0 {
+				return fmt.Sprintf("assignment history is NeverAssigned but the generation is %d", s.AssignmentGeneration)
+			}
 		case AssignmentHistoryKnown:
 			if s.Recovery == nil || len(s.Recovery.CleanupObligations) == 0 {
 				return "project was assigned before, but no cleanup obligation records where"

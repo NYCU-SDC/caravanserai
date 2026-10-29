@@ -113,6 +113,16 @@ func TestFinalizationBlocker(t *testing.T) {
 			name:    "Terminating with no assignment, never assigned",
 			project: unassignedTerminating(AssignmentHistoryNeverAssigned),
 		},
+		{
+			// Inconsistent: a generation means some Agent was granted it.
+			name: "Terminating with no assignment, never assigned but at a generation",
+			project: func() *Project {
+				p := unassignedTerminating(AssignmentHistoryNeverAssigned)
+				p.Status.AssignmentGeneration = 2
+				return p
+			}(),
+			wantBlockedBy: "NeverAssigned but the generation is 2",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
