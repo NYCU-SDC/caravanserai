@@ -32,13 +32,15 @@ type TerminationProjectStore interface {
 	// if the predicate refuses.
 	FinalizeProject(ctx context.Context, name, uid string) error
 
-	// SetFinalizationBlocked records on a still-Terminated Project of
-	// lifetime uid why its record is kept.
+	// SetFinalizationBlocked records on a Project of lifetime uid that still
+	// awaits finalization why its record is kept.
 	SetFinalizationBlocked(ctx context.Context, name, uid, reason string) error
 }
 
 // ProjectTerminationController performs the final store deletion of Projects
-// that have reached the Terminated phase.
+// that have reached the Terminated phase, and of Terminating Projects with no
+// current assignment — previously assigned Projects deleted while Pending,
+// which no Agent will ever report Terminated.
 //
 // Flow:
 //  1. The HTTP DELETE handler sets a Project to Terminating.
@@ -101,8 +103,9 @@ func (c *ProjectTerminationController) Reconcile(ctx context.Context, name strin
 		return Result{}, err
 	}
 
-	if p.Phase != v1.ProjectPhaseTerminated {
-		log.Debug("Project is not Terminated, skipping", zap.String("phase", string(p.Phase)))
+	if !v1.AwaitsFinalization(v1.ProjectStatus{Phase: p.Phase, NodeRef: p.NodeRef}) {
+		log.Debug("Project is not the server's to finalize, skipping",
+			zap.String("phase", string(p.Phase)), zap.String("nodeRef", p.NodeRef))
 		return Result{}, nil
 	}
 
@@ -175,19 +178,25 @@ func (c *ProjectTerminationController) Seed(ctx context.Context, enqueue func(na
 	}
 }
 
-// resyncTerminated lists all Terminated projects and enqueues each one.
+// resyncTerminated lists every Project that may await finalization —
+// Terminated, and Terminating, which Reconcile narrows to those with no current
+// assignment — and enqueues each one.
 func (c *ProjectTerminationController) resyncTerminated(ctx context.Context, enqueue func(name string)) {
-	names, err := c.projects.ListProjectNamesByPhase(ctx, v1.ProjectPhaseTerminated)
-	if err != nil {
-		c.logger.Error("Seed: failed to list terminated projects", zap.Error(err),
-			zap.String("controller", c.Name()))
-		return
+	total := 0
+	for _, phase := range []v1.ProjectPhase{v1.ProjectPhaseTerminated, v1.ProjectPhaseTerminating} {
+		names, err := c.projects.ListProjectNamesByPhase(ctx, phase)
+		if err != nil {
+			c.logger.Error("Seed: failed to list projects", zap.Error(err),
+				zap.String("phase", string(phase)), zap.String("controller", c.Name()))
+			return
+		}
+		for _, name := range names {
+			enqueue(name)
+		}
+		total += len(names)
 	}
-	for _, name := range names {
-		enqueue(name)
-	}
-	if len(names) > 0 {
-		c.logger.Debug("Seed: enqueued terminated projects", zap.Int("count", len(names)),
+	if total > 0 {
+		c.logger.Debug("Seed: enqueued projects awaiting finalization", zap.Int("count", total),
 			zap.String("controller", c.Name()))
 	}
 }

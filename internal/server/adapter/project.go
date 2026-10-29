@@ -164,11 +164,11 @@ func (a *ProjectStoreAdapter) FinalizeProject(ctx context.Context, name, uid str
 
 // SetFinalizationBlocked satisfies controller.TerminationProjectStore. It
 // writes only to the lifetime the decision was made for, and only while that
-// Project is still Terminated.
+// Project still awaits finalization.
 func (a *ProjectStoreAdapter) SetFinalizationBlocked(ctx context.Context, name, uid, reason string) error {
 	now := time.Now().UTC()
 	return a.s.UpdateProjectStatusForUID(ctx, name, uid, func(status *v1.ProjectStatus) error {
-		if status.Phase != v1.ProjectPhaseTerminated {
+		if !v1.AwaitsFinalization(*status) {
 			return nil
 		}
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
