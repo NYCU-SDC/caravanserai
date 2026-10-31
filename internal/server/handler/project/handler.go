@@ -44,28 +44,18 @@ type Handler struct {
 	tracer        trace.Tracer
 	problemWriter *problem.HttpWriter
 
-	// enforceAssignment is the server side of the UID_ENFORCEMENT rollout
-	// switch (CARA-82, CARA-83). When false (compatibility mode) an Agent report
-	// carrying a complete fence is still validated, but a legacy report missing
-	// UID or generation falls back to the unfenced write path. When true, a
-	// report without a complete fence is rejected as a stale assignment.
-	enforceAssignment bool
-
 	// operatorToken guards the takeover routes until ADR-0018 settles API
 	// access control. Empty disables them.
 	operatorToken string
 }
 
-// NewHandler creates a Project Handler. enforceAssignment turns on strict
-// rejection of Agent writes that do not carry a complete assignment fence; it
-// should be wired from the server's UID_ENFORCEMENT config.
-func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter, enforceAssignment bool) *Handler {
+// NewHandler creates a Project Handler.
+func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter) *Handler {
 	return &Handler{
-		logger:            logger,
-		store:             s,
-		tracer:            otel.Tracer("project/handler"),
-		problemWriter:     pw,
-		enforceAssignment: enforceAssignment,
+		logger:        logger,
+		store:         s,
+		tracer:        otel.Tracer("project/handler"),
+		problemWriter: pw,
 	}
 }
 
@@ -653,7 +643,7 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 // UID, NodeRef, and AssignmentGeneration carry the assignment fence the Agent
 // was granted (CARA-83). AssignmentGeneration is a pointer so a legacy Agent
 // that omits it is distinguishable from one reporting generation zero: nil
-// means "no fence sent", which is only accepted under compatibility mode.
+// means "no fence sent", which is refused.
 type statusPatchRequest struct {
 	Phase                v1.ProjectPhase `json:"phase"`
 	Reason               string          `json:"reason,omitempty"`
@@ -663,31 +653,23 @@ type statusPatchRequest struct {
 	AssignmentGeneration *int64          `json:"assignmentGeneration,omitempty"`
 }
 
-// resolveFence interprets the assignment fields an Agent presented and decides
-// whether the fenced write path must be used.
-//
-// A complete fence (UID, nodeRef, and an explicit generation) always takes the
-// fenced path. An incomplete fence comes from an Agent that predates CARA-83:
-// under strict enforcement it is rejected as stale here, and the caller must
-// return; under compatibility mode it falls back to the unfenced path so the
-// old Agent keeps working. The returned proceed flag is false only when an
-// error problem has already been written.
+// resolveFence reads the assignment fields an Agent presented. An incomplete
+// fence comes from an Agent that predates CARA-83 and is rejected as stale; the
+// returned flag is then false, the problem is already written, and the caller
+// must return.
 func (h *Handler) resolveFence(
 	ctx context.Context,
 	w http.ResponseWriter,
 	logger *zap.Logger,
 	name, uid, nodeRef string,
 	generation *int64,
-) (ref store.AssignmentRef, fenced, proceed bool) {
+) (store.AssignmentRef, bool) {
 	if uid == "" || nodeRef == "" || generation == nil {
-		if h.enforceAssignment {
-			h.problemWriter.WriteError(ctx, w,
-				fmt.Errorf("%w: project %q: request is missing an assignment fence", store.ErrStaleAssignment, name), logger)
-			return store.AssignmentRef{}, false, false
-		}
-		return store.AssignmentRef{}, false, true
+		h.problemWriter.WriteError(ctx, w,
+			fmt.Errorf("%w: project %q: request is missing an assignment fence", store.ErrStaleAssignment, name), logger)
+		return store.AssignmentRef{}, false
 	}
-	return store.AssignmentRef{UID: uid, NodeRef: nodeRef, Generation: *generation}, true, true
+	return store.AssignmentRef{UID: uid, NodeRef: nodeRef, Generation: *generation}, true
 }
 
 // patchStatus handles PATCH /api/v1/projects/{name}/status.
@@ -721,8 +703,8 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ref, fenced, proceed := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
-	if !proceed {
+	ref, ok := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
+	if !ok {
 		return
 	}
 
@@ -778,15 +760,8 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 
 	// The fenced path re-asserts (UID, nodeRef, generation) inside the guarding
 	// UPDATE, so a report from an Agent that has since lost ownership is
-	// rejected as stale without touching the row. The unfenced path is only
-	// reachable in compatibility mode for a legacy Agent.
-	var err error
-	if fenced {
-		err = h.store.ReportProjectStatusFenced(traceCtx, name, ref, mutate)
-	} else {
-		err = h.store.UpdateProjectStatusWithRetry(traceCtx, name, mutate)
-	}
-	if err != nil {
+	// rejected as stale without touching the row.
+	if err := h.store.ReportProjectStatusFenced(traceCtx, name, ref, mutate); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.problemWriter.WriteError(traceCtx, w,
 				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
@@ -894,8 +869,8 @@ func (h *Handler) patchCondition(w http.ResponseWriter, r *http.Request) {
 	// merge, would cover every producer at once; it is not done yet because
 	// it changes Maintenance too, whose staleness is measured from the
 	// timestamp this stamps.
-	ref, fenced, proceed := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
-	if !proceed {
+	ref, ok := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
+	if !ok {
 		return
 	}
 
@@ -909,13 +884,7 @@ func (h *Handler) patchCondition(w http.ResponseWriter, r *http.Request) {
 		LastTransitionTime: now,
 	}
 
-	var err error
-	if fenced {
-		err = h.store.PatchProjectConditionFenced(traceCtx, name, ref, condition)
-	} else {
-		err = h.store.PatchProjectCondition(traceCtx, name, condition)
-	}
-	if err != nil {
+	if err := h.store.PatchProjectConditionFenced(traceCtx, name, ref, condition); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.problemWriter.WriteError(traceCtx, w,
 				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
@@ -967,18 +936,12 @@ func (h *Handler) deleteCondition(w http.ResponseWriter, r *http.Request) {
 		generation = &g
 	}
 
-	ref, fenced, proceed := h.resolveFence(traceCtx, w, logger, name, uid, nodeRef, generation)
-	if !proceed {
+	ref, ok := h.resolveFence(traceCtx, w, logger, name, uid, nodeRef, generation)
+	if !ok {
 		return
 	}
 
-	var err error
-	if fenced {
-		err = h.store.ClearProjectConditionFenced(traceCtx, name, ref, condType)
-	} else {
-		err = h.store.ClearProjectCondition(traceCtx, name, condType)
-	}
-	if err != nil {
+	if err := h.store.ClearProjectConditionFenced(traceCtx, name, ref, condType); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.problemWriter.WriteError(traceCtx, w,
 				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)

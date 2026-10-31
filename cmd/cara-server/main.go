@@ -181,7 +181,7 @@ func main() {
 
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
 	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, pgStore, agentDialer, problemWriter))
-	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter, cfg.UIDEnforcement).WithOperatorToken(cfg.OperatorToken))
+	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter).WithOperatorToken(cfg.OperatorToken))
 	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
 
 	// Overlay administration (CARA-49): issue Headscale pre-auth keys and

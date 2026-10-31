@@ -55,7 +55,7 @@ func doDeleteCondition(h *Handler, name, condType, query string) *httptest.Respo
 // fenced path, so a node that has lost the Project cannot.
 func TestRecoveryBlockedIsAgentWritableThroughTheFence(t *testing.T) {
 	s := &conditionFakeStore{}
-	h := newFenceHandler(s, true)
+	h := newFenceHandler(s)
 
 	rec := doPatchCondition(h, "demo", "RecoveryBlocked",
 		`{"status":"True","reason":"VolumeUnavailable","message":"db-data missing",`+
@@ -89,7 +89,7 @@ func TestRecoveryBlockedIsAgentWritableThroughTheFence(t *testing.T) {
 func TestRecoveryBlockedStaleFenceIsRejected(t *testing.T) {
 	s := &conditionFakeStore{}
 	s.returnErr = store.ErrStaleAssignment
-	h := newFenceHandler(s, true)
+	h := newFenceHandler(s)
 
 	rec := doPatchCondition(h, "demo", "RecoveryBlocked",
 		`{"status":"True","reason":"VolumeUnavailable","uid":"uid-1","nodeRef":"node-a","assignmentGeneration":4}`)
@@ -99,16 +99,15 @@ func TestRecoveryBlockedStaleFenceIsRejected(t *testing.T) {
 	}
 }
 
-// In strict mode an unfenced write is refused outright rather than falling
-// back to the unfenced path.
-func TestRecoveryBlockedWithoutFenceIsRejectedInStrictMode(t *testing.T) {
+// An unfenced write is refused outright.
+func TestRecoveryBlockedWithoutFenceIsRejected(t *testing.T) {
 	s := &conditionFakeStore{}
-	h := newFenceHandler(s, true)
+	h := newFenceHandler(s)
 
 	rec := doPatchCondition(h, "demo", "RecoveryBlocked", `{"status":"True","reason":"VolumeUnavailable"}`)
 
 	if rec.Code == http.StatusNoContent {
-		t.Fatalf("an unfenced write was accepted in strict mode")
+		t.Fatalf("an unfenced write was accepted")
 	}
 	if len(s.patched) != 0 {
 		t.Fatalf("store was written: %+v", s.patched)
@@ -128,7 +127,7 @@ func TestServerOwnedRecoveryConditionsAreNotAgentWritable(t *testing.T) {
 	} {
 		t.Run(string(ct), func(t *testing.T) {
 			s := &conditionFakeStore{}
-			h := newFenceHandler(s, true)
+			h := newFenceHandler(s)
 
 			rec := doPatchCondition(h, "demo", string(ct), `{"status":"True","reason":"Forged",`+fence+`}`)
 			if rec.Code == http.StatusNoContent {

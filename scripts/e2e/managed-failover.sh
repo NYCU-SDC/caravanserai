@@ -269,7 +269,7 @@ operator_token="e2e-operator-token"
 server_url="http://127.0.0.1:$server_port"
 (
 	cd "$test_root/server-run"
-	env HOST=127.0.0.1 PORT="$server_port" UID_ENFORCEMENT=true OPERATOR_TOKEN="$operator_token" GRACE_EXPIRED_RELEASE=true \
+	env HOST=127.0.0.1 PORT="$server_port" OPERATOR_TOKEN="$operator_token" GRACE_EXPIRED_RELEASE=true \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &
@@ -291,7 +291,6 @@ EOF
 			AGENT_LISTEN_PORT=0 \
 			PROXY_LISTEN_ADDR=127.0.0.1:0 \
 			AGENT_ADVERTISE_IP=127.0.0.1 \
-			UID_ENFORCEMENT=true \
 			S3_ENDPOINT="$minio_endpoint" \
 			S3_BUCKET="$bucket" \
 			S3_ACCESS_KEY=caraadmin \

@@ -73,18 +73,29 @@ func (f *fakeProjectStore) UpdateProjectStatusForUID(
 	return f.UpdateProjectStatusWithRetry(ctx, name, mutate)
 }
 
+// ReportProjectStatusFenced ignores the fence: these tests are about the merge,
+// and assignment_fence_test.go covers the fence.
+func (f *fakeProjectStore) ReportProjectStatusFenced(
+	ctx context.Context,
+	name string,
+	_ store.AssignmentRef,
+	mutate func(*v1.ProjectStatus) error,
+) error {
+	return f.UpdateProjectStatusWithRetry(ctx, name, mutate)
+}
+
 func newTestHandler(s store.ProjectStore) *Handler {
 	return NewHandler(
 		zap.NewNop(),
 		s,
 		problem.NewWithMapping(handler.NewProblemMapping()),
-		false, // compatibility mode: existing tests exercise the unfenced path
 	)
 }
 
 func patchStatusRequest(t *testing.T, h *Handler, name, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+name+"/status", strings.NewReader(body))
+	fenced := `{"uid":"uid-1","nodeRef":"node-a","assignmentGeneration":1,` + strings.TrimPrefix(body, "{")
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+name+"/status", strings.NewReader(fenced))
 	req.SetPathValue("name", name)
 	rec := httptest.NewRecorder()
 	h.patchStatus(rec, req)

@@ -66,14 +66,6 @@ type DockerRuntime struct {
 	client   dockerAPI
 	logger   *zap.Logger
 	dataRoot string
-	// enforceUID gates UID ownership fencing (CARA-82). When false
-	// (compatibility mode, the default during a mixed-agent rollout) new
-	// resources are still labelled with their Project UID, but ownership
-	// decisions fall back to (namespace, name) so pre-UID containers keep
-	// working. When true, UID equality is required before adopting, stopping,
-	// or removing a resource; a same-name container with a different or missing
-	// UID is treated as not owned.
-	enforceUID bool
 }
 
 // NewDockerRuntime creates a DockerRuntime connected to the Docker daemon at
@@ -83,7 +75,7 @@ type DockerRuntime struct {
 //
 // dataRoot is the directory the agent owns for Managed volume data; Managed
 // volumes are bind-mounted from {dataRoot}/volumes/{namespace}/{project}/{volume}/data.
-func NewDockerRuntime(host, dataRoot string, enforceUID bool, logger *zap.Logger) (*DockerRuntime, error) {
+func NewDockerRuntime(host, dataRoot string, logger *zap.Logger) (*DockerRuntime, error) {
 	c, err := dockerclient.NewClientWithOpts(
 		dockerclient.WithHost(host),
 		dockerclient.WithAPIVersionNegotiation(),
@@ -91,7 +83,7 @@ func NewDockerRuntime(host, dataRoot string, enforceUID bool, logger *zap.Logger
 	if err != nil {
 		return nil, fmt.Errorf("docker: create client: %w", err)
 	}
-	return &DockerRuntime{client: c, logger: logger, dataRoot: dataRoot, enforceUID: enforceUID}, nil
+	return &DockerRuntime{client: c, logger: logger, dataRoot: dataRoot}, nil
 }
 
 // Close releases the underlying HTTP connection to the Docker daemon.
@@ -402,8 +394,8 @@ func containerOwnershipFilters(project ProjectIdentity) filters.Args {
 	)
 	// When the identity carries a UID, scope the match to exactly that Project
 	// lifetime (CARA-82) so a destructive orphan operation on a previous
-	// lifetime never touches the current one, and vice versa. Identities built
-	// in compatibility mode carry no UID and match by (namespace, name) as before.
+	// lifetime never touches the current one, and vice versa. A legacy identity
+	// carries no UID and matches by (namespace, name).
 	if project.UID != "" {
 		args.Add("label", labelUID+"="+project.UID)
 	}
@@ -438,17 +430,12 @@ func (r *DockerRuntime) ListLocalProjects(ctx context.Context) ([]ProjectIdentit
 	seen := make(map[ProjectIdentity]struct{}, len(containers))
 	projects := make([]ProjectIdentity, 0, len(containers))
 	for _, c := range containers {
+		// A legacy container with no UID label keeps UID="" here, which will
+		// not match the current assignment's UID and is therefore quarantined.
 		project := ProjectIdentity{
 			Namespace: c.Labels[labelNamespace],
 			Name:      c.Labels[labelProject],
-		}
-		// UID is part of the identity only when enforcing (CARA-82). In
-		// compatibility mode it is left empty so ownership matches by
-		// (namespace, name), preserving pre-UID behaviour. When enforcing, a
-		// legacy container with no UID label keeps UID="" here, which will not
-		// match the current assignment's UID and is therefore quarantined.
-		if r.enforceUID {
-			project.UID = c.Labels[labelUID]
+			UID:       c.Labels[labelUID],
 		}
 		if project.Namespace == "" || project.Name == "" || c.Labels[labelService] == "" {
 			r.logger.Warn("Ignoring container with incomplete Cara ownership labels",
@@ -605,11 +592,10 @@ func (r *DockerRuntime) validateOwnership(kind, name string, labels map[string]s
 	if namespace := labels[labelNamespace]; namespace != "" && namespace != project.Namespace {
 		return fmt.Errorf("%s %q: namespace ownership label does not match", kind, name)
 	}
-	// UID fencing (CARA-82): when enforcing, an existing resource must carry
-	// the current Project's UID. A different value is a previous lifetime; an
-	// empty value is a pre-UID (legacy) resource. Neither may be adopted. When
-	// not enforcing, UID is ignored so mixed-rollout resources keep working.
-	if r.enforceUID && project.UID != "" && labels[labelUID] != project.UID {
+	// UID fencing (CARA-82): an existing resource must carry the current
+	// Project's UID. A different value is a previous lifetime; an empty value is
+	// a pre-UID (legacy) resource. Neither may be adopted.
+	if project.UID != "" && labels[labelUID] != project.UID {
 		return fmt.Errorf("%s %q: UID ownership label %q does not match current Project UID %q",
 			kind, name, labels[labelUID], project.UID)
 	}
@@ -904,9 +890,8 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 	if err == nil {
 		// Container exists. It is adopted only if it belongs to this
 		// assignment, by the same rule recovery and the health check use
-		// (checkContainerOwnership): the project, service and namespace labels
-		// always, and with UID enforcement on the UID (CARA-82) and the
-		// assignment generation (CARA-83) too. A container from a previous
+		// (checkContainerOwnership): the project, service and namespace labels,
+		// the UID (CARA-82), and the assignment generation (CARA-83). A container from a previous
 		// lifetime, an earlier grant, or no cara labels at all would otherwise
 		// masquerade as the current Project. ensureContainer only refuses to
 		// reuse such a container; it never stops or removes it (see
@@ -1180,12 +1165,10 @@ func (r *DockerRuntime) preflightTargets(ctx context.Context, project *v1.Projec
 // checkContainerOwnership reports whether an existing container belongs to the
 // assignment being recovered, returning a *ContainerNotOwnedError if not.
 //
-// The project, service and namespace labels are checked in every mode: they
-// are what makes a container this Project's at all. A namespace label that is
-// absent is tolerated only in compatibility mode, where containers created
-// before the label existed must keep working. With UID enforcement on, the UID
-// and the assignment generation must match too — the same rule ensureContainer
-// applies before adopting a container, and the one CARA-83 depends on.
+// The project, service and namespace labels are what makes a container this
+// Project's at all. The UID and the assignment generation must match too — the
+// same rule ensureContainer applies before adopting a container, and the one
+// CARA-83 depends on.
 //
 // A container with no labels at all cannot be shown to be ours, so it is
 // treated as not ours.
@@ -1210,11 +1193,8 @@ func (r *DockerRuntime) checkOwnershipLabels(name string, labels map[string]stri
 	if labels[labelService] != service {
 		return mismatch(labelService, service)
 	}
-	if ns := labels[labelNamespace]; ns != owner.Namespace && (ns != "" || r.enforceUID) {
+	if labels[labelNamespace] != owner.Namespace {
 		return mismatch(labelNamespace, owner.Namespace)
-	}
-	if !r.enforceUID {
-		return nil
 	}
 	if labels[labelUID] != owner.UID {
 		return mismatch(labelUID, owner.UID)

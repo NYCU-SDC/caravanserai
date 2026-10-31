@@ -251,8 +251,7 @@ func TestContainerOwnershipFilters_IncludeUIDWhenPresent(t *testing.T) {
 		"cara.uid=uid-1",
 	}, withUID)
 
-	// Compatibility mode: no UID in the identity means no UID filter, matching
-	// pre-CARA-82 behaviour.
+	// A legacy identity has no UID, so there is no UID filter.
 	noUID := containerOwnershipFilters(ProjectIdentity{Namespace: "team-a", Name: "payments"}).Get("label")
 	assert.ElementsMatch(t, []string{
 		"cara.project=payments",
@@ -270,38 +269,30 @@ func TestResourceOwnershipFilters_IncludeUIDWhenPresent(t *testing.T) {
 	}, withUID)
 }
 
-// CARA-82: UID fencing on network adoption. When enforcing, an existing network
-// must carry the current Project's UID; a different or missing value is refused.
-// When not enforcing, UID is ignored so mixed-rollout networks keep working.
+// CARA-82: UID fencing on network adoption. An existing network must carry the
+// current Project's UID; a different or missing value is refused.
 func TestValidateNetworkOwnership_UID(t *testing.T) {
 	project := ProjectIdentity{Namespace: "team-a", Name: "payments", UID: "uid-new"}
 
 	tests := []struct {
-		name       string
-		enforceUID bool
-		labels     map[string]string
-		wantErr    bool
+		name    string
+		labels  map[string]string
+		wantErr bool
 	}{
-		{name: "enforce: matching UID", enforceUID: true, labels: map[string]string{
+		{name: "matching UID", labels: map[string]string{
 			labelProject: "payments", labelNamespace: "team-a", labelUID: "uid-new",
 		}},
-		{name: "enforce: different UID rejected", enforceUID: true, labels: map[string]string{
+		{name: "different UID rejected", labels: map[string]string{
 			labelProject: "payments", labelNamespace: "team-a", labelUID: "uid-old",
 		}, wantErr: true},
-		{name: "enforce: legacy missing UID rejected", enforceUID: true, labels: map[string]string{
+		{name: "legacy missing UID rejected", labels: map[string]string{
 			labelProject: "payments", labelNamespace: "team-a",
 		}, wantErr: true},
-		{name: "compat: different UID tolerated", enforceUID: false, labels: map[string]string{
-			labelProject: "payments", labelNamespace: "team-a", labelUID: "uid-old",
-		}},
-		{name: "compat: legacy missing UID tolerated", enforceUID: false, labels: map[string]string{
-			labelProject: "payments", labelNamespace: "team-a",
-		}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &DockerRuntime{enforceUID: tt.enforceUID}
+			r := &DockerRuntime{}
 			err := r.validateNetworkOwnership("cara-payments", tt.labels, project)
 			assert.Equal(t, tt.wantErr, err != nil)
 		})

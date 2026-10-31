@@ -578,12 +578,10 @@ func TestPreflightRecoveryReportsWhichVolumeIsMissing(t *testing.T) {
 
 // ── Container ownership ──────────────────────────────────────────────────────
 
-// newStrictFixture is a fixture with UID enforcement on, the mode CARA-83's
-// generation fence is enforced in.
+// newStrictFixture is a fixture with its Managed volume provisioned.
 func newStrictFixture(t *testing.T) *recoverFixture {
 	t.Helper()
 	f := newRecoverFixture(t, v1.VolumeTypeManaged)
-	f.runtime.enforceUID = true
 	f.provisionManaged(t)
 	return f
 }
@@ -667,7 +665,7 @@ func TestRecoverServicesAlwaysChecksProjectServiceAndNamespace(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.label, func(t *testing.T) {
-			f := newRecoverFixture(t, v1.VolumeTypeManaged) // compatibility mode
+			f := newRecoverFixture(t, v1.VolumeTypeManaged)
 			f.provisionManaged(t)
 			f.staleContainer("db", "exited", tc.label, tc.value)
 
@@ -689,27 +687,8 @@ func TestRecoverServicesRefusesAnUnlabelledContainer(t *testing.T) {
 	assert.Empty(t, f.docker.mutations)
 }
 
-// Compatibility mode keeps its documented contract: during a mixed-agent
-// rollout ownership falls back to (namespace, name), so a container without
-// the UID and generation labels — or with older ones — is still recovered,
-// exactly as ensureContainer would adopt it. A missing namespace label is
-// tolerated for the same reason. Strict mode is what closes these.
-func TestRecoverServicesCompatibilityModeIgnoresUIDAndGeneration(t *testing.T) {
-	f := newRecoverFixture(t, v1.VolumeTypeManaged)
-	f.provisionManaged(t)
-	f.docker.withContainer(ContainerName("blog", "db"), "exited", map[string]string{
-		labelProject:    "blog",
-		labelService:    "db",
-		labelUID:        "uid-previous-lifetime",
-		labelGeneration: "6",
-	})
-
-	require.NoError(t, f.runtime.RecoverServices(t.Context(), f.project, []string{"db"}))
-	assert.Equal(t, []string{"ContainerStart:" + fakeID("blog-db")}, f.docker.mutations)
-}
-
-// In strict mode the namespace label is required, not merely consistent.
-func TestRecoverServicesStrictModeRequiresTheNamespaceLabel(t *testing.T) {
+// The namespace label is required, not merely consistent.
+func TestRecoverServicesRequiresTheNamespaceLabel(t *testing.T) {
 	f := newStrictFixture(t)
 	labels := f.ownedLabels("db")
 	delete(labels, labelNamespace)
@@ -805,9 +784,7 @@ func TestEnsureContainerUsesTheSharedOwnershipRule(t *testing.T) {
 		assert.Empty(t, f.docker.mutations)
 	})
 
-	// Previously compatibility mode adopted any container with the right
-	// name. The project and service labels are now required in every mode.
-	t.Run("refuses another project's container in compatibility mode", func(t *testing.T) {
+	t.Run("refuses another project's container", func(t *testing.T) {
 		f := newRecoverFixture(t, v1.VolumeTypeManaged)
 		f.staleContainer("db", "exited", labelProject, "someone-else")
 
@@ -822,7 +799,6 @@ func TestEnsureContainerUsesTheSharedOwnershipRule(t *testing.T) {
 // touched.
 func TestRecoverServicesRefusesAPredecessorsEphemeralVolume(t *testing.T) {
 	f := newRecoverFixture(t, v1.VolumeTypeEphemeral)
-	f.runtime.enforceUID = true
 	f.docker.volumes[VolumeName("blog", "db-data")] = true
 	f.docker.volumeLabels[VolumeName("blog", "db-data")] = map[string]string{
 		labelProject: "blog", labelNamespace: "default", labelUID: "uid-previous-lifetime",

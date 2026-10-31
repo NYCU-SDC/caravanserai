@@ -9,9 +9,6 @@ set -Eeuo pipefail
 # the two uniquely named outer containers created below, with their anonymous
 # volumes.
 #
-# The server and agent run with UID_ENFORCEMENT=true, so recovery is exercised
-# under the strict UID and assignment-generation fence it depends on.
-#
 # Managed volume data lives in a directory the agent (on the host) and the
 # DinD daemon must both see at the same path. It defaults to /var/tmp: a
 # directory under /tmp bind-mounted into DinD was observed to be invisible
@@ -229,7 +226,6 @@ server_url="http://127.0.0.1:$server_port"
 	env \
 		HOST=127.0.0.1 \
 		PORT="$server_port" \
-		UID_ENFORCEMENT=true \
 		TERMINATING_TIMEOUT=15s \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
@@ -252,7 +248,6 @@ start_agent() {
 			AGENT_LISTEN_PORT=0 \
 			PROXY_LISTEN_ADDR=127.0.0.1:0 \
 			AGENT_ADVERTISE_IP=127.0.0.1 \
-			UID_ENFORCEMENT=true \
 			"$test_root/bin/cara-agent"
 	) >>"$test_root/agent.log" 2>&1 &
 	agent_pid=$!

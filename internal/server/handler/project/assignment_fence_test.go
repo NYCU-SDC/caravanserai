@@ -123,8 +123,8 @@ func (f *fenceFakeStore) FinalizeProject(_ context.Context, name, uid string, bl
 	return nil
 }
 
-func newFenceHandler(s store.ProjectStore, enforce bool) *Handler {
-	return NewHandler(zap.NewNop(), s, problem.NewWithMapping(handler.NewProblemMapping()), enforce)
+func newFenceHandler(s store.ProjectStore) *Handler {
+	return NewHandler(zap.NewNop(), s, problem.NewWithMapping(handler.NewProblemMapping()))
 }
 
 func doPatchStatus(h *Handler, name, body string) *httptest.ResponseRecorder {
@@ -135,12 +135,10 @@ func doPatchStatus(h *Handler, name, body string) *httptest.ResponseRecorder {
 	return rec
 }
 
-// A complete fence takes the atomic fenced write path even in compatibility
-// mode: an upgraded Agent should always be validated, whatever the rollout
-// state of the switch.
+// A complete fence takes the atomic fenced write path.
 func TestCompleteFenceUsesFencedPath(t *testing.T) {
 	s := &fenceFakeStore{}
-	h := newFenceHandler(s, false)
+	h := newFenceHandler(s)
 
 	rec := doPatchStatus(h, "demo",
 		`{"phase":"Running","uid":"uid-1","nodeRef":"node-a","assignmentGeneration":5}`)
@@ -156,27 +154,11 @@ func TestCompleteFenceUsesFencedPath(t *testing.T) {
 	}
 }
 
-// In compatibility mode a legacy Agent that omits the fence still works through
-// the unfenced path.
-func TestCompatModeMissingFenceUsesUnfenced(t *testing.T) {
+// A report missing the fence is rejected as stale before any store write
+// happens.
+func TestMissingFenceIsRejected(t *testing.T) {
 	s := &fenceFakeStore{}
-	h := newFenceHandler(s, false)
-
-	rec := doPatchStatus(h, "demo", `{"phase":"Running"}`)
-
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
-	if s.unfencedStatusCalls != 1 || s.fencedStatusCalls != 0 {
-		t.Fatalf("fenced=%d unfenced=%d, want the unfenced path", s.fencedStatusCalls, s.unfencedStatusCalls)
-	}
-}
-
-// Under strict enforcement a report missing the fence is rejected as stale
-// before any store write happens.
-func TestStrictModeRejectsMissingFence(t *testing.T) {
-	s := &fenceFakeStore{}
-	h := newFenceHandler(s, true)
+	h := newFenceHandler(s)
 
 	rec := doPatchStatus(h, "demo", `{"phase":"Running"}`)
 
@@ -193,7 +175,7 @@ func TestStrictModeRejectsMissingFence(t *testing.T) {
 // underlying identity mismatch.
 func TestFencedStaleReturns409(t *testing.T) {
 	s := &fenceFakeStore{returnErr: store.ErrStaleAssignment}
-	h := newFenceHandler(s, true)
+	h := newFenceHandler(s)
 
 	rec := doPatchStatus(h, "demo",
 		`{"phase":"Running","uid":"uid-1","nodeRef":"node-a","assignmentGeneration":5}`)
@@ -216,7 +198,7 @@ func TestFencedStaleReturns409(t *testing.T) {
 // test or createProject.
 func TestCreateResetsClientStatus(t *testing.T) {
 	s := &fenceFakeStore{}
-	h := newFenceHandler(s, false)
+	h := newFenceHandler(s)
 
 	body := `{"metadata":{"name":"fresh"},"spec":{"services":[{"name":"web","image":"nginx"}]},` +
 		`"status":{"phase":"Running","nodeRef":"node-x","assignmentGeneration":99,"assignmentHistory":"Known",` +
@@ -262,7 +244,7 @@ func TestDeleteGuardHonoursAssignmentHistory(t *testing.T) {
 			ObjectMeta: v1.ObjectMeta{Name: "fresh"},
 			Status:     v1.ProjectStatus{Phase: v1.ProjectPhasePending, AssignmentHistory: v1.AssignmentHistoryNeverAssigned},
 		}}
-		h := newFenceHandler(s, false)
+		h := newFenceHandler(s)
 
 		rec := doDelete(h, "fresh")
 
@@ -283,7 +265,7 @@ func TestDeleteGuardHonoursAssignmentHistory(t *testing.T) {
 				AssignmentHistory: v1.AssignmentHistoryKnown,
 			},
 		}}
-		h := newFenceHandler(s, false)
+		h := newFenceHandler(s)
 
 		rec := doDelete(h, "used")
 
@@ -306,7 +288,7 @@ func TestDeleteGuardHonoursAssignmentHistory(t *testing.T) {
 				AssignmentHistory: v1.AssignmentHistoryUnknown,
 			},
 		}}
-		h := newFenceHandler(s, false)
+		h := newFenceHandler(s)
 
 		rec := doDelete(h, "mystery")
 
@@ -337,7 +319,7 @@ func TestDeleteImmediateRacesFirstAssignment(t *testing.T) {
 				AssignmentGeneration: 1, AssignmentHistory: v1.AssignmentHistoryKnown,
 			},
 		}}
-		h := newFenceHandler(s, false)
+		h := newFenceHandler(s)
 
 		rec := doDelete(h, "fresh")
 
@@ -364,7 +346,7 @@ func TestDeleteImmediateRacesFirstAssignment(t *testing.T) {
 			ObjectMeta: v1.ObjectMeta{Name: "fresh", UID: "uid-2"},
 			Status:     v1.InitialProjectStatus(),
 		}}
-		h := newFenceHandler(s, false)
+		h := newFenceHandler(s)
 
 		rec := doDelete(h, "fresh")
 

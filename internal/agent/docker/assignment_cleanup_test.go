@@ -76,24 +76,22 @@ func TestRemoveAssignmentResolvesGenerationsIndependently(t *testing.T) {
 }
 
 // A same-named network or volume of another lifetime is neither removed nor
-// counted as this assignment's, whatever the UID enforcement setting.
+// counted as this assignment's.
 func TestRemoveAssignmentLeavesOtherLifetimes(t *testing.T) {
-	for _, enforce := range []bool{false, true} {
-		fake := newFakeDocker()
-		fake.withContainer("cara-blog-web", "exited", containerLabels("uid-1", 2, "web"))
-		fake.networks[NetworkName("blog")] = lifetimeLabels("uid-2")
-		fake.volumes[VolumeName("blog", "cache")] = true
-		fake.volumeLabels[VolumeName("blog", "cache")] = lifetimeLabels("uid-2")
-		rt := &DockerRuntime{client: fake, logger: zap.NewNop(), enforceUID: enforce}
-		a := Assignment{Namespace: "default", Project: "blog", UID: "uid-1", Generation: 2}
+	fake := newFakeDocker()
+	fake.withContainer("cara-blog-web", "exited", containerLabels("uid-1", 2, "web"))
+	fake.networks[NetworkName("blog")] = lifetimeLabels("uid-2")
+	fake.volumes[VolumeName("blog", "cache")] = true
+	fake.volumeLabels[VolumeName("blog", "cache")] = lifetimeLabels("uid-2")
+	rt := &DockerRuntime{client: fake, logger: zap.NewNop()}
+	a := Assignment{Namespace: "default", Project: "blog", UID: "uid-1", Generation: 2}
 
-		require.NoError(t, rt.RemoveAssignment(context.Background(), a))
-		left, err := rt.AssignmentRemaining(context.Background(), a)
-		require.NoError(t, err)
-		assert.Empty(t, left, "enforceUID=%v", enforce)
-		assert.Contains(t, fake.networks, NetworkName("blog"), "enforceUID=%v: removed another lifetime's network", enforce)
-		assert.True(t, fake.volumes[VolumeName("blog", "cache")], "enforceUID=%v: removed another lifetime's volume", enforce)
-	}
+	require.NoError(t, rt.RemoveAssignment(context.Background(), a))
+	left, err := rt.AssignmentRemaining(context.Background(), a)
+	require.NoError(t, err)
+	assert.Empty(t, left)
+	assert.Contains(t, fake.networks, NetworkName("blog"), "removed another lifetime's network")
+	assert.True(t, fake.volumes[VolumeName("blog", "cache")], "removed another lifetime's volume")
 }
 
 func TestRemoveAssignmentRequiresUID(t *testing.T) {
@@ -113,7 +111,7 @@ func TestEphemeralVolumeOwnership(t *testing.T) {
 
 	t.Run("created with the lifetime's UID", func(t *testing.T) {
 		fake := newFakeDocker()
-		rt := &DockerRuntime{client: fake, logger: zap.NewNop(), enforceUID: true}
+		rt := &DockerRuntime{client: fake, logger: zap.NewNop()}
 		require.NoError(t, rt.ensureEphemeralVolume(context.Background(), identity, "cache"))
 		assert.Equal(t, "uid-2", fake.volumeLabels[vName][labelUID])
 		assert.Equal(t, string(v1.VolumeTypeEphemeral), fake.volumeLabels[vName][labelVolumeType])
@@ -124,7 +122,7 @@ func TestEphemeralVolumeOwnership(t *testing.T) {
 			fake := newFakeDocker()
 			fake.volumes[vName] = true
 			fake.volumeLabels[vName] = labels
-			rt := &DockerRuntime{client: fake, logger: zap.NewNop(), enforceUID: true}
+			rt := &DockerRuntime{client: fake, logger: zap.NewNop()}
 			assert.Error(t, rt.ensureEphemeralVolume(context.Background(), identity, "cache"), "labels %v", labels)
 			assert.Empty(t, fake.mutations)
 		}
@@ -134,7 +132,7 @@ func TestEphemeralVolumeOwnership(t *testing.T) {
 		fake := newFakeDocker()
 		fake.volumes[vName] = true
 		fake.volumeLabels[vName] = lifetimeLabels("uid-2")
-		rt := &DockerRuntime{client: fake, logger: zap.NewNop(), enforceUID: true}
+		rt := &DockerRuntime{client: fake, logger: zap.NewNop()}
 		require.NoError(t, rt.ensureEphemeralVolume(context.Background(), identity, "cache"))
 		assert.Empty(t, fake.mutations)
 	})
@@ -150,7 +148,7 @@ func TestReconcileRollbackLeavesPredecessorVolume(t *testing.T) {
 	vName := VolumeName("blog", "cache")
 	fake.volumes[vName] = true
 	fake.volumeLabels[vName] = lifetimeLabels("uid-1")
-	rt := &DockerRuntime{client: fake, logger: zap.NewNop(), dataRoot: t.TempDir(), enforceUID: true}
+	rt := &DockerRuntime{client: fake, logger: zap.NewNop(), dataRoot: t.TempDir()}
 
 	p := &v1.Project{}
 	p.Namespace, p.Name, p.UID = "default", "blog", "uid-2"
@@ -167,26 +165,23 @@ func TestReconcileRollbackLeavesPredecessorVolume(t *testing.T) {
 	assert.NotContains(t, fake.mutations, "VolumeRemove:"+vName)
 }
 
-// The rollback leaves a predecessor's network too. With UID enforcement on,
-// ensureNetwork refuses it before anything is created; with it off the network
-// is adopted, so the reconcile has to fail later — here on the image pull —
-// for the rollback to run with that network in place.
-func TestReconcileRollbackLeavesPredecessorNetwork(t *testing.T) {
+// A predecessor's network stops the reconcile: ensureNetwork refuses it before
+// anything is created, and it stays where it is.
+func TestReconcileLeavesPredecessorNetwork(t *testing.T) {
 	fake := newFakeDocker()
 	fake.networks[NetworkName("blog")] = lifetimeLabels("uid-1")
 	vName := VolumeName("blog", "cache")
 	fake.volumes[vName] = true
 	fake.volumeLabels[vName] = lifetimeLabels("uid-1")
-	rt := &DockerRuntime{client: fake, logger: zap.NewNop(), dataRoot: t.TempDir(), enforceUID: false}
+	rt := &DockerRuntime{client: fake, logger: zap.NewNop(), dataRoot: t.TempDir()}
 
 	p := &v1.Project{}
 	p.Namespace, p.Name, p.UID = "default", "blog", "uid-2"
 	p.Status.AssignmentGeneration = 1
 	p.Spec.Services = []v1.ServiceDef{{Name: "web", Image: "nginx:alpine"}}
-	fake.pullErr = map[string]error{"nginx:alpine": assert.AnError}
 
 	require.Error(t, rt.ReconcileProject(context.Background(), p))
 
-	assert.Contains(t, fake.networks, NetworkName("blog"), "the rollback removed another lifetime's network")
+	assert.Contains(t, fake.networks, NetworkName("blog"), "removed another lifetime's network")
 	assert.True(t, fake.volumes[vName])
 }
