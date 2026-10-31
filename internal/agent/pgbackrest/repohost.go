@@ -400,7 +400,7 @@ func (h *RepoHost) apply(ctx context.Context, st repoState) error {
 	}
 	switch {
 	case !state.Running:
-		if err := h.docker.StartContainer(ctx, h.cfg.ContainerName); err != nil {
+		if err := h.startOrRecreate(ctx, st.Image); err != nil {
 			return err
 		}
 	case changed:
@@ -428,6 +428,26 @@ func (h *RepoHost) apply(ctx context.Context, st repoState) error {
 		}
 	}
 	return nil
+}
+
+// startOrRecreate starts the stopped container, and replaces it if it cannot
+// start. A container can be left unable to start for good: one attached to a
+// Project network removed just before a power loss refers to a network that no
+// longer exists, and retrying the start can never succeed. It holds no state of
+// its own, and apply attaches the replacement to every authorized network.
+func (h *RepoHost) startOrRecreate(ctx context.Context, image string) error {
+	err := h.docker.StartContainer(ctx, h.cfg.ContainerName)
+	if err == nil {
+		return nil
+	}
+	h.logger.Warn("Repo host would not start; replacing it", zap.Error(err))
+	if err := h.docker.RemoveContainer(ctx, h.cfg.ContainerName); err != nil {
+		return err
+	}
+	if _, err := h.docker.EnsureNodeContainer(ctx, h.containerSpec(image)); err != nil {
+		return err
+	}
+	return h.docker.StartContainer(ctx, h.cfg.ContainerName)
 }
 
 // recover puts the previous configuration back and gets the server answering

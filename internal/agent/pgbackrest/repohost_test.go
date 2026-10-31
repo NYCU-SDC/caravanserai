@@ -28,6 +28,8 @@ type fakeRepoDocker struct {
 	networks  map[string]bool // networks the repo host is attached to
 	calls     []string
 	failPings int
+	// startFails fails that many starts.
+	startFails int
 	// failSignals fails that many signals before delivering any.
 	failSignals int
 }
@@ -62,6 +64,10 @@ func (f *fakeRepoDocker) StartContainer(context.Context, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("start")
+	if f.startFails > 0 {
+		f.startFails--
+		return errors.New("failed to set up container networking: network not found")
+	}
 	f.running = true
 	return nil
 }
@@ -77,6 +83,7 @@ func (f *fakeRepoDocker) RemoveContainer(context.Context, string) error {
 	defer f.mu.Unlock()
 	f.record("remove")
 	f.exists, f.running = false, false
+	f.networks = map[string]bool{}
 	return nil
 }
 
@@ -355,6 +362,38 @@ func TestReconcileRebuildsFromTheDurableState(t *testing.T) {
 	require.NoError(t, h2.Reconcile(ctx))
 	assert.Equal(t, []string{"create:" + testImage}, d2.callsWith("create"))
 	assert.Equal(t, []string{"connect:cara-a"}, d2.callsWith("connect"))
+}
+
+// A stopped container that cannot start, such as one left referring to a removed
+// network, is replaced rather than retried forever, and rejoins its networks.
+func TestReconcileReplacesAContainerThatWillNotStart(t *testing.T) {
+	d := newFakeRepoDocker()
+	h := newTestRepoHost(t, d)
+	ctx := context.Background()
+	require.NoError(t, h.Authorize(ctx, "uid-a", Authorization{Stanzas: []string{"uid-a-pgdata"}, Network: "cara-a"}, testImage))
+
+	d.mu.Lock()
+	d.running, d.startFails, d.calls = false, 1, nil
+	d.mu.Unlock()
+	require.NoError(t, h.Reconcile(ctx))
+
+	assert.Equal(t, []string{"remove"}, d.callsWith("remove"))
+	assert.Equal(t, []string{"create:" + testImage}, d.callsWith("create"))
+	assert.Equal(t, []string{"start", "start"}, d.callsWith("start"))
+	assert.Equal(t, []string{"connect:cara-a"}, d.callsWith("connect"))
+}
+
+// A failure of the replacement itself is reported, for the next check to retry.
+func TestReconcileReportsAContainerThatStillWillNotStart(t *testing.T) {
+	d := newFakeRepoDocker()
+	h := newTestRepoHost(t, d)
+	ctx := context.Background()
+	require.NoError(t, h.Authorize(ctx, "uid-a", Authorization{Stanzas: []string{"uid-a-pgdata"}, Network: "cara-a"}, testImage))
+
+	d.mu.Lock()
+	d.running, d.startFails = false, 2
+	d.mu.Unlock()
+	assert.Error(t, h.Reconcile(ctx))
 }
 
 // A revocation whose reload the server rejects is rolled back to a
