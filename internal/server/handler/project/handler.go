@@ -527,9 +527,13 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch project.Status.Phase {
-	case v1.ProjectPhaseTerminating:
-		// Already in progress; idempotent.
-		logger.Info("Project already terminating", zap.String("project", name))
+	case v1.ProjectPhaseTerminating, v1.ProjectPhaseTerminated:
+		// Already in progress; idempotent. Terminated is answered the same
+		// way: its resources are confirmed gone and the record is about to be
+		// finalized, so moving it back to Terminating would only reopen a
+		// deletion that has finished.
+		logger.Info("Project already terminating", zap.String("project", name),
+			zap.String("phase", string(project.Status.Phase)))
 		w.WriteHeader(http.StatusAccepted)
 
 	default:
@@ -544,8 +548,13 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		uid := project.ObjectMeta.UID
 		err := h.store.UpdateProjectStatusForUID(traceCtx, name, uid, func(status *v1.ProjectStatus) error {
-			if status.Phase == v1.ProjectPhaseTerminating {
+			if status.Phase == v1.ProjectPhaseTerminating || status.Phase == v1.ProjectPhaseTerminated {
+				// Reached Terminating or beyond since the read above.
 				return nil
+			}
+			if !v1.PhaseTransitionAllowed(v1.WriterDeleteAPI, status.Phase, v1.ProjectPhaseTerminating) {
+				return fmt.Errorf("%w: project %q is %s; it cannot enter Terminating from there",
+					store.ErrConflictState, name, status.Phase)
 			}
 			status.Phase = v1.ProjectPhaseTerminating
 			// The assigned Node now owes the removal of everything it holds
@@ -573,6 +582,10 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 				h.problemWriter.WriteError(traceCtx, w,
 					fmt.Errorf("project %s was deleted and recreated during this request; retry to delete the new one: %w",
 						name, store.ErrConflictState), logger)
+				return
+			}
+			if errors.Is(err, store.ErrConflictState) {
+				h.problemWriter.WriteError(traceCtx, w, err, logger)
 				return
 			}
 			logger.Error("Marking project Terminating failed", zap.String("name", name), zap.Error(err))
@@ -674,6 +687,22 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 	// this attempt. Replacing the whole status here is what used to discard a
 	// controller's concurrent write.
 	mutate := func(status *v1.ProjectStatus) error {
+		// Checked on the snapshot this attempt will write, so a deletion that
+		// lands between the Agent's observation and this write wins: a late
+		// Running report cannot turn a Terminating Project back into a running
+		// one, even though its fence still names the same assignment.
+		if !v1.PhaseTransitionAllowed(v1.WriterAgent, status.Phase, req.Phase) {
+			return fmt.Errorf("%w: project %q is %s; an Agent cannot report it %s",
+				store.ErrConflictState, name, status.Phase, req.Phase)
+		}
+		// The phase may say the resources are gone only once the evidence that
+		// they are is recorded, for the assignment making the report.
+		if req.Phase == v1.ProjectPhaseTerminated && status.Phase != v1.ProjectPhaseTerminated &&
+			!status.Recovery.ResourcesRemovedFor(status.NodeRef, status.AssignmentGeneration) {
+			return fmt.Errorf("%w: project %q: node %s has not recorded ResourcesRemoved for generation %d",
+				store.ErrConflictState, name, status.NodeRef, status.AssignmentGeneration)
+		}
+
 		transitioned := status.Phase != req.Phase
 		status.Phase = req.Phase
 		// A reported failure ends the healthy window in the same write. This
@@ -713,6 +742,13 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, store.ErrNotFound) {
 			h.problemWriter.WriteError(traceCtx, w,
 				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		}
+		if errors.Is(err, store.ErrConflictState) || errors.Is(err, store.ErrStaleAssignment) {
+			// Expected whenever a report races a lifecycle change; the Agent
+			// learns from the 409, and the server log need not.
+			logger.Info("Project status patch refused", zap.String("name", name), zap.Error(err))
+			h.problemWriter.WriteError(traceCtx, w, err, logger)
 			return
 		}
 		logger.Error("Project status patch failed", zap.String("name", name), zap.Error(err))

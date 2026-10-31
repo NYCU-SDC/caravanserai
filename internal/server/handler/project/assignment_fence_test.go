@@ -54,7 +54,7 @@ func (f *fenceFakeStore) ReportProjectStatusFenced(_ context.Context, _ string, 
 	if f.returnErr != nil {
 		return f.returnErr
 	}
-	st := v1.ProjectStatus{}
+	st := f.reportedOn()
 	return mutate(&st)
 }
 
@@ -63,8 +63,18 @@ func (f *fenceFakeStore) UpdateProjectStatusWithRetry(_ context.Context, _ strin
 	if f.returnErr != nil {
 		return f.returnErr
 	}
-	st := v1.ProjectStatus{}
+	st := f.reportedOn()
 	return mutate(&st)
+}
+
+// reportedOn is the status an Agent report is applied to: getProject's when a
+// test sets one, otherwise a freshly Scheduled Project, the phase an Agent
+// first reports on.
+func (f *fenceFakeStore) reportedOn() v1.ProjectStatus {
+	if f.getProject != nil {
+		return f.getProject.Status
+	}
+	return v1.ProjectStatus{Phase: v1.ProjectPhaseScheduled, NodeRef: "node-a", AssignmentGeneration: 3}
 }
 
 func (f *fenceFakeStore) UpdateProjectStatusForUID(_ context.Context, _ string, uid string, mutate func(*v1.ProjectStatus) error) error {

@@ -57,14 +57,9 @@ func TestProjectConditionPatchIsolatesPhase(t *testing.T) {
 		drainBody(resp)
 	})
 
-	// Move the Project to Running with a Phase condition, mimicking a healthy
-	// agent report.
-	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status",
-		mustMarshal(t, map[string]string{
-			"phase": "Running", "reason": "ContainersRunning", "message": "All containers running",
-		}))
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
-	drainBody(resp)
+	// Move the Project to Running with a Phase condition, as a healthy agent
+	// report would leave it.
+	placeInPhase(t, projectName, v1.ProjectPhaseRunning, "ContainersRunning", "All containers running")
 
 	before := getProject(t, projectName)
 	require.Equal(t, v1.ProjectPhaseRunning, before.Status.Phase)
@@ -233,12 +228,7 @@ func TestProjectConditionRecoveryBlockedKeepsProjectRunning(t *testing.T) {
 		drainBody(resp)
 	})
 
-	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status",
-		mustMarshal(t, map[string]string{
-			"phase": "Running", "reason": "ContainersRunning", "message": "All containers running",
-		}))
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
-	drainBody(resp)
+	placeInPhase(t, projectName, v1.ProjectPhaseRunning, "ContainersRunning", "All containers running")
 
 	// ── Block ───────────────────────────────────────────────────────────────
 

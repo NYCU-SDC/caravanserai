@@ -78,6 +78,8 @@ func (a *ProjectStoreAdapter) GetProjectPlacement(ctx context.Context, name stri
 // would change its Node without a new generation, a release or a cleanup
 // obligation.
 func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nodeRef string) error {
+	// Fixed before the closure, which may run more than once.
+	now := time.Now().UTC()
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
 		switch {
 		case status.Phase == v1.ProjectPhaseScheduled && status.NodeRef == nodeRef:
@@ -85,7 +87,7 @@ func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nod
 			// Not a new grant: the generation must not advance twice for one
 			// grant of ownership.
 			return nil
-		case status.Phase != v1.ProjectPhasePending:
+		case !v1.PhaseTransitionAllowed(v1.WriterScheduler, status.Phase, v1.ProjectPhaseScheduled):
 			return fmt.Errorf("%w: project %q is %s on node %q; only a Pending project can be assigned",
 				store.ErrConflictState, name, status.Phase, status.NodeRef)
 		}
@@ -115,10 +117,22 @@ func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nod
 		status.Recovery.ClearForNewAssignment()
 		status.Phase = v1.ProjectPhaseScheduled
 		status.NodeRef = nodeRef
+		// The Phase condition records the transition in the same write, so it
+		// never describes the Pending the Project has just left (S9).
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypePhase,
+			Status:             v1.ConditionTrue,
+			Reason:             "Scheduled",
+			Message:            fmt.Sprintf("Assigned to node %s as generation %d", nodeRef, status.AssignmentGeneration),
+			LastTransitionTime: now,
+		}, true)
 		return nil
 	})
 }
 
+// SetProjectPhase writes any phase with no writer or transition check. No
+// production code calls it; integration tests use it to put a Project into a
+// phase directly. CARA-81 stage 3 removes it.
 func (a *ProjectStoreAdapter) SetProjectPhase(ctx context.Context, name string, phase v1.ProjectPhase, reason, message string) error {
 	// Fixed before the closure, not inside it: the closure may run more than
 	// once, and this records when the transition was observed rather than when
@@ -159,13 +173,6 @@ func (a *ProjectStoreAdapter) ListProjectsByNodeRef(ctx context.Context, nodeRef
 	return snapshots, nil
 }
 
-// releasablePhases are the phases the rescheduler releases from. Terminating
-// is handled by its own timeout and is never handed to another Node.
-var releasablePhases = map[v1.ProjectPhase]bool{
-	v1.ProjectPhaseScheduled: true,
-	v1.ProjectPhaseRunning:   true,
-}
-
 // ReleaseAssignment satisfies controller.ReschedulerProjectStore.
 //
 // The gate and the release are one compare-and-swap pinned to the snapshot's
@@ -183,7 +190,7 @@ func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controll
 			return fmt.Errorf("%w: project %q no longer holds node %s generation %d",
 				store.ErrStaleAssignment, p.Name, p.NodeRef, p.AssignmentGeneration)
 		}
-		if !releasablePhases[status.Phase] {
+		if !v1.PhaseTransitionAllowed(v1.WriterRescheduler, status.Phase, v1.ProjectPhasePending) {
 			return fmt.Errorf("%w: project %q is %s", store.ErrConflictState, p.Name, status.Phase)
 		}
 
@@ -409,8 +416,8 @@ func (a *ProjectStoreAdapter) MoveFailedProject(ctx context.Context, p *controll
 	var moved bool
 	err := a.s.UpdateProjectStatusForUID(ctx, p.Name, p.UID, func(status *v1.ProjectStatus) error {
 		moved = false
-		if status.Phase != v1.ProjectPhaseFailed || status.NodeRef != p.NodeRef ||
-			status.AssignmentGeneration != p.AssignmentGeneration {
+		if !v1.PhaseTransitionAllowed(v1.WriterFailedRescheduler, status.Phase, v1.ProjectPhasePending) ||
+			status.NodeRef != p.NodeRef || status.AssignmentGeneration != p.AssignmentGeneration {
 			// Applied again, deleted, moved, or reassigned since it was judged.
 			return nil
 		}
