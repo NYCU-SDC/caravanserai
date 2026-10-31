@@ -13,6 +13,7 @@
 //	PUT    /api/v1/projects/{name}/recovery/workload-stopped   — assigned Agent records that every container is stopped
 //	PUT    /api/v1/projects/{name}/recovery/resources-removed  — cleanup owner records that its resources are removed
 //	PUT    /api/v1/projects/{name}/recovery/committed-backup   — assigned Agent makes a backup the restore source
+//	PUT    /api/v1/projects/{name}/recovery/managed-data-quarantined — cleanup owner records that its local data left the active path
 //	POST   /api/v1/projects/{name}/recovery/takeover           — operator overrides the release gate (operator token)
 //	GET    /api/v1/projects/{name}/recovery/takeover-audit     — recorded takeovers of the Project (operator token)
 package project
@@ -81,6 +82,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/workload-stopped", mid.HandlerFunc(h.putWorkloadStopped))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/resources-removed", mid.HandlerFunc(h.putResourcesRemoved))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/committed-backup", mid.HandlerFunc(h.putCommittedBackup))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/managed-data-quarantined", mid.HandlerFunc(h.putManagedDataQuarantined))
 	mux.HandleFunc("POST /api/v1/projects/{name}/recovery/takeover", mid.HandlerFunc(h.postTakeover))
 	mux.HandleFunc("GET /api/v1/projects/{name}/recovery/takeover-audit", mid.HandlerFunc(h.getTakeoverAudit))
 }
@@ -1026,6 +1028,26 @@ func (h *Handler) putWorkloadStopped(w http.ResponseWriter, r *http.Request) {
 	}
 	err := h.store.RecordWorkloadStopped(traceCtx, name, ref, time.Now().UTC())
 	h.writeEvidenceResult(traceCtx, w, logger, name, "WorkloadStopped", err)
+}
+
+// putManagedDataQuarantined handles
+// PUT /api/v1/projects/{name}/recovery/managed-data-quarantined.
+//
+// The Agent of a cleanup obligation calls it after its local Managed data has
+// left the active path. It lets the Node hold the Project again and grants no
+// other authority.
+func (h *Handler) putManagedDataQuarantined(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putManagedDataQuarantined")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	ref, ok := h.decodeEvidenceFence(traceCtx, w, r, logger, name)
+	if !ok {
+		return
+	}
+	err := h.store.RecordManagedDataQuarantined(traceCtx, name, ref, time.Now().UTC())
+	h.writeEvidenceResult(traceCtx, w, logger, name, "ManagedDataQuarantined", err)
 }
 
 // backupIDPattern is the shape backup.NewBackupID produces. The Agent builds

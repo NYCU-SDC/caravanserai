@@ -334,6 +334,13 @@ func describeProject(w io.Writer, project *v1.Project) {
 				fmt.Fprintf(w, "    - %s\n", formatAssignment(o.Assignment))
 				fmt.Fprintf(w, "      Released:   %s by %s\n", formatTimestamp(o.ReleasedAt), stringOrNone(string(o.ReleaseAuthorization)))
 				fmt.Fprintf(w, "      Resources:  %s\n", state)
+				if o.ManagedDataOwed {
+					data := "pending"
+					if q := o.ManagedDataQuarantined; q != nil {
+						data = "quarantined at " + formatTimestamp(q.ObservedAt)
+					}
+					fmt.Fprintf(w, "      Local Data: %s\n", data)
+				}
 			}
 		}
 	}

@@ -153,6 +153,30 @@ func TestFindObligation(t *testing.T) {
 
 // An obligation records the first release of an assignment; releasing the same
 // assignment again must not reset its time, authorization or evidence.
+// Owing local data keeps a Node off the Project after ResourcesRemoved, and only
+// that Node's task remains to be done.
+func TestManagedDataOwedKeepsTheNodeOwing(t *testing.T) {
+	assignment := AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 3}
+	r := &ProjectRecoveryStatus{}
+	r.AddObligation(assignment, time.Now(), ReleaseByGraceExpired)
+	r.OweManagedData(assignment)
+	p := &Project{ObjectMeta: ObjectMeta{Name: "blog", UID: "uid-1"}, Status: ProjectStatus{NodeRef: "node-b", Recovery: r}}
+
+	o := r.FindObligation(assignment)
+	o.ResourcesRemoved = &ResourcesRemovedEvidence{ObservedAt: time.Now()}
+	assert.Equal(t, []string{"node-a"}, r.NodesOwingCleanup())
+	assert.Len(t, p.CleanupTasksFor("node-a"), 1)
+	assert.Nil(t, r.BlockingObligation(), "another Node may still be assigned")
+
+	o.ManagedDataQuarantined = &ManagedDataQuarantinedEvidence{ObservedAt: time.Now()}
+	assert.Empty(t, r.NodesOwingCleanup())
+	assert.Empty(t, p.CleanupTasksFor("node-a"))
+
+	p2 := &ProjectRecoveryStatus{}
+	p2.OweManagedData(assignment)
+	assert.Empty(t, p2.CleanupObligations, "nothing to attach it to")
+}
+
 func TestAddObligationKeepsTheFirstEntry(t *testing.T) {
 	r := fullRecoveryStatus()
 	first := r.CleanupObligations[0]

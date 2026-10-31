@@ -1207,6 +1207,24 @@ func (s *Store) recordResourcesRemoved(
 	}, beforeSwap)
 }
 
+// RecordManagedDataQuarantined implements store.ProjectStore. Ownership is
+// checked the way RecordResourcesRemoved checks it.
+func (s *Store) RecordManagedDataQuarantined(ctx context.Context, name string, owner store.AssignmentRef, observedAt time.Time) error {
+	evidence := assignmentIdentity(owner)
+	return s.updateProjectStatusForUID(ctx, name, owner.UID, func(status *v1.ProjectStatus) error {
+		obligation := status.Recovery.FindObligation(evidence)
+		if obligation == nil {
+			return fmt.Errorf("%w: project %q", store.ErrStaleAssignment, name)
+		}
+		// First evidence for an obligation wins, as with ResourcesRemoved.
+		if obligation.ManagedDataQuarantined != nil {
+			return nil
+		}
+		obligation.ManagedDataQuarantined = &v1.ManagedDataQuarantinedEvidence{ObservedAt: observedAt.UTC()}
+		return nil
+	}, nil)
+}
+
 // UpdateProjectStatusForUID implements store.ProjectStore.
 func (s *Store) UpdateProjectStatusForUID(
 	ctx context.Context,
@@ -2009,6 +2027,9 @@ func (s *Store) TakeoverProject(
 		outcome, err := applyOperatorTakeover(&next, assignment, now)
 		if err != nil {
 			return v1.TakeoverAuditRecord{}, false, fmt.Errorf("project %q: %w", name, err)
+		}
+		if project.Spec.HasManagedVolume() {
+			next.Recovery.OweManagedData(assignment)
 		}
 		record := v1.TakeoverAuditRecord{
 			RequestID:   audit.RequestID,

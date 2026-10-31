@@ -564,10 +564,11 @@ const (
 	// without machine evidence. Never fencing or cleanup evidence: the old
 	// Node still owes cleanup if it ever returns.
 	ReleaseByOperatorOverride ReleaseAuthorizationKind = "OperatorOverride"
-	// ReleaseByGraceExpired: the Node stayed NotReady past its grace period and
-	// the Project has no Managed volume, so there is no data to diverge. The
-	// transitional authorization of ADR-0024: a partitioned Node keeps running
-	// its copy until it reconnects. Never evidence the workload stopped.
+	// ReleaseByGraceExpired: the Node stayed NotReady past its grace period, and
+	// the Project either has no Managed volume or has a committed backup to
+	// restore from. The transitional authorization of ADR-0024: a partitioned
+	// Node keeps running its copy until it reconnects. Never evidence the
+	// workload stopped.
 	ReleaseByGraceExpired ReleaseAuthorizationKind = "GraceExpired"
 	// ReleaseByLeaseExpired: the Node's lease expired under the self-fencing
 	// contract proposed in ADR-0023. Not implemented yet; never cleanup
@@ -591,11 +592,27 @@ type CleanupObligation struct {
 	// deletion-scoped runtime resource it held for this assignment is gone.
 	// Nil means the obligation is unresolved.
 	ResourcesRemoved *ResourcesRemovedEvidence `json:"resourcesRemoved,omitempty" yaml:"resourcesRemoved,omitempty"`
+
+	// ManagedDataOwed records that the Project moved away while declaring a
+	// Managed volume, so this Node's local data has to leave the active path
+	// (ADR-0024 C2) before the Node may hold the Project again. A deletion does
+	// not set it: local Managed data is retained then.
+	ManagedDataOwed bool `json:"managedDataOwed,omitempty" yaml:"managedDataOwed,omitempty"`
+
+	// ManagedDataQuarantined is the cleanup owner's evidence that it did so. It
+	// is separate from ResourcesRemoved because each can be true without the
+	// other.
+	ManagedDataQuarantined *ManagedDataQuarantinedEvidence `json:"managedDataQuarantined,omitempty" yaml:"managedDataQuarantined,omitempty"`
 }
 
 // Resolved reports whether the cleanup owner has reported ResourcesRemoved.
 func (o CleanupObligation) Resolved() bool {
 	return o.ResourcesRemoved != nil
+}
+
+// DataOutstanding reports whether local Managed data is still owed.
+func (o CleanupObligation) DataOutstanding() bool {
+	return o.ManagedDataOwed && o.ManagedDataQuarantined == nil
 }
 
 // FindObligation returns the obligation for assignment, or nil.
@@ -639,14 +656,24 @@ func (r *ProjectRecoveryStatus) OverrideRelease(assignment AssignmentIdentity, r
 	r.AddObligation(assignment, releasedAt, ReleaseByOperatorOverride)
 }
 
-// NodesOwingCleanup returns the Nodes with an unresolved obligation.
+// OweManagedData records that assignment's Node must also quarantine its local
+// Managed data. It does nothing without an obligation to attach it to.
+func (r *ProjectRecoveryStatus) OweManagedData(assignment AssignmentIdentity) {
+	if o := r.FindObligation(assignment); o != nil {
+		o.ManagedDataOwed = true
+	}
+}
+
+// NodesOwingCleanup returns the Nodes that still owe runtime cleanup or local
+// Managed data for this Project. None of them may be given a new assignment of
+// it (ADR-0024 C3).
 func (r *ProjectRecoveryStatus) NodesOwingCleanup() []string {
 	if r == nil {
 		return nil
 	}
 	var nodes []string
 	for _, o := range r.CleanupObligations {
-		if !o.Resolved() {
+		if !o.Resolved() || o.DataOutstanding() {
 			nodes = append(nodes, o.Assignment.NodeName)
 		}
 	}
@@ -752,6 +779,12 @@ type WorkloadStoppedEvidence struct {
 	ObservedAt time.Time          `json:"observedAt" yaml:"observedAt"`
 }
 
+// ManagedDataQuarantinedEvidence records when the cleanup owner of an obligation
+// moved its local Managed data out of the active path, or found none there.
+type ManagedDataQuarantinedEvidence struct {
+	ObservedAt time.Time `json:"observedAt" yaml:"observedAt"`
+}
+
 // ResourcesRemovedEvidence records when the cleanup owner of an obligation
 // finished removing every deletion-scoped runtime resource it held. The
 // assignment it is about is the obligation's own.
@@ -803,6 +836,10 @@ func (r *ProjectRecoveryStatus) DeepCopy() *ProjectRecoveryStatus {
 			if o.ResourcesRemoved != nil {
 				rr := *o.ResourcesRemoved
 				o.ResourcesRemoved = &rr
+			}
+			if o.ManagedDataQuarantined != nil {
+				q := *o.ManagedDataQuarantined
+				o.ManagedDataQuarantined = &q
 			}
 			out.CleanupObligations[i] = o
 		}
@@ -871,8 +908,9 @@ type CleanupTaskList struct {
 	Items    []CleanupTask `json:"items" yaml:"items"`
 }
 
-// CleanupTasksFor returns p's unresolved cleanup obligations owed by node, as
-// tasks for that Node's Agent.
+// CleanupTasksFor returns the cleanup obligations node still owes for p, as tasks
+// for that Node's Agent: unresolved ones, and resolved ones whose local Managed
+// data is still owed.
 //
 // None is returned while node holds p's current assignment. That Node's Agent
 // is acting on the Project under its assignment — tearing it down if it is
@@ -893,7 +931,7 @@ func (p *Project) CleanupTasksFor(node string) []CleanupTask {
 	}
 	var tasks []CleanupTask
 	for _, o := range p.Status.Recovery.CleanupObligations {
-		if o.Resolved() || o.Assignment.NodeName != node || o.Assignment.ProjectUID != p.ObjectMeta.UID {
+		if (o.Resolved() && !o.DataOutstanding()) || o.Assignment.NodeName != node || o.Assignment.ProjectUID != p.ObjectMeta.UID {
 			continue
 		}
 		tasks = append(tasks, CleanupTask{

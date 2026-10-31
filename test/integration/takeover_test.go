@@ -270,9 +270,37 @@ func TestGraceExpiredRelease(t *testing.T) {
 		s.Phase = v1.ProjectPhaseRunning
 		return nil
 	}))
-	assert.False(t, release(on, getProject(t, managed)), "Managed data needs evidence or an override")
+	assert.False(t, release(on, getProject(t, managed)), "no committed backup: the only copy may be on the lost Node")
 	got = getProject(t, managed)
 	assert.Equal(t, "node-a", got.Status.NodeRef)
+
+	// With a committed backup it moves, and the old Node owes its local data
+	// before it may hold the Project again.
+	uid, gen := got.ObjectMeta.UID, got.Status.AssignmentGeneration
+	require.Equal(t, http.StatusNoContent,
+		putEvidence(t, managed, "committed-backup", committedBackupBody(uid, "node-a", gen, "20261031T000000Z-aaaaaaaa")))
+	require.True(t, release(on, getProject(t, managed)))
+	got = getProject(t, managed)
+	require.Len(t, got.Status.Recovery.CleanupObligations, 1)
+	o = got.Status.Recovery.CleanupObligations[0]
+	assert.Equal(t, v1.ReleaseByGraceExpired, o.ReleaseAuthorization)
+	assert.True(t, o.ManagedDataOwed)
+
+	require.Equal(t, http.StatusNoContent, putEvidence(t, managed, "resources-removed", evidenceBody(uid, "node-a", gen)))
+	require.ErrorIs(t, on.SetProjectScheduled(ctx, managed, "node-a"), store.ErrConflictState, "local data still owed")
+
+	require.Equal(t, http.StatusNoContent, putEvidence(t, managed, "managed-data-quarantined", evidenceBody(uid, "node-a", gen)))
+	first := getProject(t, managed).Status.Recovery.CleanupObligations[0].ManagedDataQuarantined
+	require.NotNil(t, first)
+	before := getProject(t, managed).ObjectMeta.ResourceVersion
+	require.Equal(t, http.StatusNoContent, putEvidence(t, managed, "managed-data-quarantined", evidenceBody(uid, "node-a", gen)))
+	assert.Equal(t, before, getProject(t, managed).ObjectMeta.ResourceVersion, "first evidence wins")
+	assert.Equal(t, http.StatusConflict, putEvidence(t, managed, "managed-data-quarantined", evidenceBody(uid, "node-b", gen)), "not this Node's obligation")
+
+	// Back on the same Node it is a new generation that restores, per ADR-0024.
+	require.NoError(t, on.SetProjectScheduled(ctx, managed, "node-a"))
+	assert.Equal(t, gen+1, getProject(t, managed).Status.AssignmentGeneration)
+	assert.Equal(t, "20261031T000000Z-aaaaaaaa", getProject(t, managed).Status.Recovery.CommittedBackupID())
 }
 
 // TestSchedulingBlockedCondition: the reason is on the Project while it waits

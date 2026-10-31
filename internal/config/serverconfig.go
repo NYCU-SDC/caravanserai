@@ -56,9 +56,10 @@ type Config struct {
 	// (3m).
 	RunningGracePeriod time.Duration `yaml:"running_grace_period" envconfig:"RUNNING_GRACE_PERIOD"`
 
-	// GraceExpiredRelease moves a Project with no Managed volume off a Node that
-	// stayed NotReady past the grace period, with no proof it stopped. A
-	// partitioned Node keeps its copy running until it reconnects (ADR-0024).
+	// GraceExpiredRelease moves a Project with no Managed volume, or with a
+	// committed backup to restore from, off a Node that stayed NotReady past the
+	// grace period, with no proof it stopped. A partitioned Node keeps its copy
+	// running until it reconnects (ADR-0024).
 	// The assignment fence refuses the returning Agent's stale writes.
 	GraceExpiredRelease bool `yaml:"grace_expired_release" envconfig:"GRACE_EXPIRED_RELEASE"`
 
@@ -185,7 +186,7 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.StringVar(&flagConfig.HeadscaleUser, "headscale-user", "", "Headscale user new pre-auth keys are created under (default: cara-node)")
 	flag.DurationVar(&flagConfig.TerminatingTimeout, "terminating-timeout", 0, "how long a Terminating project's node may be NotReady before the deletion is reported blocked (default: 10m)")
 	flag.DurationVar(&flagConfig.RunningGracePeriod, "running-grace-period", 0, "how long a Running Project may stay on a NotReady node before its release is attempted (default: 3m)")
-	flag.BoolVar(&flagConfig.GraceExpiredRelease, "grace-expired-release", false, "move Projects with no Managed volume off a node that stayed NotReady past the grace period")
+	flag.BoolVar(&flagConfig.GraceExpiredRelease, "grace-expired-release", false, "move Projects off a node that stayed NotReady past the grace period; one with a Managed volume needs a committed backup")
 	flag.String(configFlag, "", configFlagUsage)
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)

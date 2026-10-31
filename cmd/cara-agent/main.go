@@ -184,6 +184,7 @@ func main() {
 		AdvertiseIP:       cfg.AdvertiseIP,
 		Resources:         dockerRuntime,
 		SystemReserved:    agent.SystemReserved{CPUMilli: reservedCPU, MemoryBytes: reservedMemory},
+		DataRoot:          cfg.DataRoot,
 		Routes:            routeTable,
 		Backups:           backupSupport,
 		Logger:            logger,

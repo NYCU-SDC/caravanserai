@@ -29,8 +29,9 @@ var (
 type ProjectStoreAdapter struct {
 	s *pgstore.Store
 
-	// graceExpiredRelease lets a Project with no Managed volume leave a Node
-	// that stayed NotReady past its grace period, with no evidence (ADR-0024).
+	// graceExpiredRelease lets a Project with nothing only the lost Node holds
+	// leave a Node that stayed NotReady past its grace period, with no evidence
+	// (ADR-0024).
 	graceExpiredRelease bool
 }
 
@@ -259,22 +260,25 @@ func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controll
 
 		// Assigned on every attempt: the closure may run more than once, and
 		// only the last run's decision is the one committed.
+		// Read here, after the snapshot this swap is versioned on: a spec change
+		// landing later moves the version, the swap misses, and the retry reads
+		// the new spec.
+		project, err := a.s.GetProject(ctx, p.Name)
+		if err != nil {
+			return err
+		}
+		hasManaged := project.Spec.HasManagedVolume()
+
 		authorization := v1.ReleaseByWorkloadStopped
 		reason := "Node went NotReady and confirmed the workload stopped; project released for rescheduling"
 		released = status.Recovery.WorkloadStoppedFor(assignment)
-		if !released && a.graceExpiredRelease {
-			// Read here, after the snapshot this swap is versioned on: a spec
-			// change landing later moves the version, the swap misses, and the
-			// retry reads the new spec.
-			project, err := a.s.GetProject(ctx, p.Name)
-			if err != nil {
-				return err
-			}
-			if !project.Spec.HasManagedVolume() {
-				released = true
-				authorization = v1.ReleaseByGraceExpired
-				reason = "Node stayed NotReady past its grace period and the project has no Managed volume; project released for rescheduling"
-			}
+		// With Managed data and no committed backup, the only copy may be on the
+		// lost Node, and another Node could not start anyway. Only a person can
+		// decide to give that up.
+		if !released && a.graceExpiredRelease && (!hasManaged || status.Recovery.CommittedBackupID() != "") {
+			released = true
+			authorization = v1.ReleaseByGraceExpired
+			reason = "Node stayed NotReady past its grace period; project released for rescheduling"
 		}
 		if !released {
 			status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
@@ -302,6 +306,9 @@ func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controll
 		// that in the same write is what makes the obligation list complete:
 		// no reader can see the assignment gone without its debt recorded.
 		status.EnsureRecovery().AddObligation(assignment, now, authorization)
+		if hasManaged {
+			status.Recovery.OweManagedData(assignment)
+		}
 		// The incident is over for this Project: it is leaving the node that
 		// went NotReady. The outage conditions are scoped to that outage, so
 		// they go with it — carried to the next node, a clock would be read as
@@ -514,6 +521,11 @@ func (a *ProjectStoreAdapter) MoveFailedProject(ctx context.Context, p *controll
 			return nil
 		}
 
+		project, err := a.s.GetProject(ctx, p.Name)
+		if err != nil {
+			return err
+		}
+
 		moved = true
 		if !slices.Contains(status.FailedNodes, p.NodeRef) {
 			status.FailedNodes = append(status.FailedNodes, p.NodeRef)
@@ -523,6 +535,9 @@ func (a *ProjectStoreAdapter) MoveFailedProject(ctx context.Context, p *controll
 		// advance past every generation this Project ever held.
 		status.NodeRef = ""
 		status.EnsureRecovery().AddObligation(assignment, now, v1.ReleaseByWorkloadStopped)
+		if project.Spec.HasManagedVolume() {
+			status.Recovery.OweManagedData(assignment)
+		}
 		status.Conditions = v1.RemoveConditions(status.Conditions,
 			v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt, v1.ConditionTypeTakeoverRequired)
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{

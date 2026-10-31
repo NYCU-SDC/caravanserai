@@ -359,6 +359,13 @@ type ProjectStore interface {
 	// ErrNotFound when the Project is gone.
 	RecordWorkloadStopped(ctx context.Context, name string, ref AssignmentRef, observedAt time.Time) error
 
+	// RecordManagedDataQuarantined records that owner's Node moved its local
+	// Managed data out of the active path (ADR-0024 C2). owner must be a cleanup
+	// obligation in the Project's list. The first evidence wins. Returns
+	// ErrStaleAssignment when there is no such obligation and ErrNotFound when
+	// the Project is gone.
+	RecordManagedDataQuarantined(ctx context.Context, name string, owner AssignmentRef, observedAt time.Time) error
+
 	// RecordCommittedBackup makes backupID the generation a new placement
 	// restores from (ADR-0024 C1). The fence and the phase (Scheduled, Running
 	// or Failed) are checked on the same snapshot the compare-and-swap is
