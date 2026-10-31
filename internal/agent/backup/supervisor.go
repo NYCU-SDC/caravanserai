@@ -23,9 +23,17 @@ import (
 type Supervisor struct {
 	runner ProjectRunner
 	logger *zap.Logger
+	health HealthReporter
 
 	mu      sync.Mutex
 	entries map[ResourceKey]*supervisorEntry
+}
+
+// HealthReporter tells the server whether scheduled backups are working. Its
+// failures are logged and retried by the next run: a backup is never affected.
+type HealthReporter interface {
+	SetBackupFailing(ctx context.Context, project *v1.Project) error
+	ClearBackupFailing(ctx context.Context, project *v1.Project) error
 }
 
 // ProjectRunner takes one backup of a Project. *Runner is the Offline one.
@@ -62,6 +70,12 @@ func (e *supervisorEntry) update(p *v1.Project) {
 }
 
 // NewSupervisor creates a Supervisor driving runner.
+// WithHealthReporter makes the Supervisor report whether backups are working.
+func (s *Supervisor) WithHealthReporter(health HealthReporter) *Supervisor {
+	s.health = health
+	return s
+}
+
 func NewSupervisor(runner ProjectRunner, logger *zap.Logger) *Supervisor {
 	return &Supervisor{
 		runner:  runner,
@@ -163,6 +177,7 @@ func (s *Supervisor) Count() int {
 func (s *Supervisor) loop(ctx context.Context, key ResourceKey, entry *supervisorEntry) {
 	timer := time.NewTimer(entry.interval)
 	defer timer.Stop()
+	reportedFailing := false
 
 	for {
 		select {
@@ -170,13 +185,58 @@ func (s *Supervisor) loop(ctx context.Context, key ResourceKey, entry *superviso
 			return
 		case <-timer.C:
 			project := entry.current()
-			if err := s.runner.Run(ctx, project); err != nil && !errors.Is(err, ErrNoManagedVolumes) {
+			err := s.runner.Run(ctx, project)
+			if errors.Is(err, ErrNoManagedVolumes) {
+				err = nil
+			}
+			if err != nil {
 				s.logger.Error("Backup failed",
 					zap.String("project", key.String()), zap.Error(err))
+			}
+			// A run cancelled because the work ended says nothing about backups.
+			if ctx.Err() == nil {
+				reportedFailing = s.reportHealth(ctx, key, project, err != nil, reportedFailing)
 			}
 			timer.Reset(entry.interval)
 		}
 	}
+}
+
+// reportHealth tells the server the outcome of a run when it changes what the
+// server shows, and returns whether the server now shows BackupFailing. The
+// condition may have been left by an earlier Agent process, so a success also
+// clears one found on the Project.
+func (s *Supervisor) reportHealth(ctx context.Context, key ResourceKey, project *v1.Project, failed, reported bool) bool {
+	if s.health == nil {
+		return reported
+	}
+	if failed {
+		if reported {
+			return true
+		}
+		if err := s.health.SetBackupFailing(ctx, project); err != nil {
+			s.logger.Warn("Failed to report a failing backup", zap.String("project", key.String()), zap.Error(err))
+			return false
+		}
+		return true
+	}
+	if !reported && !backupFailingOn(project) {
+		return false
+	}
+	if err := s.health.ClearBackupFailing(ctx, project); err != nil {
+		s.logger.Warn("Failed to clear BackupFailing", zap.String("project", key.String()), zap.Error(err))
+		return true
+	}
+	return false
+}
+
+func backupFailingOn(project *v1.Project) bool {
+	for _, c := range project.Status.Conditions {
+		if c.Type == v1.ConditionTypeBackupFailing && c.Status == v1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 // shouldSupervise reports whether a Project needs a backup goroutine: it must

@@ -2,9 +2,11 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -310,4 +312,103 @@ func TestSupervisorRestartsWorkForANewAssignment(t *testing.T) {
 	assert.Equal(t, "uid-2", s.entries[key].uid)
 	assert.Equal(t, 1, s.Count())
 	s.Stop()
+}
+
+// scriptedRunner fails while failing is set, and counts its runs.
+type scriptedRunner struct {
+	failing atomic.Bool
+	runs    atomic.Int64
+}
+
+func (r *scriptedRunner) Run(context.Context, *v1.Project) error {
+	defer r.runs.Add(1)
+	if r.failing.Load() {
+		return errors.New("repo host unavailable")
+	}
+	return nil
+}
+
+type recordingHealth struct {
+	mu     sync.Mutex
+	calls  []string
+	setErr error
+}
+
+func (h *recordingHealth) SetBackupFailing(context.Context, *v1.Project) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, "set")
+	return h.setErr
+}
+
+func (h *recordingHealth) ClearBackupFailing(context.Context, *v1.Project) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, "clear")
+	return nil
+}
+
+func (h *recordingHealth) history() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.calls...)
+}
+
+func healthProject() *v1.Project {
+	return &v1.Project{ObjectMeta: v1.ObjectMeta{Name: "blog", Namespace: "default"}}
+}
+
+var healthKey = ResourceKey{Namespace: "default", Name: "blog"}
+
+// Told once when backups start failing and once when they recover, however many
+// runs that takes, since every report is a write and an event on the Project.
+func TestSupervisorReportsFailingBackupsOnChange(t *testing.T) {
+	health := &recordingHealth{}
+	runner := &scriptedRunner{}
+	s := NewSupervisor(runner, zap.NewNop()).WithHealthReporter(health)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p := supervisedProject(t, t.TempDir(), "blog", "5ms")
+	runner.failing.Store(true)
+	s.Sync(ctx, []*v1.Project{p})
+	require.Eventually(t, func() bool { return runner.runs.Load() >= 5 }, 2*time.Second, time.Millisecond)
+	runner.failing.Store(false)
+	require.Eventually(t, func() bool { return len(health.history()) == 2 }, 2*time.Second, time.Millisecond)
+	seen := runner.runs.Load()
+	require.Eventually(t, func() bool { return runner.runs.Load() >= seen+5 }, 2*time.Second, time.Millisecond)
+	s.Stop()
+
+	assert.Equal(t, []string{"set", "clear"}, health.history())
+}
+
+func TestReportHealth(t *testing.T) {
+	t.Run("a healthy run writes nothing", func(t *testing.T) {
+		health := &recordingHealth{}
+		s := NewSupervisor(nil, zap.NewNop()).WithHealthReporter(health)
+		assert.False(t, s.reportHealth(context.Background(), healthKey, healthProject(), false, false))
+		assert.Empty(t, health.history())
+	})
+
+	t.Run("a report that failed is tried again by the next failure", func(t *testing.T) {
+		health := &recordingHealth{setErr: errors.New("server unreachable")}
+		s := NewSupervisor(nil, zap.NewNop()).WithHealthReporter(health)
+		assert.False(t, s.reportHealth(context.Background(), healthKey, healthProject(), true, false))
+		assert.False(t, s.reportHealth(context.Background(), healthKey, healthProject(), true, false))
+		assert.Equal(t, []string{"set", "set"}, health.history())
+	})
+
+	t.Run("a condition left by an earlier Agent process is cleared by a success", func(t *testing.T) {
+		health := &recordingHealth{}
+		s := NewSupervisor(nil, zap.NewNop()).WithHealthReporter(health)
+		p := healthProject()
+		p.Status.Conditions = []v1.Condition{{Type: v1.ConditionTypeBackupFailing, Status: v1.ConditionTrue}}
+		assert.False(t, s.reportHealth(context.Background(), healthKey, p, false, false))
+		assert.Equal(t, []string{"clear"}, health.history())
+	})
+
+	t.Run("no reporter is not an error", func(t *testing.T) {
+		s := NewSupervisor(nil, zap.NewNop())
+		assert.False(t, s.reportHealth(context.Background(), healthKey, healthProject(), true, false))
+	})
 }

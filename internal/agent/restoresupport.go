@@ -88,9 +88,8 @@ func ensureVolumeData(
 
 	case restore.DecisionRestore:
 		if postgresDifferential {
-			// Decided before anything reads latest.json: the offline archives
-			// it points to are not this Project's backups, and may not even
-			// be this Project's.
+			// The committed backup names offline archives; this Project's
+			// backups are in pgBackRest, which cannot be restored from yet.
 			return &restore.PlacementBlockedError{
 				Reason: restore.BlockStrategyRestoreUnavailable,
 				Detail: "this Project's PostgresDifferential data would have to be restored from the object store, which is not supported yet",

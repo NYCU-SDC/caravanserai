@@ -40,6 +40,16 @@ func (c conditionReporter) ClearMaintenance(ctx context.Context, key backup.Reso
 	return c.client.ClearProjectCondition(ctx, key.Name, fence, v1.ConditionTypeMaintenance)
 }
 
+func (c conditionReporter) SetBackupFailing(ctx context.Context, project *v1.Project) error {
+	return c.client.PatchProjectCondition(ctx, project.Name, fenceForProject(project),
+		v1.ConditionTypeBackupFailing, v1.ConditionTrue, v1.ReasonBackupAttemptFailed,
+		"The most recent scheduled backup failed; see this Node's Agent log")
+}
+
+func (c conditionReporter) ClearBackupFailing(ctx context.Context, project *v1.Project) error {
+	return c.client.ClearProjectCondition(ctx, project.Name, fenceForProject(project), v1.ConditionTypeBackupFailing)
+}
+
 // backupCommitter adapts Client to backup.BackupCommitter.
 type backupCommitter struct {
 	client *Client
@@ -150,7 +160,7 @@ func NewBackupSupport(
 	}
 
 	return &BackupSupport{
-		Supervisor:  backup.NewSupervisor(strategies, logger),
+		Supervisor:  backup.NewSupervisor(strategies, logger).WithHealthReporter(conditionReporter{client: client}),
 		Coordinator: coordinator,
 		Restorer:    restorer,
 		DataRoot:    cfg.DataRoot,
