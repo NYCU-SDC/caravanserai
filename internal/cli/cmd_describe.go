@@ -314,6 +314,10 @@ func describeProject(w io.Writer, project *v1.Project) {
 		printField(w, "  Healthy Since", healthy)
 		printField(w, "  Preferred Node", stringOrNone(r.PreferredNode))
 		workloadStopped := "<none>"
+		if b := r.CommittedBackup; b != nil {
+			printField(w, "  Committed Backup", fmt.Sprintf("%s (from %s, generation %d, committed %s)",
+				b.BackupID, b.Assignment.NodeName, b.Assignment.AssignmentGeneration, b.CommittedAt.Format(time.RFC3339)))
+		}
 		if e := r.WorkloadStopped; e != nil {
 			workloadStopped = formatEvidence(e.Assignment, e.ObservedAt)
 		}

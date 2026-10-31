@@ -79,7 +79,7 @@ const (
 	BlockCorruptProvenance BlockReason = "CorruptProvenance"
 
 	// BlockNoRestoreSource means the Project has been placed before but the
-	// object store holds no complete generation to restore from. It is not
+	// server has no committed generation to restore from. It is not
 	// the same as a new Project with no backups: that one has nothing to lose
 	// and starts empty. This one had data somewhere, and where it went is a
 	// question the agent cannot answer.

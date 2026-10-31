@@ -62,6 +62,31 @@
       ],
       "description": "CleanupObligation is one released assignment whose Node may still hold the Project's runtime resources."
     },
+    "CommittedBackup": {
+      "properties": {
+        "backupID": {
+          "type": "string",
+          "description": "BackupID names the generation in the object store."
+        },
+        "assignment": {
+          "$ref": "#/$defs/AssignmentIdentity",
+          "description": "Assignment is the assignment that produced and committed it."
+        },
+        "committedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "CommittedAt is when the server accepted it."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "backupID",
+        "assignment",
+        "committedAt"
+      ],
+      "description": "CommittedBackup records one backup generation accepted as the restore source."
+    },
     "Condition": {
       "properties": {
         "type": {
@@ -333,6 +358,10 @@
           },
           "type": "array",
           "description": "CleanupObligations lists every assignment this Project has given up\nwhose Node may still hold its runtime resources. An entry is appended in\nthe same write that releases an assignment or moves the Project to\nTerminating, so the list is the complete set of Nodes that may still\nhold resources. Final deletion requires every entry to be resolved."
+        },
+        "committedBackup": {
+          "$ref": "#/$defs/CommittedBackup",
+          "description": "CommittedBackup is the generation a new placement restores from\n(ADR-0024 C1). Only the assignment current at the time can set it, so once\nan assignment is released its Agent can no longer change where the next\none restores from, even if it can still reach the object store. A new\nassignment keeps it. Nil means no backup has ever been committed."
         }
       },
       "additionalProperties": false,

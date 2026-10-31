@@ -225,6 +225,20 @@ func TestEnsureVolumeDataBlocksWhenAPlacedProjectHasNoBackup(t *testing.T) {
 	}
 }
 
+// The server decides the restore source. Naming a generation the store does not
+// hold is a fault, and proves the object store's contents were not what chose it.
+func TestEnsureVolumeDataRestoresTheCommittedGeneration(t *testing.T) {
+	restorer, coordinator, dataRoot := newSupport(t, missingStore{})
+	p := testProject(managedVolume("db-data"))
+	p.Status.AssignmentHistory = v1.AssignmentHistoryKnown
+	p.Status.Recovery = &v1.ProjectRecoveryStatus{CommittedBackup: &v1.CommittedBackup{BackupID: "20261031T000000Z-aaaaaaaa"}}
+
+	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, p, zap.NewNop())
+
+	require.ErrorIs(t, err, restore.ErrGenerationMissing)
+	assert.ErrorContains(t, err, "20261031T000000Z-aaaaaaaa")
+}
+
 // Every refusal reaches an operator through Project status, so the message may
 // name what the Project's own spec names and must not publish this node's
 // filesystem layout.

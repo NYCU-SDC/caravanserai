@@ -359,6 +359,15 @@ type ProjectStore interface {
 	// ErrNotFound when the Project is gone.
 	RecordWorkloadStopped(ctx context.Context, name string, ref AssignmentRef, observedAt time.Time) error
 
+	// RecordCommittedBackup makes backupID the generation a new placement
+	// restores from (ADR-0024 C1). The fence and the phase (Scheduled, Running
+	// or Failed) are checked on the same snapshot the compare-and-swap is
+	// versioned against, so a released assignment cannot commit. Committing the
+	// current generation again is a no-op. Returns ErrStaleAssignment for a
+	// fence that is not current, ErrConflictState for a disallowed phase, and
+	// ErrNotFound when the Project is gone.
+	RecordCommittedBackup(ctx context.Context, name string, ref AssignmentRef, backupID string, committedAt time.Time) error
+
 	// RecordResourcesRemoved resolves one cleanup obligation: owner must be
 	// the assignment of an obligation in the Project's list, for the same
 	// Project UID. Ownership is checked on the snapshot the UID- and

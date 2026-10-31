@@ -1139,6 +1139,35 @@ func (s *Store) RecordWorkloadStopped(ctx context.Context, name string, ref stor
 	})
 }
 
+// committedBackupPhases are the phases in which the assigned Agent may commit a
+// backup. Terminating is left out: a Project on its way out needs no restore
+// source.
+var committedBackupPhases = map[v1.ProjectPhase]bool{
+	v1.ProjectPhaseScheduled: true,
+	v1.ProjectPhaseRunning:   true,
+	v1.ProjectPhaseFailed:    true,
+}
+
+// RecordCommittedBackup implements store.ProjectStore. It rides on
+// ReportProjectStatusFenced for the same reason RecordWorkloadStopped does.
+func (s *Store) RecordCommittedBackup(ctx context.Context, name string, ref store.AssignmentRef, backupID string, committedAt time.Time) error {
+	return s.ReportProjectStatusFenced(ctx, name, ref, func(status *v1.ProjectStatus) error {
+		if !committedBackupPhases[status.Phase] {
+			return fmt.Errorf("%w: project %q is %s; a backup is committed only while Scheduled, Running or Failed",
+				store.ErrConflictState, name, status.Phase)
+		}
+		if status.Recovery.CommittedBackupID() == backupID {
+			return nil
+		}
+		status.EnsureRecovery().CommittedBackup = &v1.CommittedBackup{
+			BackupID:    backupID,
+			Assignment:  assignmentIdentity(ref),
+			CommittedAt: committedAt.UTC(),
+		}
+		return nil
+	})
+}
+
 // RecordResourcesRemoved implements store.ProjectStore.
 //
 // The owner is any cleanup obligation in the list, which no single-row fence

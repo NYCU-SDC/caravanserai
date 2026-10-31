@@ -146,6 +146,10 @@ var describeProjectCoveredFields = newStringSet(
 	"Status.Recovery.RescheduleAttempts",
 	"Status.Recovery.WorkloadStopped.Assignment.AssignmentGeneration",
 	"Status.Recovery.WorkloadStopped.Assignment.NodeName",
+	"Status.Recovery.CommittedBackup.Assignment.AssignmentGeneration",
+	"Status.Recovery.CommittedBackup.Assignment.NodeName",
+	"Status.Recovery.CommittedBackup.Assignment.ProjectUID",
+	"Status.Recovery.CommittedBackup.BackupID",
 	"Status.Recovery.WorkloadStopped.Assignment.ProjectUID",
 	"Status.Conditions",
 )
@@ -241,6 +245,20 @@ func (s stringSet) has(v string) bool {
 // The Recovery section appears only once recovery has recorded something, and
 // a healthy window from an older assignment is labelled stale rather than shown
 // as if it described the current one.
+func TestDescribeProjectShowsTheCommittedBackup(t *testing.T) {
+	var out strings.Builder
+	describeProject(&out, &v1.Project{Status: v1.ProjectStatus{
+		Phase: v1.ProjectPhaseRunning,
+		Recovery: &v1.ProjectRecoveryStatus{CommittedBackup: &v1.CommittedBackup{
+			BackupID:    "20261031T000000Z-aaaaaaaa",
+			Assignment:  v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 3},
+			CommittedAt: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC),
+		}},
+	}})
+
+	assert.Contains(t, out.String(), "20261031T000000Z-aaaaaaaa (from node-a, generation 3, committed 2026-10-31T00:00:00Z)")
+}
+
 func TestDescribeProjectRecoverySection(t *testing.T) {
 	var none strings.Builder
 	describeProject(&none, &v1.Project{Status: v1.ProjectStatus{Phase: v1.ProjectPhaseRunning}})

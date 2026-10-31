@@ -26,7 +26,7 @@ func newTestSupervisor(t *testing.T) (*Supervisor, *fakeStore, *fakeContainers) 
 
 	runner := NewRunner(
 		NewCoordinator(), containers, store,
-		fakeOwnership{result: OwnershipRetained}, &fakeConditions{}, &fakeRoutes{},
+		fakeOwnership{result: OwnershipRetained}, &fakeConditions{}, &fakeCommitter{}, &fakeRoutes{},
 		Config{DataRoot: dataRoot, NodeName: "node-a", CaraVersion: "test"},
 		zap.NewNop(),
 	)
@@ -199,11 +199,8 @@ func TestSupervisorRunsBackupOnSchedule(t *testing.T) {
 	p := supervisedProject(t, dataRoot, "blog", "30ms")
 	s.Sync(ctx, []*v1.Project{p})
 
-	latestKey, err := LatestKey("default", "blog")
-	require.NoError(t, err)
-
 	require.Eventually(t, func() bool {
-		return store.has(latestKey)
+		return store.hasManifest()
 	}, 2*time.Second, 10*time.Millisecond, "a scheduled backup should have completed")
 
 	assert.Contains(t, containers.history(), "stop")
@@ -218,9 +215,7 @@ func TestSupervisorStopHaltsScheduledBackups(t *testing.T) {
 	p := supervisedProject(t, dataRoot, "blog", "30ms")
 	s.Sync(ctx, []*v1.Project{p})
 
-	latestKey, err := LatestKey("default", "blog")
-	require.NoError(t, err)
-	require.Eventually(t, func() bool { return store.has(latestKey) }, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return store.hasManifest() }, 2*time.Second, 10*time.Millisecond)
 
 	s.Stop()
 	assert.Equal(t, 0, s.Count())

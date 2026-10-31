@@ -392,6 +392,45 @@ func (c *Client) ReportResourcesRemoved(ctx context.Context, projectName string,
 	}
 }
 
+// CommitBackup asks the server to make backupID the Project's restore source. A
+// 409 comes back as ErrStaleAssignment and a 404 as ErrProjectNotFound.
+func (c *Client) CommitBackup(ctx context.Context, projectName string, fence AssignmentFence, backupID string) error {
+	body, err := json.Marshal(struct {
+		evidenceRequest
+		BackupID string `json:"backupID"`
+	}{
+		evidenceRequest: evidenceRequest{UID: fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &fence.Generation},
+		BackupID:        backupID,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal committed-backup request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/projects/%s/recovery/committed-backup", c.serverURL, projectName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build committed-backup request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("committed-backup request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("commit backup: unexpected status %s", resp.Status)
+	}
+}
+
 // conditionPatchRequest is the body sent to
 // PATCH /api/v1/projects/{name}/conditions/{type}. The uid/nodeRef/generation
 // triple is the assignment fence the server validates atomically.

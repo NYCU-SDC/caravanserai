@@ -175,12 +175,11 @@ create_project() {
 
 mc() { docker exec "$minio_name" mc "$@"; }
 
-latest_backup_id() {
-	mc cat "local/$bucket/cara/v1/projects/default/$1/latest.json" 2>/dev/null |
-		python3 -c 'import json,sys; print(json.load(sys.stdin).get("backupID",""))' 2>/dev/null || true
+committed_backup_id() {
+	project_field "$1" '(p["status"].get("recovery") or {}).get("committedBackup",{}).get("backupID","")'
 }
 
-backup_published() { [[ -n "$(latest_backup_id "$1")" ]]; }
+backup_published() { [[ -n "$(committed_backup_id "$1")" ]]; }
 
 marker_field() {
 	python3 -c '
@@ -370,10 +369,12 @@ for project in "$clean_project" "$stale_project"; do
 done
 declare -A backup_before
 for project in "$clean_project" "$stale_project"; do
-	backup_before["$project"]="$(latest_backup_id "$project")"
-	[[ -n "${backup_before[$project]}" ]] || fail "$project has no latest.json to restore from"
-	log "$project latest generation ${backup_before[$project]}"
+	backup_before["$project"]="$(committed_backup_id "$project")"
+	[[ -n "${backup_before[$project]}" ]] || fail "$project has no committed backup to restore from"
+	log "$project committed generation ${backup_before[$project]}"
 done
+old_uid="$(project_field "$clean_project" 'p["metadata"]["uid"]')"
+old_generation="$(project_field "$clean_project" 'p["status"]["assignmentGeneration"]')"
 
 # The backup runs against a stopped Project, so wait for it to be serving again
 # before the Agent is taken away — otherwise the loss is of a Project that was
@@ -504,7 +505,7 @@ scenario_stale_destination() {
 	[[ "$got_marker" == "$stale_marker_sum" ]] ||
 		fail "$stale_project: the v1 marker was rewritten; unprovable data must never be stamped as owned"
 
-	after="$(latest_backup_id "$stale_project")"
+	after="$(committed_backup_id "$stale_project")"
 	[[ "$after" == "${backup_before[$stale_project]}" ]] ||
 		fail "$stale_project: the authoritative generation moved while the Project was blocked (was ${backup_before[$stale_project]}, now $after)"
 
@@ -531,6 +532,20 @@ scenario_clean_destination() {
 
 	log "$clean_project restored generation $restored_from, checksum $got_sum"
 	log "$clean_project source generation was ${backup_before[$clean_project]}"
+	[[ "$restored_from" == "${backup_before[$clean_project]}" ]] ||
+		fail "$clean_project: restored $restored_from, but the server committed ${backup_before[$clean_project]}"
+
+	# ADR-0024 C1: node-a may still reach the bucket during a partition. Its
+	# assignment was released, so a generation it finishes now must not become
+	# the restore source.
+	forged=20000101T000000Z-00000000
+	code="$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$server_url/api/v1/projects/$clean_project/recovery/committed-backup" \
+		-H 'Content-Type: application/json' \
+		-d "{\"uid\":\"$old_uid\",\"nodeRef\":\"node-a\",\"assignmentGeneration\":$old_generation,\"backupID\":\"$forged\"}")"
+	[[ "$code" == "409" ]] || fail "$clean_project: a commit from the released assignment returned $code, want 409"
+	[[ "$(committed_backup_id "$clean_project")" != "$forged" ]] ||
+		fail "$clean_project: the released assignment changed the restore source"
+	log "$clean_project refused a commit from the released assignment"
 }
 
 # Scenario 3: the lost Node comes back after the override.

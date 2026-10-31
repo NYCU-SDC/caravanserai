@@ -61,22 +61,3 @@ func TestUnmarshalManifestRejectsGarbage(t *testing.T) {
 	_, err := UnmarshalManifest([]byte("not json"))
 	assert.Error(t, err)
 }
-
-func TestLatestRoundTrip(t *testing.T) {
-	now := time.Date(2026, 7, 24, 14, 0, 0, 0, time.UTC)
-	original := NewLatest("id-1", "cara/v1/projects/default/blog/snapshots/id-1/manifest.json", now)
-
-	assert.Equal(t, 1, original.SchemaVersion)
-
-	data, err := original.Marshal()
-	require.NoError(t, err)
-
-	got, err := UnmarshalLatest(data)
-	require.NoError(t, err)
-	assert.Equal(t, original, got)
-}
-
-func TestUnmarshalLatestRejectsGarbage(t *testing.T) {
-	_, err := UnmarshalLatest([]byte("not json"))
-	assert.Error(t, err)
-}
