@@ -35,6 +35,13 @@ type fenceFakeStore struct {
 	terminatingCalls int
 	created          *v1.Project
 
+	// changedBeforeDelete, when set, replaces getProject at the moment
+	// FinalizeProject locks the row: a write that committed between the
+	// handler's read and its delete, such as the first assignment.
+	changedBeforeDelete *v1.Project
+	// lastApplied is the status the last UID-pinned write produced.
+	lastApplied v1.ProjectStatus
+
 	returnErr error
 }
 
@@ -87,7 +94,11 @@ func (f *fenceFakeStore) UpdateProjectStatusForUID(_ context.Context, _ string, 
 	if f.getProject != nil {
 		st = f.getProject.Status
 	}
-	return mutate(&st)
+	if err := mutate(&st); err != nil {
+		return err
+	}
+	f.lastApplied = st
+	return nil
 }
 
 func (f *fenceFakeStore) CreateProject(_ context.Context, p *v1.Project) error {
@@ -95,7 +106,19 @@ func (f *fenceFakeStore) CreateProject(_ context.Context, p *v1.Project) error {
 	return nil
 }
 
-func (f *fenceFakeStore) DeleteProject(_ context.Context, _ string) error {
+// FinalizeProject mirrors the store: the predicate is evaluated on the row as
+// it is when locked, which is changedBeforeDelete if a test set one.
+func (f *fenceFakeStore) FinalizeProject(_ context.Context, name, uid string, blocker func(*v1.Project) string) error {
+	if f.changedBeforeDelete != nil {
+		f.getProject, f.changedBeforeDelete = f.changedBeforeDelete, nil
+	}
+	current, _ := f.GetProject(context.Background(), name)
+	if current.ObjectMeta.UID != uid {
+		return store.ErrStaleAssignment
+	}
+	if reason := blocker(current); reason != "" {
+		return &store.FinalizationBlockedError{Name: name, Reason: reason}
+	}
 	f.deleteCalls++
 	return nil
 }
@@ -292,6 +315,64 @@ func TestDeleteGuardHonoursAssignmentHistory(t *testing.T) {
 		}
 		if s.deleteCalls != 0 {
 			t.Fatalf("deleteCalls = %d, want 0; an Unknown Project must not be hard-deleted", s.deleteCalls)
+		}
+	})
+}
+
+// The handler's read only nominates a Project for direct deletion; the store
+// decides on the row it locks. A first assignment that commits in between turns
+// the request into an ordinary deletion instead of deleting a record whose
+// containers are about to start.
+func TestDeleteImmediateRacesFirstAssignment(t *testing.T) {
+	neverAssigned := &v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: "fresh", UID: "uid-1"},
+		Status:     v1.InitialProjectStatus(),
+	}
+
+	t.Run("the first assignment wins and the Project enters Terminating", func(t *testing.T) {
+		s := &fenceFakeStore{getProject: neverAssigned, changedBeforeDelete: &v1.Project{
+			ObjectMeta: v1.ObjectMeta{Name: "fresh", UID: "uid-1"},
+			Status: v1.ProjectStatus{
+				Phase: v1.ProjectPhaseScheduled, NodeRef: "node-a",
+				AssignmentGeneration: 1, AssignmentHistory: v1.AssignmentHistoryKnown,
+			},
+		}}
+		h := newFenceHandler(s, false)
+
+		rec := doDelete(h, "fresh")
+
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202; body = %s", rec.Code, rec.Body.String())
+		}
+		if s.deleteCalls != 0 {
+			t.Fatalf("deleteCalls = %d, want 0; the record of an assigned Project was deleted", s.deleteCalls)
+		}
+		if s.lastUID != "uid-1" {
+			t.Fatalf("Terminating written for UID %q, want uid-1", s.lastUID)
+		}
+		if s.lastApplied.Phase != v1.ProjectPhaseTerminating {
+			t.Fatalf("phase = %s, want Terminating", s.lastApplied.Phase)
+		}
+		want := v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 1}
+		if s.lastApplied.Recovery.FindObligation(want) == nil {
+			t.Fatalf("no cleanup obligation for %+v; obligations = %+v", want, s.lastApplied.Recovery)
+		}
+	})
+
+	t.Run("a same-name Project created in between is not deleted", func(t *testing.T) {
+		s := &fenceFakeStore{getProject: neverAssigned, changedBeforeDelete: &v1.Project{
+			ObjectMeta: v1.ObjectMeta{Name: "fresh", UID: "uid-2"},
+			Status:     v1.InitialProjectStatus(),
+		}}
+		h := newFenceHandler(s, false)
+
+		rec := doDelete(h, "fresh")
+
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
+		}
+		if s.deleteCalls != 0 || s.uidStatusCalls != 0 {
+			t.Fatalf("deleteCalls = %d, uidStatusCalls = %d; the new lifetime was touched", s.deleteCalls, s.uidStatusCalls)
 		}
 	})
 }
