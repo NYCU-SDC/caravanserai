@@ -46,13 +46,16 @@ func NewOwnershipResolver(client *Client, nodeName string, logger *zap.Logger) b
 	return &ownershipResolver{client: client, nodeName: nodeName, logger: logger}
 }
 
-// Resolve classifies the Project's current assignment.
+// Resolve classifies the Project's current assignment against the one the
+// backup started under (uid and generation). A Project moved away and back has
+// this node's name in nodeRef again, but restarting would run the revoked
+// generation's containers as if they were the current one's.
 //
 // The distinction that matters most is between "the Project is gone" and "the
 // server could not be reached". Both fail the fetch, but the first means this
 // node must not restart the containers while the second means it should — see
 // backup.ShouldRestartContainers.
-func (r *ownershipResolver) Resolve(ctx context.Context, key backup.ResourceKey) backup.Ownership {
+func (r *ownershipResolver) Resolve(ctx context.Context, key backup.ResourceKey, uid string, generation int64) backup.Ownership {
 	project, err := r.client.GetProject(ctx, key.Name)
 	if err != nil {
 		if errors.Is(err, ErrProjectNotFound) {
@@ -61,6 +64,10 @@ func (r *ownershipResolver) Resolve(ctx context.Context, key backup.ResourceKey)
 		r.logger.Warn("Could not determine project ownership",
 			zap.String("project", key.String()), zap.Error(err))
 		return backup.OwnershipUnknown
+	}
+
+	if project.ObjectMeta.UID != uid {
+		return backup.OwnershipLost
 	}
 
 	switch project.Status.Phase {
@@ -72,6 +79,9 @@ func (r *ownershipResolver) Resolve(ctx context.Context, key backup.ResourceKey)
 
 	switch project.Status.NodeRef {
 	case r.nodeName:
+		if project.Status.AssignmentGeneration != generation {
+			return backup.OwnershipReassigned
+		}
 		return backup.OwnershipRetained
 	case "":
 		// Unassigned: the Project was reset to Pending by a drain or
