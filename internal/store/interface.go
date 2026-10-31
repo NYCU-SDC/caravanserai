@@ -327,8 +327,8 @@ type ProjectStore interface {
 
 	// ListProjectsByNodeRef returns all Projects assigned to the given node
 	// whose phase is one of the supplied phases.  Used by
-	// ProjectReschedulerController to find work that needs to be moved or
-	// force-terminated when a node goes NotReady.
+	// ProjectReschedulerController to find work that needs to be moved, or
+	// deletions that are blocked, when a node goes NotReady.
 	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*v1.Project, error)
 
 	// ListProjectsOwingCleanup returns every Project whose cleanup obligation

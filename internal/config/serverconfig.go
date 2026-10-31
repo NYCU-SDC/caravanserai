@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"os"
+	"time"
 
 	configutil "github.com/NYCU-SDC/summer/pkg/config"
 	"github.com/joho/godotenv"
@@ -55,6 +56,12 @@ type Config struct {
 	// assignment rather than accepted. Enable it cluster-wide only after every
 	// Agent sends the fence and legacy runtime ownership has been remediated.
 	UIDEnforcement bool `yaml:"uid_enforcement" envconfig:"UID_ENFORCEMENT"`
+
+	// TerminatingTimeout is how long a Terminating Project's Node may stay
+	// NotReady before the Project is marked TerminationBlocked. Zero means the
+	// controller's default (10m). It only decides when the stuck deletion is
+	// reported; the record is kept either way.
+	TerminatingTimeout time.Duration `yaml:"terminating_timeout" envconfig:"TERMINATING_TIMEOUT"`
 }
 
 // Load reads cara-server config from file → env → flags (later sources win).
@@ -131,6 +138,14 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		UIDEnforcement:   os.Getenv("UID_ENFORCEMENT") == "true",
 	}
 
+	if raw := os.Getenv("TERMINATING_TIMEOUT"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil {
+			envConfig.TerminatingTimeout = d
+		} else {
+			logger.Warn("Invalid TERMINATING_TIMEOUT, ignoring", err, map[string]string{"value": raw})
+		}
+	}
+
 	return configutil.Merge[Config](cfg, envConfig)
 }
 
@@ -149,6 +164,7 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.StringVar(&flagConfig.HeadscaleAPIKey, "headscale-api-key", "", "Headscale management API key")
 	flag.StringVar(&flagConfig.HeadscaleUser, "headscale-user", "", "Headscale user new pre-auth keys are created under (default: cara-node)")
 	flag.BoolVar(&flagConfig.UIDEnforcement, "uid-enforcement", false, "enforce Project UID and assignment-generation fencing (default: false, compatibility mode)")
+	flag.DurationVar(&flagConfig.TerminatingTimeout, "terminating-timeout", 0, "how long a Terminating project's node may be NotReady before the deletion is reported blocked (default: 10m)")
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)
 }

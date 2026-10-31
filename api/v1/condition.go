@@ -22,9 +22,13 @@
 //
 //	  ConditionTypeTerminatingAt — written by ProjectReschedulerController when
 //	  it observes a Terminating project on a NotReady node without a clock for
-//	  the current outage. LastTransitionTime is the start of the
-//	  force-termination timeout clock, and carries the same per-incident rule
-//	  as ConditionTypeNotReadyAt below.
+//	  the current outage. LastTransitionTime is the start of the termination
+//	  timeout clock, and carries the same per-incident rule as
+//	  ConditionTypeNotReadyAt below.
+//
+//	  ConditionTypeTerminationBlocked — written by ProjectReschedulerController
+//	  once that clock expires, and removed when the node returns. Same
+//	  per-incident rule.
 //
 //	  ConditionTypeNotReadyAt — written by ProjectReschedulerController when it
 //	  observes a Running project on a NotReady node without a clock for the
@@ -80,6 +84,14 @@ const (
 	// ConditionTypeTerminatingAt records the timestamp at which the rescheduler
 	// first observed a Terminating project on a NotReady node.
 	ConditionTypeTerminatingAt ConditionType = "TerminatingAt"
+
+	// ConditionTypeTerminationBlocked indicates that a Terminating Project's
+	// Node has been NotReady past the termination timeout, so nothing can
+	// confirm that its resources there are gone. The Project stays Terminating
+	// and its record is kept: deleting the record would leave whatever still
+	// runs on that Node with nothing that knows it exists. The condition is
+	// removed when the Node returns and the teardown resumes. Server-owned.
+	ConditionTypeTerminationBlocked ConditionType = "TerminationBlocked"
 
 	// ConditionTypeNotReadyAt records the timestamp at which the rescheduler
 	// first observed a Running project on a NotReady node.

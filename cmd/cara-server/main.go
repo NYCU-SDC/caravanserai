@@ -221,6 +221,7 @@ func main() {
 		projectAdapter,
 		nodeAdapter,
 		eventBus,
+		controller.WithTerminatingTimeout(cfg.TerminatingTimeout),
 	))
 	ctrlManager.Add(controller.NewFailedProjectReschedulerController(logger,
 		projectAdapter,

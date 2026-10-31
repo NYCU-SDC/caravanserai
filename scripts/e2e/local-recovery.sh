@@ -31,6 +31,11 @@ set -Eeuo pipefail
 #                               reconciled, and the container survives (CARA-93)
 #   G. a container for a service the spec no longer declares → still blocks the
 #                               new assignment, which no per-service check can see (CARA-93)
+#   H. deleting a Project      → every generation of its lifetime removed, nothing else
+#   I. deleting while the node is lost → kept Terminating with TerminationBlocked,
+#                               never finalized; the node returns → cleared, torn
+#                               down and finalized (CARA-80). The server runs with
+#                               TERMINATING_TIMEOUT=15s so this takes minutes, not ten
 
 log() { printf '[recovery-e2e] %s\n' "$*"; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -219,6 +224,7 @@ server_url="http://127.0.0.1:$server_port"
 		HOST=127.0.0.1 \
 		PORT="$server_port" \
 		UID_ENFORCEMENT=true \
+		TERMINATING_TIMEOUT=15s \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &
@@ -229,20 +235,30 @@ cat >"$test_root/agent-run/config.yaml" <<EOF
 data_root: "$data_root"
 EOF
 
-(
-	cd "$test_root/agent-run"
-	env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
-		SERVER_URL="$server_url" \
-		NODE_NAME=node-a \
-		HEARTBEAT_INTERVAL=1s \
-		DOCKER_HOST="$dind_host" \
-		AGENT_LISTEN_PORT=0 \
-		PROXY_LISTEN_ADDR=127.0.0.1:0 \
-		AGENT_ADVERTISE_IP=127.0.0.1 \
-		UID_ENFORCEMENT=true \
-		"$test_root/bin/cara-agent"
-) >"$test_root/agent.log" 2>&1 &
-agent_pid=$!
+start_agent() {
+	(
+		cd "$test_root/agent-run"
+		env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
+			SERVER_URL="$server_url" \
+			NODE_NAME=node-a \
+			HEARTBEAT_INTERVAL=1s \
+			DOCKER_HOST="$dind_host" \
+			AGENT_LISTEN_PORT=0 \
+			PROXY_LISTEN_ADDR=127.0.0.1:0 \
+			AGENT_ADVERTISE_IP=127.0.0.1 \
+			UID_ENFORCEMENT=true \
+			"$test_root/bin/cara-agent"
+	) >>"$test_root/agent.log" 2>&1 &
+	agent_pid=$!
+}
+
+stop_agent() {
+	kill "$agent_pid" >/dev/null 2>&1 || true
+	wait "$agent_pid" >/dev/null 2>&1 || true
+	agent_pid=""
+}
+
+start_agent
 wait_until 60 "node-a readiness" node_ready
 
 # ── Target Project ───────────────────────────────────────────────────────────
@@ -544,4 +560,63 @@ wait_until 30 "H: network removed" network_absent "cara-$project"
 	fail "H: the other lifetime's container was removed by this Project's deletion"
 log "H: PASS — every generation removed, network and Ephemeral volume gone, Managed data kept, other lifetime untouched"
 
-log "PASS: stop and remove recovered; missing data blocked visibly and recovered on restore; crash loop exhausted; stale containers blocked on the Running and Scheduled paths, including one whose service the spec no longer declares; deletion removed every generation of the lifetime and nothing of another"
+# ── I. Deleting a Project while its node is lost ─────────────────────────────
+#
+# Nothing but the node can confirm that its resources are gone, so a deletion
+# that cannot reach the node must keep the record — visibly blocked, not
+# finalized — until the node returns and finishes the teardown.
+
+lost=lost-delete
+lost_container="$lost-web"
+
+termination_blocked() {
+	[[ "$(project_field "$lost" 'cond("TerminationBlocked").get("status", "")')" == "True" ]]
+}
+not_termination_blocked() {
+	[[ -n "$(project_json "$lost")" ]] &&
+		[[ -z "$(project_field "$lost" 'cond("TerminationBlocked").get("status", "")')" ]]
+}
+node_not_ready() {
+	body="$(curl -fsS "$server_url/api/v1/nodes/node-a" 2>/dev/null || true)"
+	[[ "$body" == *'"state":"NotReady"'* ]]
+}
+lost_gone() { [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$server_url/api/v1/projects/$lost")" == "404" ]]; }
+lost_container_absent() {
+	listed="$(dind ps -a --format '{{.Names}}')" || return 1
+	! grep -qxF -- "$lost_container" <<<"$listed"
+}
+
+log "I: creating $lost"
+create_project '{
+	"apiVersion":"caravanserai/v1",
+	"kind":"Project",
+	"metadata":{"name":"'"$lost"'","namespace":"default"},
+	"spec":{"services":[{"name":"web","image":"nginx:alpine"}]}
+}'
+wait_until 90 "I: $lost Running" phase_is "$lost" Running
+wait_until 30 "I: $lost_container running" container_running "$lost_container"
+
+log "I: stopping the agent, then deleting $lost"
+stop_agent
+delete_status="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$server_url/api/v1/projects/$lost")"
+[[ "$delete_status" == "202" ]] || fail "I: delete returned $delete_status, want 202"
+phase_is "$lost" Terminating || fail "I: $lost did not enter Terminating"
+
+# The heartbeat timeout is 90s, then the 15s termination timeout runs.
+wait_until 240 "I: node-a NotReady" node_not_ready
+wait_until 120 "I: $lost marked TerminationBlocked" termination_blocked
+
+log "I: holding past the termination timeout to confirm the record is kept"
+sleep 30
+phase_is "$lost" Terminating || fail "I: $lost left Terminating while its node was lost"
+container_running "$lost_container" || fail "I: setup expected $lost_container to still be running"
+
+log "I: restarting the agent"
+start_agent
+wait_until 60 "I: node-a Ready again" node_ready
+wait_until 60 "I: TerminationBlocked cleared" not_termination_blocked
+wait_until 90 "I: $lost finalized" lost_gone
+wait_until 30 "I: $lost_container removed" lost_container_absent
+log "I: PASS — a deletion on a lost node was kept and reported blocked, then finished when the node returned"
+
+log "PASS: stop and remove recovered; missing data blocked visibly and recovered on restore; crash loop exhausted; stale containers blocked on the Running and Scheduled paths, including one whose service the spec no longer declares; deletion removed every generation of the lifetime and nothing of another; a deletion on a lost node was kept until the node returned"

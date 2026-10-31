@@ -98,7 +98,7 @@ test-managed-failover-e2e:
 		|| (echo -e "==> $(RED)Managed-volume failover rehearsal failed$(NC)" && exit 1)
 
 test-recovery-e2e:
-	@echo -e ":: $(GREEN)Running isolated local-recovery rehearsal (about 6 minutes)...$(NC)"
+	@echo -e ":: $(GREEN)Running isolated local-recovery rehearsal (about 9 minutes)...$(NC)"
 	@./scripts/e2e/local-recovery.sh \
 		&& echo -e "==> $(BLUE)Local-recovery rehearsal passed$(NC)" \
 		|| (echo -e "==> $(RED)Local-recovery rehearsal failed$(NC)" && exit 1)
