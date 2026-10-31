@@ -274,3 +274,41 @@ func TestGraceExpiredRelease(t *testing.T) {
 	got = getProject(t, managed)
 	assert.Equal(t, "node-a", got.Status.NodeRef)
 }
+
+// TestSchedulingBlockedCondition: the reason is on the Project while it waits
+// and gone once it is assigned.
+func TestSchedulingBlockedCondition(t *testing.T) {
+	const name = "e2e-scheduling-blocked"
+	ctx := context.Background()
+	drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+name+"?force=true", nil))
+	resp := doRequest(t, http.MethodPost, "/api/v1/projects", mustMarshal(t, v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: name},
+		Spec:       v1.ProjectSpec{Services: []v1.ServiceDef{{Name: "web", Image: "nginx:alpine"}}},
+	}))
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	drainBody(resp)
+	stores := adapter.NewProjectStoreAdapter(suite.store)
+
+	find := func() *v1.Condition {
+		p := getProject(t, name)
+		for i := range p.Status.Conditions {
+			if p.Status.Conditions[i].Type == v1.ConditionTypeSchedulingBlocked {
+				return &p.Status.Conditions[i]
+			}
+		}
+		return nil
+	}
+
+	require.NoError(t, stores.SetSchedulingBlocked(ctx, name, "NoSuitableNode", "node-b lacks cpu"))
+	c := find()
+	require.NotNil(t, c)
+	assert.Equal(t, "node-b lacks cpu", c.Message)
+	version := getProject(t, name).ObjectMeta.ResourceVersion
+	require.NoError(t, stores.SetSchedulingBlocked(ctx, name, "NoSuitableNode", "node-b lacks cpu"))
+	assert.Equal(t, version, getProject(t, name).ObjectMeta.ResourceVersion, "a repeated reason must not write")
+
+	require.NoError(t, stores.SetProjectScheduled(ctx, name, "node-a"))
+	assert.Nil(t, find(), "the assignment ends the wait")
+	require.NoError(t, stores.SetSchedulingBlocked(ctx, name, "NoSuitableNode", "late report"))
+	assert.Nil(t, find(), "a Project no longer Pending is not marked")
+}

@@ -46,6 +46,9 @@ func (cl *LogBuffer) FlushToZap(logger *zap.Logger) {
 }
 
 func (c *Config) Validate() error {
+	if c.configFileError != nil {
+		return c.configFileError
+	}
 	if c.DatabaseURL == "" {
 		return errors.New("database_url is required")
 	}
@@ -76,6 +79,9 @@ func (c *Config) Validate() error {
 }
 
 func (c *AgentConfig) Validate() error {
+	if c.configFileError != nil {
+		return c.configFileError
+	}
 	if c.ServerURL == "" {
 		return errors.New("server_url is required")
 	}

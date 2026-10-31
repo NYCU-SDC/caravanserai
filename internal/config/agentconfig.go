@@ -98,6 +98,9 @@ type AgentConfig struct {
 	// container carrying a different or missing UID is then treated as not owned
 	// (refused for adoption and quarantined by the orphan sweep).
 	UIDEnforcement bool `yaml:"uid_enforcement" envconfig:"UID_ENFORCEMENT"`
+
+	// configFileError is why a config file named explicitly could not be used.
+	configFileError error
 	// S3 configures the object store used for Managed volume backups.
 	// Leaving Endpoint empty disables backups; see S3Config.
 	S3 S3Config `yaml:"s3"`
@@ -178,10 +181,12 @@ func LoadAgent() (AgentConfig, *LogBuffer) {
 
 	var err error
 
-	cfg, err = AgentFromFile("config.yaml", cfg, logger)
+	path, explicit := resolveConfigPath(os.Args[1:])
+	cfg, err = AgentFromFile(path, cfg, logger)
 	if err != nil {
-		logger.Warn("Failed to load agent config from file", err, map[string]string{"path": "config.yaml"})
+		logger.Warn("Failed to load agent config from file", err, map[string]string{"path": path})
 	}
+	fileErr := explicitFileError(explicit, err)
 
 	cfg, err = AgentFromEnv(cfg, logger)
 	if err != nil {
@@ -193,6 +198,7 @@ func LoadAgent() (AgentConfig, *LogBuffer) {
 		logger.Warn("Failed to load agent config from flags", err, nil)
 	}
 
+	cfg.configFileError = fileErr
 	return *cfg, logger
 }
 
@@ -304,6 +310,7 @@ func AgentFromFlags(cfg *AgentConfig) (*AgentConfig, error) {
 	flag.BoolVar(&flagConfig.UIDEnforcement, "uid-enforcement", false, "enforce Project UID ownership fencing (default: false, compatibility mode)")
 	flag.StringVar(&flagConfig.ReservedCPU, "reserved-cpu", "", "CPU held back from node capacity for the system (default: 500m)")
 	flag.StringVar(&flagConfig.ReservedMemory, "reserved-memory", "", "memory held back from node capacity for the system (default: 512Mi)")
+	flag.String(configFlag, "", configFlagUsage)
 	flag.Parse()
 	return configutil.Merge[AgentConfig](cfg, flagConfig)
 }

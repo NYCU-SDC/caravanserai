@@ -79,6 +79,9 @@ type Config struct {
 	// protects no other route.
 	// Empty disables them. There is no flag for it, to keep it out of process lists.
 	OperatorToken string `yaml:"operator_token" envconfig:"OPERATOR_TOKEN"`
+
+	// configFileError is why a config file named explicitly could not be used.
+	configFileError error
 }
 
 // Load reads cara-server config from file → env → flags (later sources win).
@@ -93,10 +96,12 @@ func Load() (Config, *LogBuffer) {
 
 	var err error
 
-	cfg, err = FromFile("config.yaml", cfg, logger)
+	path, explicit := resolveConfigPath(os.Args[1:])
+	cfg, err = FromFile(path, cfg, logger)
 	if err != nil {
-		logger.Warn("Failed to load config from file", err, map[string]string{"path": "config.yaml"})
+		logger.Warn("Failed to load config from file", err, map[string]string{"path": path})
 	}
+	fileErr := explicitFileError(explicit, err)
 
 	cfg, err = FromEnv(cfg, logger)
 	if err != nil {
@@ -108,6 +113,7 @@ func Load() (Config, *LogBuffer) {
 		logger.Warn("Failed to load config from flags", err, nil)
 	}
 
+	cfg.configFileError = fileErr
 	return *cfg, logger
 }
 
@@ -194,6 +200,7 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.DurationVar(&flagConfig.TerminatingTimeout, "terminating-timeout", 0, "how long a Terminating project's node may be NotReady before the deletion is reported blocked (default: 10m)")
 	flag.DurationVar(&flagConfig.RunningGracePeriod, "running-grace-period", 0, "how long a Running Project may stay on a NotReady node before its release is attempted (default: 3m)")
 	flag.BoolVar(&flagConfig.GraceExpiredRelease, "grace-expired-release", false, "move Projects with no Managed volume off a node that stayed NotReady past the grace period (requires uid-enforcement)")
+	flag.String(configFlag, "", configFlagUsage)
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)
 }

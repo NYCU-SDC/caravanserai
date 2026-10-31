@@ -130,6 +130,7 @@ func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nod
 		// migrated in as: the counter it now carries is a trustworthy fence.
 		status.AssignmentGeneration++
 		status.AssignmentHistory = v1.AssignmentHistoryKnown
+		status.Conditions = v1.RemoveConditions(status.Conditions, v1.ConditionTypeSchedulingBlocked)
 		// The new generation consumes the old one's no-start latch and
 		// healthy window, in the same swap that commits it.
 		status.Recovery.ClearForNewAssignment()
@@ -151,6 +152,24 @@ func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nod
 // SetProjectPhase writes any phase with no writer or transition check. No
 // production code calls it; integration tests use it to put a Project into a
 // phase directly. CARA-81 stage 3 removes it.
+// SetSchedulingBlocked satisfies controller.SchedulerProjectStore.
+func (a *ProjectStoreAdapter) SetSchedulingBlocked(ctx context.Context, name, reason, message string) error {
+	now := time.Now().UTC()
+	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		if status.Phase != v1.ProjectPhasePending {
+			return nil
+		}
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypeSchedulingBlocked,
+			Status:             v1.ConditionTrue,
+			Reason:             reason,
+			Message:            message,
+			LastTransitionTime: now,
+		}, false)
+		return nil
+	})
+}
+
 func (a *ProjectStoreAdapter) SetProjectPhase(ctx context.Context, name string, phase v1.ProjectPhase, reason, message string) error {
 	// Fixed before the closure, not inside it: the closure may run more than
 	// once, and this records when the transition was observed rather than when
