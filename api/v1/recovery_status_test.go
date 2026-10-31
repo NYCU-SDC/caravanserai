@@ -258,3 +258,34 @@ func TestCleanupTasksFor(t *testing.T) {
 		assert.Empty(t, (&Project{ObjectMeta: ObjectMeta{Name: "web", UID: "uid-1"}}).CleanupTasksFor("node-a"))
 	})
 }
+
+func TestOverrideRelease(t *testing.T) {
+	assignment := AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 1}
+	released := time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)
+
+	var r ProjectRecoveryStatus
+	r.AddObligation(assignment, released, ReleaseByWorkloadStopped)
+	if r.BlockingObligation() == nil {
+		t.Fatal("a WorkloadStopped release should block until cleanup")
+	}
+
+	r.OverrideRelease(assignment, released.Add(time.Hour))
+	if len(r.CleanupObligations) != 1 {
+		t.Fatalf("override added an obligation: %+v", r.CleanupObligations)
+	}
+	o := r.CleanupObligations[0]
+	if o.ReleaseAuthorization != ReleaseByOperatorOverride || o.Resolved() || !o.ReleasedAt.Equal(released) {
+		t.Errorf("obligation after override = %+v", o)
+	}
+	if r.BlockingObligation() != nil {
+		t.Error("an override should permit assignment")
+	}
+	if got := r.NodesOwingCleanup(); len(got) != 1 || got[0] != "node-a" {
+		t.Errorf("NodesOwingCleanup = %v, the old Node still owes cleanup", got)
+	}
+
+	var none *ProjectRecoveryStatus
+	if got := none.NodesOwingCleanup(); got != nil {
+		t.Errorf("nil status NodesOwingCleanup = %v", got)
+	}
+}

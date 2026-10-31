@@ -1880,3 +1880,233 @@ func (l *migrateLogger) Verbose() bool {
 
 // Compile-time assertion that *Store satisfies store.Store.
 var _ store.Store = (*Store)(nil)
+
+// applyOperatorTakeover applies an operator's override of the release gate to
+// status. It returns what changed, and writes the same fields ReleaseAssignment
+// does when the assignment is still held.
+func applyOperatorTakeover(status *v1.ProjectStatus, assignment v1.AssignmentIdentity, now time.Time) (v1.TakeoverOutcome, error) {
+	if status.AssignmentGeneration != assignment.AssignmentGeneration {
+		return "", fmt.Errorf("%w: generation %d is not the latest", store.ErrStaleAssignment, assignment.AssignmentGeneration)
+	}
+
+	if status.NodeRef == "" {
+		o := status.Recovery.FindObligation(assignment)
+		if status.Phase != v1.ProjectPhasePending || o == nil {
+			return "", fmt.Errorf("%w: no released assignment to take over", store.ErrStaleAssignment)
+		}
+		if o.PermitsAssignment() {
+			return "", fmt.Errorf("%w: the assignment is not blocking the project", store.ErrConflictState)
+		}
+		status.Recovery.OverrideRelease(assignment, now)
+		return v1.TakeoverObligationOverridden, nil
+	}
+
+	if status.NodeRef != assignment.NodeName {
+		return "", fmt.Errorf("%w: project is assigned to another node", store.ErrStaleAssignment)
+	}
+	if !v1.PhaseTransitionAllowed(v1.WriterOperatorTakeover, status.Phase, v1.ProjectPhasePending) {
+		return "", fmt.Errorf("%w: project is %s", store.ErrConflictState, status.Phase)
+	}
+	// The mark is the rescheduler's finding that the Node is gone past its grace
+	// period. Without it the Node may be healthy, and taking over would run the
+	// workload twice for nothing.
+	marked := slices.ContainsFunc(status.Conditions, func(c v1.Condition) bool {
+		return c.Type == v1.ConditionTypeTakeoverRequired && c.Status == v1.ConditionTrue
+	})
+	if !marked {
+		return "", fmt.Errorf("%w: project is not marked %s", store.ErrConflictState, v1.ConditionTypeTakeoverRequired)
+	}
+
+	transitioned := status.Phase != v1.ProjectPhasePending
+	status.Phase = v1.ProjectPhasePending
+	status.NodeRef = ""
+	status.EnsureRecovery().OverrideRelease(assignment, now)
+	status.Conditions = v1.RemoveConditions(status.Conditions,
+		v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt, v1.ConditionTypeTakeoverRequired)
+	status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+		Type:               v1.ConditionTypePhase,
+		Status:             v1.ConditionTrue,
+		Reason:             "OperatorTakeover",
+		Message:            "An operator took over without proof the workload stopped; project released for rescheduling",
+		LastTransitionTime: now,
+	}, transitioned)
+	return v1.TakeoverReleased, nil
+}
+
+// TakeoverProject implements store.ProjectStore.
+//
+// The audit insert and the status swap share a transaction, retried like every
+// other compare-and-swap here. The insert goes first: a conflict on request_id
+// means a concurrent or earlier request made this decision, and the next pass
+// returns that record.
+func (s *Store) TakeoverProject(
+	ctx context.Context,
+	name string,
+	ref store.AssignmentRef,
+	audit store.TakeoverAudit,
+) (v1.TakeoverAuditRecord, bool, error) {
+	assignment := assignmentIdentity(ref)
+	var lastConflict error
+
+	for attempt := 0; attempt < maxStatusUpdateAttempts; attempt++ {
+		prior, found, err := s.takeoverByRequestID(ctx, audit.RequestID)
+		if err != nil {
+			return v1.TakeoverAuditRecord{}, false, err
+		}
+		if found {
+			if prior.ProjectName != name || prior.Assignment != assignment {
+				return v1.TakeoverAuditRecord{}, false, fmt.Errorf("%w: request ID belongs to another takeover", store.ErrConflictState)
+			}
+			return prior, true, nil
+		}
+
+		project, err := s.getProject(ctx, name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return v1.TakeoverAuditRecord{}, false, fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+			}
+			return v1.TakeoverAuditRecord{}, false, err
+		}
+		if project.ObjectMeta.UID != ref.UID {
+			return v1.TakeoverAuditRecord{}, false, fmt.Errorf("%w: project %q is no longer lifetime %s", store.ErrStaleAssignment, name, ref.UID)
+		}
+
+		now := time.Now().UTC()
+		next := copyProjectStatus(project.Status)
+		evidence := "None"
+		if next.Recovery.WorkloadStoppedFor(assignment) {
+			evidence = string(v1.ReleaseByWorkloadStopped)
+		}
+		outcome, err := applyOperatorTakeover(&next, assignment, now)
+		if err != nil {
+			return v1.TakeoverAuditRecord{}, false, fmt.Errorf("project %q: %w", name, err)
+		}
+		record := v1.TakeoverAuditRecord{
+			RequestID:   audit.RequestID,
+			Namespace:   defaultNamespace,
+			ProjectName: name,
+			Assignment:  assignment,
+			Evidence:    evidence,
+			Outcome:     outcome,
+			Caller:      audit.Caller,
+			Note:        audit.Note,
+			CreatedAt:   now,
+		}
+
+		err = s.commitTakeover(ctx, name, project.ObjectMeta.ResourceVersion, ref.UID, next, record)
+		switch {
+		case err == nil:
+			s.publish(event.TopicProjectUpdated, name)
+			return record, false, nil
+		case errors.Is(err, store.ErrVersionConflict):
+			lastConflict = err
+		default:
+			return v1.TakeoverAuditRecord{}, false, err
+		}
+	}
+	return v1.TakeoverAuditRecord{}, false, lastConflict
+}
+
+// commitTakeover writes the audit record and the status in one transaction.
+// ErrVersionConflict means nothing was written and the caller should re-read.
+func (s *Store) commitTakeover(
+	ctx context.Context,
+	name string,
+	expectedVersion int64,
+	uid string,
+	status v1.ProjectStatus,
+	record v1.TakeoverAuditRecord,
+) error {
+	raw, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal project status: %w", err)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin takeover %q: %w", name, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO takeover_audit
+			(request_id, namespace, project_name, project_uid, node_name,
+			 assignment_generation, evidence, outcome, caller, note, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		ON CONFLICT (request_id) DO NOTHING`,
+		record.RequestID, record.Namespace, record.ProjectName, record.Assignment.ProjectUID,
+		record.Assignment.NodeName, record.Assignment.AssignmentGeneration,
+		record.Evidence, string(record.Outcome), record.Caller, record.Note, record.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: record takeover %q: %w", name, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: takeover request %q", store.ErrVersionConflict, record.RequestID)
+	}
+
+	tag, err = tx.Exec(ctx, `
+		UPDATE resources
+		SET phase = $1, status = $2, updated_at = $3, resource_version = resource_version + 1
+		WHERE kind = $4 AND namespace = $5 AND name = $6 AND resource_version = $7 AND uid = $8`,
+		string(status.Phase), raw, record.CreatedAt,
+		kindProject, defaultNamespace, name, expectedVersion, uid,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: update project status %q at version %d: %w", name, expectedVersion, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return s.classifyUIDSwapMiss(ctx, name, uid)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit takeover %q: %w", name, err)
+	}
+	return nil
+}
+
+const takeoverAuditColumns = `request_id, namespace, project_name, project_uid, node_name,
+	assignment_generation, evidence, outcome, caller, note, created_at`
+
+func scanTakeoverAudit(row pgx.Row) (v1.TakeoverAuditRecord, error) {
+	var r v1.TakeoverAuditRecord
+	err := row.Scan(&r.RequestID, &r.Namespace, &r.ProjectName, &r.Assignment.ProjectUID, &r.Assignment.NodeName,
+		&r.Assignment.AssignmentGeneration, &r.Evidence, &r.Outcome, &r.Caller, &r.Note, &r.CreatedAt)
+	return r, err
+}
+
+func (s *Store) takeoverByRequestID(ctx context.Context, requestID string) (v1.TakeoverAuditRecord, bool, error) {
+	r, err := scanTakeoverAudit(s.pool.QueryRow(ctx,
+		`SELECT `+takeoverAuditColumns+` FROM takeover_audit WHERE request_id = $1`, requestID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v1.TakeoverAuditRecord{}, false, nil
+	}
+	if err != nil {
+		return v1.TakeoverAuditRecord{}, false, fmt.Errorf("postgres: get takeover request %q: %w", requestID, err)
+	}
+	return r, true, nil
+}
+
+// ListTakeoverAudit implements store.ProjectStore.
+func (s *Store) ListTakeoverAudit(ctx context.Context, name string) ([]v1.TakeoverAuditRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+takeoverAuditColumns+` FROM takeover_audit
+		WHERE namespace = $1 AND project_name = $2 ORDER BY created_at, id`, defaultNamespace, name)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list takeover audit %q: %w", name, err)
+	}
+	defer rows.Close()
+
+	records := []v1.TakeoverAuditRecord{}
+	for rows.Next() {
+		r, err := scanTakeoverAudit(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: scan takeover audit %q: %w", name, err)
+		}
+		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list takeover audit %q: %w", name, err)
+	}
+	return records, nil
+}

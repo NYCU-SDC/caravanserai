@@ -60,9 +60,11 @@ func (a *ProjectStoreAdapter) GetProjectPlacement(ctx context.Context, name stri
 	if err != nil {
 		return controller.ProjectPlacement{}, err
 	}
+	// A Node still owing cleanup is left out: SetProjectScheduled would refuse
+	// it, and choosing it would stall a Project another Node could host.
 	return controller.ProjectPlacement{
 		Size:          project.Spec.Size,
-		ExcludedNodes: slices.Clone(project.Status.FailedNodes),
+		ExcludedNodes: slices.Concat(project.Status.FailedNodes, project.Status.Recovery.NodesOwingCleanup()),
 	}, nil
 }
 
@@ -102,6 +104,11 @@ func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nod
 		if o := status.Recovery.BlockingObligation(); o != nil {
 			return fmt.Errorf("%w: node %s has not removed the resources of generation %d (released by %s)",
 				store.ErrConflictState, o.Assignment.NodeName, o.Assignment.AssignmentGeneration, o.ReleaseAuthorization)
+		}
+		// An override permits assigning elsewhere, not back to the Node that
+		// owes the cleanup.
+		if slices.Contains(status.Recovery.NodesOwingCleanup(), nodeRef) {
+			return fmt.Errorf("%w: node %s still owes cleanup for this project", store.ErrConflictState, nodeRef)
 		}
 
 		// One increment per real grant. Under OCC the phase read here is the

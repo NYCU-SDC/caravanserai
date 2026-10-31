@@ -287,6 +287,8 @@ All endpoints are under `/api/v1/`.
 | `PATCH` | `/api/v1/projects/{name}/status` | Update project status (agent only) |
 | `PUT` | `/api/v1/projects/{name}/recovery/workload-stopped` | Record that every container is stopped (currently assigned agent only; requires the assignment fence) |
 | `PUT` | `/api/v1/projects/{name}/recovery/resources-removed` | Resolve a cleanup obligation after removing its runtime resources (the obligation's agent only; requires the assignment fence) |
+| `POST` | `/api/v1/projects/{name}/recovery/takeover` | Override the release gate for a Node that will not report back (temporary `OPERATOR_TOKEN` bearer until ADR-0018 is decided; disabled when unset; `caractl takeover`) |
+| `GET` | `/api/v1/projects/{name}/recovery/takeover-audit` | List recorded takeovers of the Project (same temporary token; `caractl takeover-audit`) |
 
 ### Overlay
 

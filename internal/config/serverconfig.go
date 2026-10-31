@@ -62,6 +62,12 @@ type Config struct {
 	// controller's default (10m). It only decides when the stuck deletion is
 	// reported; the record is kept either way.
 	TerminatingTimeout time.Duration `yaml:"terminating_timeout" envconfig:"TERMINATING_TIMEOUT"`
+
+	// OperatorToken is the bearer token the operator takeover routes require.
+	// Temporary: it goes away once ADR-0018 settles API access control, and it
+	// protects no other route.
+	// Empty disables them. There is no flag for it, to keep it out of process lists.
+	OperatorToken string `yaml:"operator_token" envconfig:"OPERATOR_TOKEN"`
 }
 
 // Load reads cara-server config from file → env → flags (later sources win).
@@ -136,6 +142,7 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		HeadscaleAPIKey:  os.Getenv("HEADSCALE_API_KEY"),
 		HeadscaleUser:    os.Getenv("HEADSCALE_USER"),
 		UIDEnforcement:   os.Getenv("UID_ENFORCEMENT") == "true",
+		OperatorToken:    os.Getenv("OPERATOR_TOKEN"),
 	}
 
 	if raw := os.Getenv("TERMINATING_TIMEOUT"); raw != "" {
