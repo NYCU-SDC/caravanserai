@@ -1275,9 +1275,6 @@ type completionRequest struct {
 	Items []v1.BackupCompletionItem `json:"items"`
 }
 
-// backupIDPattern is the form the Agent generates backup IDs in.
-var backupIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`)
-
 // putBackupCompletion handles
 // PUT /api/v1/projects/{name}/backup/completions/{backupID}.
 //
