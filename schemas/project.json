@@ -476,6 +476,13 @@
           "type": "string",
           "description": "Image is the Docker image reference, e.g. \"postgres:15\"."
         },
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Command overrides the image's CMD, as in Docker Compose; the image's\nENTRYPOINT still applies. Empty keeps the image's default."
+        },
         "env": {
           "items": {
             "$ref": "#/$defs/EnvVar"

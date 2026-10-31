@@ -599,3 +599,24 @@ func TestProjectUIDLifecycle(t *testing.T) {
 	// Cleanup.
 	drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+name, nil))
 }
+
+// TestServiceCommandRoundTrip: command survives the API and the JSONB column in
+// order, and an unset one stays unset so the image's default applies.
+func TestServiceCommandRoundTrip(t *testing.T) {
+	const name = "e2e-service-command"
+	drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+name+"?force=true", nil))
+	resp := doRequest(t, http.MethodPost, "/api/v1/projects", mustMarshal(t, v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: name},
+		Spec: v1.ProjectSpec{Services: []v1.ServiceDef{
+			{Name: "job", Image: "busybox:1.36", Command: []string{"sh", "-c", "echo hello"}},
+			{Name: "web", Image: "nginx:alpine"},
+		}},
+	}))
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	drainBody(resp)
+
+	got := getProject(t, name).Spec.Services
+	require.Len(t, got, 2)
+	assert.Equal(t, []string{"sh", "-c", "echo hello"}, got[0].Command)
+	assert.Empty(t, got[1].Command)
+}

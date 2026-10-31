@@ -970,6 +970,7 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 	resp, err := r.client.ContainerCreate(ctx,
 		&container.Config{
 			Image:  svc.Image,
+			Cmd:    svc.Command,
 			Env:    env,
 			Labels: labels,
 		},

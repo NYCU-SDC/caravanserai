@@ -166,6 +166,10 @@ type ServiceDef struct {
 	// Image is the Docker image reference, e.g. "postgres:15".
 	Image string `json:"image" yaml:"image"`
 
+	// Command overrides the image's CMD, as in Docker Compose; the image's
+	// ENTRYPOINT still applies. Empty keeps the image's default.
+	Command []string `json:"command,omitempty" yaml:"command,omitempty"`
+
 	// Env are extra environment variables injected at runtime.
 	Env []EnvVar `json:"env,omitempty" yaml:"env,omitempty"`
 

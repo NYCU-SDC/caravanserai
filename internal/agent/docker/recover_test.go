@@ -47,6 +47,9 @@ type fakeDocker struct {
 	// mutations records every call that changes Docker state, in order.
 	mutations []string
 
+	// commands records the Cmd of every container created, in order.
+	commands [][]string
+
 	// onInspect, when set, runs at the start of every ContainerInspect, so a
 	// test can change what Docker holds between two reads of it.
 	onInspect func(name string)
@@ -112,6 +115,7 @@ func (f *fakeDocker) ContainerCreate(_ context.Context, cfg *container.Config, _
 	var labels map[string]string
 	if cfg != nil {
 		labels = cfg.Labels
+		f.commands = append(f.commands, cfg.Cmd)
 	}
 	f.withContainer(containerName, "created", labels)
 	return container.CreateResponse{ID: fakeID(containerName)}, nil
@@ -464,6 +468,17 @@ func TestRecoverServicesRecreatesAMissingContainer(t *testing.T) {
 		"ContainerCreate:blog-db",
 		"ContainerStart:" + fakeID("blog-db"),
 	}, f.docker.mutations)
+}
+
+func TestCreatedContainerUsesTheServiceCommand(t *testing.T) {
+	f := newRecoverFixture(t, v1.VolumeTypeManaged)
+	f.provisionManaged(t)
+	f.project.Spec.Services[0].Command = []string{"sh", "-c", "echo hello"}
+
+	require.NoError(t, f.runtime.RecoverServices(t.Context(), f.project, []string{"db"}))
+
+	require.Len(t, f.docker.commands, 1)
+	assert.Equal(t, []string{"sh", "-c", "echo hello"}, []string(f.docker.commands[0]))
 }
 
 // A dead container is removed first, then rebuilt. The removal is allowed only
