@@ -28,11 +28,22 @@ var (
 // controller.ReschedulerProjectStore.
 type ProjectStoreAdapter struct {
 	s *pgstore.Store
+
+	// graceExpiredRelease lets a Project with no Managed volume leave a Node
+	// that stayed NotReady past its grace period, with no evidence (ADR-0024).
+	graceExpiredRelease bool
 }
 
 // NewProjectStoreAdapter returns a ProjectStoreAdapter backed by s.
 func NewProjectStoreAdapter(s *pgstore.Store) *ProjectStoreAdapter {
 	return &ProjectStoreAdapter{s: s}
+}
+
+// WithGraceExpiredRelease turns on the ADR-0024 transitional release for
+// Projects with no Managed volume.
+func (a *ProjectStoreAdapter) WithGraceExpiredRelease(enabled bool) *ProjectStoreAdapter {
+	a.graceExpiredRelease = enabled
+	return a
 }
 
 func (a *ProjectStoreAdapter) ListProjectNamesByPhase(ctx context.Context, phase v1.ProjectPhase) ([]string, error) {
@@ -229,7 +240,23 @@ func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controll
 
 		// Assigned on every attempt: the closure may run more than once, and
 		// only the last run's decision is the one committed.
+		authorization := v1.ReleaseByWorkloadStopped
+		reason := "Node went NotReady and confirmed the workload stopped; project released for rescheduling"
 		released = status.Recovery.WorkloadStoppedFor(assignment)
+		if !released && a.graceExpiredRelease {
+			// Read here, after the snapshot this swap is versioned on: a spec
+			// change landing later moves the version, the swap misses, and the
+			// retry reads the new spec.
+			project, err := a.s.GetProject(ctx, p.Name)
+			if err != nil {
+				return err
+			}
+			if !project.Spec.HasManagedVolume() {
+				released = true
+				authorization = v1.ReleaseByGraceExpired
+				reason = "Node stayed NotReady past its grace period and the project has no Managed volume; project released for rescheduling"
+			}
+		}
 		if !released {
 			status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 				Type:   v1.ConditionTypeTakeoverRequired,
@@ -255,7 +282,7 @@ func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controll
 		// The released Node still holds the stopped containers. Recording
 		// that in the same write is what makes the obligation list complete:
 		// no reader can see the assignment gone without its debt recorded.
-		status.EnsureRecovery().AddObligation(assignment, now, v1.ReleaseByWorkloadStopped)
+		status.EnsureRecovery().AddObligation(assignment, now, authorization)
 		// The incident is over for this Project: it is leaving the node that
 		// went NotReady. The outage conditions are scoped to that outage, so
 		// they go with it — carried to the next node, a clock would be read as
@@ -267,7 +294,7 @@ func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controll
 			Type:               v1.ConditionTypePhase,
 			Status:             v1.ConditionTrue,
 			Reason:             "NodeNotReady",
-			Message:            "Node went NotReady and confirmed the workload stopped; project released for rescheduling",
+			Message:            reason,
 			LastTransitionTime: now,
 		}, transitioned)
 		return nil

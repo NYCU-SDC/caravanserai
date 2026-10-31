@@ -534,6 +534,11 @@ const (
 	// without machine evidence. Never fencing or cleanup evidence: the old
 	// Node still owes cleanup if it ever returns.
 	ReleaseByOperatorOverride ReleaseAuthorizationKind = "OperatorOverride"
+	// ReleaseByGraceExpired: the Node stayed NotReady past its grace period and
+	// the Project has no Managed volume, so there is no data to diverge. The
+	// transitional authorization of ADR-0024: a partitioned Node keeps running
+	// its copy until it reconnects. Never evidence the workload stopped.
+	ReleaseByGraceExpired ReleaseAuthorizationKind = "GraceExpired"
 	// ReleaseByLeaseExpired: the Node's lease expired under the self-fencing
 	// contract proposed in ADR-0023. Not implemented yet; never cleanup
 	// evidence.
@@ -618,6 +623,16 @@ func (r *ProjectRecoveryStatus) NodesOwingCleanup() []string {
 	return nodes
 }
 
+// HasManagedVolume reports whether the spec declares a Managed volume.
+func (s ProjectSpec) HasManagedVolume() bool {
+	for _, v := range s.Volumes {
+		if v.Type == VolumeTypeManaged {
+			return true
+		}
+	}
+	return false
+}
+
 // PermitsAssignment reports whether this obligation lets the Project be
 // assigned again. A resolved obligation does. An unresolved one does only when
 // its release was authorized by evidence that the old Node can no longer run
@@ -635,7 +650,7 @@ func (o CleanupObligation) PermitsAssignment() bool {
 		return true
 	}
 	switch o.ReleaseAuthorization {
-	case ReleaseByProviderFencing, ReleaseByOperatorOverride:
+	case ReleaseByProviderFencing, ReleaseByOperatorOverride, ReleaseByGraceExpired:
 		return true
 	default:
 		return false

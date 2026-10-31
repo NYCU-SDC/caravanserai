@@ -223,3 +223,54 @@ func TestOperatorTakeoverUnblocksWorkloadStoppedRelease(t *testing.T) {
 	assert.False(t, got.Status.Recovery.CleanupObligations[0].Resolved())
 	require.NoError(t, stores.SetProjectScheduled(ctx, name, "node-b"))
 }
+
+// TestGraceExpiredRelease: with the ADR-0024 transitional release on, only a
+// Project with no Managed volume leaves on the grace period alone.
+func TestGraceExpiredRelease(t *testing.T) {
+	ctx := context.Background()
+	on := adapter.NewProjectStoreAdapter(suite.store).WithGraceExpiredRelease(true)
+	release := func(s *adapter.ProjectStoreAdapter, p v1.Project) bool {
+		t.Helper()
+		released, err := s.ReleaseAssignment(ctx, &controller.ProjectSnapshot{
+			Name: p.Name, UID: p.ObjectMeta.UID, Phase: p.Status.Phase, NodeRef: p.Status.NodeRef, AssignmentGeneration: p.Status.AssignmentGeneration,
+		})
+		require.NoError(t, err)
+		return released
+	}
+
+	p := createAssignedProject(t, "e2e-grace-off", false)
+	assert.False(t, release(adapter.NewProjectStoreAdapter(suite.store), p), "off by default")
+	assert.Equal(t, "node-a", getProject(t, p.Name).Status.NodeRef)
+
+	p = createAssignedProject(t, "e2e-grace-stateless", false)
+	require.True(t, release(on, p))
+	got := getProject(t, p.Name)
+	assert.Equal(t, v1.ProjectPhasePending, got.Status.Phase)
+	assert.Nil(t, got.Status.Recovery.WorkloadStopped, "the grace period is not evidence the workload stopped")
+	require.Len(t, got.Status.Recovery.CleanupObligations, 1)
+	o := got.Status.Recovery.CleanupObligations[0]
+	assert.Equal(t, v1.ReleaseByGraceExpired, o.ReleaseAuthorization)
+	assert.False(t, o.Resolved(), "the old Node still owes cleanup")
+	require.ErrorIs(t, on.SetProjectScheduled(ctx, p.Name, "node-a"), store.ErrConflictState, "not back to the Node that owes cleanup")
+	require.NoError(t, on.SetProjectScheduled(ctx, p.Name, "node-b"))
+
+	const managed = "e2e-grace-managed"
+	drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+managed+"?force=true", nil))
+	resp := doRequest(t, http.MethodPost, "/api/v1/projects", mustMarshal(t, v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: managed},
+		Spec: v1.ProjectSpec{
+			Services: []v1.ServiceDef{{Name: "web", Image: "nginx:alpine", VolumeMounts: []v1.VolumeMount{{Name: "data", MountPath: "/data"}}}},
+			Volumes:  []v1.VolumeDef{{Name: "data", Type: v1.VolumeTypeManaged}},
+		},
+	}))
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	drainBody(resp)
+	require.NoError(t, on.SetProjectScheduled(ctx, managed, "node-a"))
+	require.NoError(t, suite.store.UpdateProjectStatusWithRetry(ctx, managed, func(s *v1.ProjectStatus) error {
+		s.Phase = v1.ProjectPhaseRunning
+		return nil
+	}))
+	assert.False(t, release(on, getProject(t, managed)), "Managed data needs evidence or an override")
+	got = getProject(t, managed)
+	assert.Equal(t, "node-a", got.Status.NodeRef)
+}

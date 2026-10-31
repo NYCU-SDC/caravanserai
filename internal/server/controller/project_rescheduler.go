@@ -139,6 +139,7 @@ type ProjectReschedulerController struct {
 	seedInterval time.Duration
 
 	terminatingTimeout time.Duration
+	runningGrace       time.Duration
 }
 
 // NewProjectReschedulerController creates a ProjectReschedulerController.
@@ -159,6 +160,10 @@ func NewProjectReschedulerController(
 	if timeout <= 0 {
 		timeout = terminatingTimeout
 	}
+	grace := o.runningGracePeriod
+	if grace <= 0 {
+		grace = runningGracePeriod
+	}
 	return &ProjectReschedulerController{
 		logger:       logger,
 		projects:     projects,
@@ -168,6 +173,7 @@ func NewProjectReschedulerController(
 		seedInterval: interval,
 
 		terminatingTimeout: timeout,
+		runningGrace:       grace,
 	}
 }
 
@@ -495,8 +501,8 @@ func (c *ProjectReschedulerController) handleRunning(
 	}
 
 	elapsed := c.clock.Since(notReadyAt)
-	if elapsed < runningGracePeriod {
-		remaining := runningGracePeriod - elapsed
+	if elapsed < c.runningGrace {
+		remaining := c.runningGrace - elapsed
 		log.Info("Running project waiting for grace period",
 			zap.Duration("elapsed", elapsed),
 			zap.Duration("remaining", remaining),
@@ -507,7 +513,7 @@ func (c *ProjectReschedulerController) handleRunning(
 	// Grace period exceeded — release the assignment if that is authorized.
 	log.Info("Running grace period exceeded, releasing project",
 		zap.Duration("elapsed", elapsed),
-		zap.Duration("gracePeriod", runningGracePeriod),
+		zap.Duration("gracePeriod", c.runningGrace),
 	)
 	return false, c.release(ctx, log, p)
 }

@@ -63,6 +63,17 @@ type Config struct {
 	// reported; the record is kept either way.
 	TerminatingTimeout time.Duration `yaml:"terminating_timeout" envconfig:"TERMINATING_TIMEOUT"`
 
+	// RunningGracePeriod is how long a Running Project may stay on a NotReady
+	// Node before its release is attempted. Zero means the controller's default
+	// (3m).
+	RunningGracePeriod time.Duration `yaml:"running_grace_period" envconfig:"RUNNING_GRACE_PERIOD"`
+
+	// GraceExpiredRelease moves a Project with no Managed volume off a Node that
+	// stayed NotReady past the grace period, with no proof it stopped. A
+	// partitioned Node keeps its copy running until it reconnects (ADR-0024).
+	// Requires UIDEnforcement, so the returning Agent's stale writes are refused.
+	GraceExpiredRelease bool `yaml:"grace_expired_release" envconfig:"GRACE_EXPIRED_RELEASE"`
+
 	// OperatorToken is the bearer token the operator takeover routes require.
 	// Temporary: it goes away once ADR-0018 settles API access control, and it
 	// protects no other route.
@@ -129,20 +140,29 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 	}
 
 	envConfig := &Config{
-		Debug:            os.Getenv("DEBUG") == "true",
-		Host:             os.Getenv("HOST"),
-		Port:             os.Getenv("PORT"),
-		OtelCollectorUrl: os.Getenv("OTEL_COLLECTOR_URL"),
-		DatabaseURL:      os.Getenv("DATABASE_URL"),
-		HeadscaleURL:     os.Getenv("HEADSCALE_URL"),
-		PreauthKeyFile:   os.Getenv("HEADSCALE_PREAUTH_KEY_FILE"),
-		OverlayHostname:  os.Getenv("OVERLAY_HOSTNAME"),
-		OverlayStateDir:  os.Getenv("OVERLAY_STATE_DIR"),
-		HeadscaleAPIURL:  os.Getenv("HEADSCALE_API_URL"),
-		HeadscaleAPIKey:  os.Getenv("HEADSCALE_API_KEY"),
-		HeadscaleUser:    os.Getenv("HEADSCALE_USER"),
-		UIDEnforcement:   os.Getenv("UID_ENFORCEMENT") == "true",
-		OperatorToken:    os.Getenv("OPERATOR_TOKEN"),
+		Debug:               os.Getenv("DEBUG") == "true",
+		Host:                os.Getenv("HOST"),
+		Port:                os.Getenv("PORT"),
+		OtelCollectorUrl:    os.Getenv("OTEL_COLLECTOR_URL"),
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		HeadscaleURL:        os.Getenv("HEADSCALE_URL"),
+		PreauthKeyFile:      os.Getenv("HEADSCALE_PREAUTH_KEY_FILE"),
+		OverlayHostname:     os.Getenv("OVERLAY_HOSTNAME"),
+		OverlayStateDir:     os.Getenv("OVERLAY_STATE_DIR"),
+		HeadscaleAPIURL:     os.Getenv("HEADSCALE_API_URL"),
+		HeadscaleAPIKey:     os.Getenv("HEADSCALE_API_KEY"),
+		HeadscaleUser:       os.Getenv("HEADSCALE_USER"),
+		UIDEnforcement:      os.Getenv("UID_ENFORCEMENT") == "true",
+		OperatorToken:       os.Getenv("OPERATOR_TOKEN"),
+		GraceExpiredRelease: os.Getenv("GRACE_EXPIRED_RELEASE") == "true",
+	}
+
+	if raw := os.Getenv("RUNNING_GRACE_PERIOD"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil {
+			envConfig.RunningGracePeriod = d
+		} else {
+			logger.Warn("Invalid RUNNING_GRACE_PERIOD, ignoring", err, map[string]string{"value": raw})
+		}
 	}
 
 	if raw := os.Getenv("TERMINATING_TIMEOUT"); raw != "" {
@@ -172,6 +192,8 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.StringVar(&flagConfig.HeadscaleUser, "headscale-user", "", "Headscale user new pre-auth keys are created under (default: cara-node)")
 	flag.BoolVar(&flagConfig.UIDEnforcement, "uid-enforcement", false, "enforce Project UID and assignment-generation fencing (default: false, compatibility mode)")
 	flag.DurationVar(&flagConfig.TerminatingTimeout, "terminating-timeout", 0, "how long a Terminating project's node may be NotReady before the deletion is reported blocked (default: 10m)")
+	flag.DurationVar(&flagConfig.RunningGracePeriod, "running-grace-period", 0, "how long a Running Project may stay on a NotReady node before its release is attempted (default: 3m)")
+	flag.BoolVar(&flagConfig.GraceExpiredRelease, "grace-expired-release", false, "move Projects with no Managed volume off a node that stayed NotReady past the grace period (requires uid-enforcement)")
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)
 }
