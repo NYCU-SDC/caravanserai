@@ -103,6 +103,11 @@ func waitForProject(ctx context.Context, client *Client, name string, progress i
 	for {
 		project, err := client.GetProject(ctx, name)
 		if err != nil {
+			// The deadline can land during the read as easily as between reads,
+			// and the reason the Project was waiting is what the caller needs.
+			if ctx.Err() != nil && last != "" {
+				return fmt.Errorf("timed out waiting for project %q: %s", name, last)
+			}
 			return fmt.Errorf("wait for project %q: %w", name, err)
 		}
 		state := string(project.Status.Phase)
@@ -123,7 +128,7 @@ func waitForProject(ctx context.Context, client *Client, name string, progress i
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for project %q: %s", name, state)
+			return fmt.Errorf("timed out waiting for project %q: %s", name, last)
 		case <-time.After(interval):
 		}
 	}
