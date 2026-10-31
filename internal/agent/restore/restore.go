@@ -27,18 +27,12 @@ import (
 // disk.
 const defaultMaxExtractedBytes int64 = 64 << 30 // 64 GiB
 
-// ErrNeverBackedUp is returned when a Project has no `latest.json` at all:
-// nothing has ever been backed up under this name. This is a normal state for
-// a new Project, and the caller may respond by initialising empty volumes when
-// the spec allows it.
-var ErrNeverBackedUp = errors.New("restore: project has never been backed up")
-
 // ErrGenerationMissing is returned when a generation that should exist does
-// not — most often a `latest.json` pointing at a manifest that is gone.
+// not — most often a committed backup whose manifest is gone.
 //
-// This must never be confused with ErrNeverBackedUp. Backups demonstrably
-// exist for this Project, so starting it on empty volumes would present real
-// data loss as a successful restore. The correct response is to fail loudly.
+// Backups demonstrably exist for this Project, so starting it on empty volumes
+// would present real data loss as a successful restore. The correct response
+// is to fail loudly.
 var ErrGenerationMissing = errors.New("restore: backup generation is missing")
 
 // ErrManifestMismatch is returned when a generation does not contain a volume
@@ -143,52 +137,11 @@ func freeBytesOn(path string) (uint64, error) {
 	return stat.Bavail * uint64(stat.Bsize), nil
 }
 
-// ResolveLatest reads a Project's latest.json and returns the backupID it
-// points at.
-//
-// This is deliberately separate from RestoreGeneration. The core restore
-// operation names an explicit generation; "which one is newest" is a question
-// answered before it, exactly as `restic restore latest` resolves the word
-// latest to a snapshot ID before restoring. Keeping the two apart is what
-// lets an operator-initiated rollback reuse the whole restore path by simply
-// supplying a different backupID.
-//
-// Returns ErrNeverBackedUp when the Project has no latest.json at all.
-func (r *Restorer) ResolveLatest(ctx context.Context, namespace, project string) (string, error) {
-	key, err := backup.LatestKey(namespace, project)
-	if err != nil {
-		return "", err
-	}
-
-	body, _, err := r.store.Get(ctx, key)
-	if err != nil {
-		if errors.Is(err, objectstore.ErrNotFound) {
-			return "", ErrNeverBackedUp
-		}
-		return "", fmt.Errorf("restore: read latest pointer: %w", err)
-	}
-	defer func() { _ = body.Close() }()
-
-	raw, err := io.ReadAll(body)
-	if err != nil {
-		return "", fmt.Errorf("restore: read latest pointer: %w", err)
-	}
-
-	latest, err := backup.UnmarshalLatest(raw)
-	if err != nil {
-		return "", err
-	}
-	if latest.BackupID == "" {
-		return "", fmt.Errorf("restore: latest pointer for %s/%s names no generation", namespace, project)
-	}
-	return latest.BackupID, nil
-}
-
 // FetchManifest reads one generation's manifest.
 //
-// A missing manifest returns ErrGenerationMissing, never ErrNeverBackedUp:
-// reaching this function means something already named a generation, so its
-// absence is a fault to surface rather than grounds to start empty.
+// A missing manifest returns ErrGenerationMissing: reaching this function means
+// something already named a generation, so its absence is a fault to surface
+// rather than grounds to start empty.
 func (r *Restorer) FetchManifest(ctx context.Context, namespace, project, backupID string) (backup.Manifest, error) {
 	key, err := backup.ManifestKey(namespace, project, backupID)
 	if err != nil {
@@ -223,8 +176,8 @@ func (r *Restorer) FetchManifest(ctx context.Context, namespace, project, backup
 //  3. only then swap the staged directories into place, rolling back the
 //     already-swapped ones if any swap fails
 //
-// backupID is explicit rather than implied. Callers restoring the newest
-// generation resolve it with ResolveLatest first.
+// backupID is explicit rather than implied: the server decides the restore
+// source, and an operator-initiated rollback could supply another generation.
 func (r *Restorer) RestoreGeneration(ctx context.Context, project *v1.Project, backupID string) error {
 	namespace, name := project.Namespace, project.Name
 	log := r.logger.With(

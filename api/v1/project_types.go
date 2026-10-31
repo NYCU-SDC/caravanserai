@@ -517,6 +517,32 @@ type ProjectRecoveryStatus struct {
 	// Terminating, so the list is the complete set of Nodes that may still
 	// hold resources. Final deletion requires every entry to be resolved.
 	CleanupObligations []CleanupObligation `json:"cleanupObligations,omitempty" yaml:"cleanupObligations,omitempty"`
+
+	// CommittedBackup is the generation a new placement restores from
+	// (ADR-0024 C1). Only the assignment current at the time can set it, so once
+	// an assignment is released its Agent can no longer change where the next
+	// one restores from, even if it can still reach the object store. A new
+	// assignment keeps it. Nil means no backup has ever been committed.
+	CommittedBackup *CommittedBackup `json:"committedBackup,omitempty" yaml:"committedBackup,omitempty"`
+}
+
+// CommittedBackup records one backup generation accepted as the restore source.
+type CommittedBackup struct {
+	// BackupID names the generation in the object store.
+	BackupID string `json:"backupID" yaml:"backupID"`
+	// Assignment is the assignment that produced and committed it.
+	Assignment AssignmentIdentity `json:"assignment" yaml:"assignment"`
+	// CommittedAt is when the server accepted it.
+	CommittedAt time.Time `json:"committedAt" yaml:"committedAt"`
+}
+
+// CommittedBackupID returns the generation a new placement restores from, or
+// "" if no backup has been committed. It is safe on a nil receiver.
+func (r *ProjectRecoveryStatus) CommittedBackupID() string {
+	if r == nil || r.CommittedBackup == nil {
+		return ""
+	}
+	return r.CommittedBackup.BackupID
 }
 
 // ReleaseAuthorizationKind records what permitted an assignment to be given
@@ -766,6 +792,10 @@ func (r *ProjectRecoveryStatus) DeepCopy() *ProjectRecoveryStatus {
 	if r.WorkloadStopped != nil {
 		ws := *r.WorkloadStopped
 		out.WorkloadStopped = &ws
+	}
+	if r.CommittedBackup != nil {
+		cb := *r.CommittedBackup
+		out.CommittedBackup = &cb
 	}
 	if r.CleanupObligations != nil {
 		out.CleanupObligations = make([]CleanupObligation, len(r.CleanupObligations))

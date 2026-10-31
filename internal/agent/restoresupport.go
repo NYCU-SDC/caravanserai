@@ -85,40 +85,32 @@ func ensureVolumeData(
 	}
 }
 
-// runRestore resolves the newest generation and puts it on disk.
+// runRestore puts the generation the server committed on disk. It reads that
+// from the Project rather than from the object store, which any Agent that can
+// reach the bucket could write to (ADR-0024 C1).
 //
 // It is reached only when Decide has established that this node has no local
 // data it may use, so every way of failing to produce a generation here leaves
 // the Project with nothing — and none of them may be answered by creating
 // empty directories and calling that a successful start.
 func runRestore(ctx context.Context, restorer *restore.Restorer, p *v1.Project, log *zap.Logger) error {
-	backupID, err := restorer.ResolveLatest(ctx, p.Namespace, p.Name)
-	switch {
-	case err == nil:
-		log.Info("Restoring volumes from generation", zap.String("backupID", backupID))
-		return restorer.RestoreGeneration(ctx, p, backupID)
-
-	case errors.Is(err, restore.ErrNeverBackedUp):
-		// "No latest.json" used to be read as "this Project has never held
-		// data", and the response was to start empty. That inference only
-		// holds for a Project that has never been placed anywhere, and Decide
-		// has already handled that case by returning DecisionInitializeEmpty
-		// before anything reached the object store.
+	backupID := p.Status.Recovery.CommittedBackupID()
+	if backupID == "" {
+		// This inference only holds in one direction: a Project that has never
+		// been placed anywhere has nothing to lose, and Decide has already
+		// handled that case by returning DecisionInitializeEmpty.
 		//
 		// Arriving here means the opposite: this Project has been placed
-		// before, or a restore was already in flight. A missing pointer is
-		// then a fault — a bucket typo, an object-store outage, a backup that
-		// never actually completed — and starting empty would present it as a
-		// successful deployment, then let the Backup Supervisor archive the
-		// empty result over the generation that held the real data.
+		// before, or a restore was already in flight. Starting empty would
+		// present that as a successful deployment, then let the Backup
+		// Supervisor commit the empty result as the restore source.
 		return &restore.PlacementBlockedError{
 			Reason: restore.BlockNoRestoreSource,
-			Detail: "this Project has been placed before, but the object store holds no complete backup to restore from",
+			Detail: "this Project has been placed before, but the server has no committed backup to restore from",
 		}
-
-	default:
-		return err
 	}
+	log.Info("Restoring volumes from generation", zap.String("backupID", backupID))
+	return restorer.RestoreGeneration(ctx, p, backupID)
 }
 
 // decideRestore gathers the facts the decision rests on and applies the rule.

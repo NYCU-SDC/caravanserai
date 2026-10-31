@@ -14,6 +14,11 @@ func fullRecoveryStatus() *ProjectRecoveryStatus {
 	attempt := time.Date(2026, 10, 3, 9, 0, 0, 123456789, time.UTC)
 	healthy := time.Date(2026, 10, 3, 9, 5, 0, 0, time.UTC)
 	return &ProjectRecoveryStatus{
+		CommittedBackup: &CommittedBackup{
+			BackupID:    "20261031T000000Z-aaaaaaaa",
+			Assignment:  AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-b", AssignmentGeneration: 7},
+			CommittedAt: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC),
+		},
 		RescheduleAttempts:     2,
 		LastAttemptAt:          &attempt,
 		HealthySince:           &healthy,

@@ -14,6 +14,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/store"
 
 	"github.com/NYCU-SDC/summer/pkg/problem"
+	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 )
 
@@ -121,6 +122,35 @@ func (f *fenceFakeStore) FinalizeProject(_ context.Context, name, uid string, bl
 	}
 	f.deleteCalls++
 	return nil
+}
+
+// The fence and the shape of the ID are both checked before the store is asked.
+func TestPutCommittedBackupValidatesItsRequest(t *testing.T) {
+	const valid = `"backupID":"20261031T000000Z-aaaaaaaa"`
+	fence := `"uid":"uid-1","nodeRef":"node-a","assignmentGeneration":5`
+
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"missing fence", `{` + valid + `}`, http.StatusConflict},
+		{"empty ID", `{` + fence + `,"backupID":""}`, http.StatusBadRequest},
+		{"path in ID", `{` + fence + `,"backupID":"../../other"}`, http.StatusBadRequest},
+		{"not JSON", `nope`, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &fenceFakeStore{}
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/projects/demo/recovery/committed-backup", strings.NewReader(tc.body))
+			req.SetPathValue("name", "demo")
+			rec := httptest.NewRecorder()
+
+			newFenceHandler(s).putCommittedBackup(rec, req)
+
+			assert.Equal(t, tc.want, rec.Code, rec.Body.String())
+			assert.Zero(t, s.fencedStatusCalls)
+		})
+	}
 }
 
 func newFenceHandler(s store.ProjectStore) *Handler {

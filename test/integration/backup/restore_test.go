@@ -64,8 +64,7 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	require.NoError(t, os.RemoveAll(filepath.Join(h.dataRoot, "volumes", "default", "e2e-roundtrip")))
 
 	restorer := newRestorer(t, h.dataRoot)
-	backupID, err := restorer.ResolveLatest(ctx, "default", "e2e-roundtrip")
-	require.NoError(t, err)
+	backupID := h.committer.last(t)
 	require.NotEmpty(t, backupID)
 
 	require.NoError(t, restorer.RestoreGeneration(ctx, h.project, backupID))
@@ -105,8 +104,7 @@ func TestRestoreReplacesExistingVolumeData(t *testing.T) {
 	writeVolumeFile(t, h.dataRoot, "e2e-replace", "db-data", "later.txt", "written after the backup")
 
 	restorer := newRestorer(t, h.dataRoot)
-	backupID, err := restorer.ResolveLatest(ctx, "default", "e2e-replace")
-	require.NoError(t, err)
+	backupID := h.committer.last(t)
 	require.NoError(t, restorer.RestoreGeneration(ctx, h.project, backupID))
 
 	assert.Equal(t, "from the generation", readVolumeFile(t, h.dataRoot, "e2e-replace", "db-data", "kept.txt"))
@@ -119,7 +117,7 @@ func TestRestoreReplacesExistingVolumeData(t *testing.T) {
 
 // TestRestoreToOlderGeneration is the operator rollback path: two generations
 // exist, and naming the older one explicitly must bring back its contents even
-// though a newer one is what latest.json points at.
+// though a newer one is committed.
 func TestRestoreToOlderGeneration(t *testing.T) {
 	h := newRunnerHarness(t, "e2e-rollback", "db-data")
 	ctx := context.Background()
@@ -127,37 +125,16 @@ func TestRestoreToOlderGeneration(t *testing.T) {
 
 	writeVolumeFile(t, h.dataRoot, "e2e-rollback", "db-data", "state.txt", "generation one")
 	require.NoError(t, h.runner.Run(ctx, h.project))
-	first, err := restorer.ResolveLatest(ctx, "default", "e2e-rollback")
-	require.NoError(t, err)
+	first := h.committer.last(t)
 
 	writeVolumeFile(t, h.dataRoot, "e2e-rollback", "db-data", "state.txt", "generation two")
 	require.NoError(t, h.runner.Run(ctx, h.project))
-	second, err := restorer.ResolveLatest(ctx, "default", "e2e-rollback")
-	require.NoError(t, err)
+	second := h.committer.last(t)
 	require.NotEqual(t, first, second, "the second run must produce a distinct generation")
 
 	require.NoError(t, restorer.RestoreGeneration(ctx, h.project, first))
 	assert.Equal(t, "generation one", readVolumeFile(t, h.dataRoot, "e2e-rollback", "db-data", "state.txt"))
 
-	// latest.json is untouched by a restore: rolling back does not rewrite
-	// history, so the next backup still builds on the newest generation.
-	stillLatest, err := restorer.ResolveLatest(ctx, "default", "e2e-rollback")
-	require.NoError(t, err)
-	assert.Equal(t, second, stillLatest)
-}
-
-// TestResolveLatestOnUnknownProject distinguishes the two absences that must
-// never be confused: a Project with no backups at all may start empty, while
-// a named generation that has gone missing must fail loudly.
-func TestResolveLatestOnUnknownProject(t *testing.T) {
-	restorer := newRestorer(t, t.TempDir())
-	ctx := context.Background()
-
-	_, err := restorer.ResolveLatest(ctx, "default", "e2e-never-backed-up")
-	assert.ErrorIs(t, err, restore.ErrNeverBackedUp)
-
-	_, err = restorer.FetchManifest(ctx, "default", "e2e-never-backed-up", "20260101T000000Z")
-	assert.ErrorIs(t, err, restore.ErrGenerationMissing)
 }
 
 // TestRestoreDetectsCorruptedArchive proves the checksum in the manifest is
@@ -172,8 +149,7 @@ func TestRestoreDetectsCorruptedArchive(t *testing.T) {
 	require.NoError(t, h.runner.Run(ctx, h.project))
 
 	restorer := newRestorer(t, h.dataRoot)
-	backupID, err := restorer.ResolveLatest(ctx, "default", "e2e-corrupt")
-	require.NoError(t, err)
+	backupID := h.committer.last(t)
 
 	manifest, err := restorer.FetchManifest(ctx, "default", "e2e-corrupt", backupID)
 	require.NoError(t, err)

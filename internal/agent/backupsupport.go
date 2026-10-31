@@ -39,6 +39,15 @@ func (c conditionReporter) ClearMaintenance(ctx context.Context, key backup.Reso
 	return c.client.ClearProjectCondition(ctx, key.Name, fence, v1.ConditionTypeMaintenance)
 }
 
+// backupCommitter adapts Client to backup.BackupCommitter.
+type backupCommitter struct {
+	client *Client
+}
+
+func (c backupCommitter) CommitBackup(ctx context.Context, key backup.ResourceKey, uid, nodeRef string, generation int64, backupID string) error {
+	return c.client.CommitBackup(ctx, key.Name, AssignmentFence{UID: uid, NodeRef: nodeRef, Generation: generation}, backupID)
+}
+
 // restoreTimeout bounds a single Project's restore. Generous, because it
 // covers downloading and extracting every Managed volume the Project owns over
 // whatever link the node has; the point is only to stop a stalled transfer from
@@ -97,6 +106,7 @@ func NewBackupSupport(
 		store,
 		NewOwnershipResolver(client, cfg.NodeName, logger),
 		conditionReporter{client: client},
+		backupCommitter{client: client},
 		NewRouteRefresher(runtime, routes, logger),
 		backup.Config{
 			DataRoot:     cfg.DataRoot,

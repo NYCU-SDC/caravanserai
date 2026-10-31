@@ -54,8 +54,26 @@ type runnerHarness struct {
 	runner     *agentbackup.Runner
 	store      objectstore.ObjectStore
 	containers *recordingContainers
+	committer  *recordingCommitter
 	project    *v1.Project
 	dataRoot   string
+}
+
+// recordingCommitter stands in for the server's committed-backup endpoint.
+type recordingCommitter struct {
+	ids []string
+}
+
+func (c *recordingCommitter) CommitBackup(_ context.Context, _ agentbackup.ResourceKey, _, _ string, _ int64, backupID string) error {
+	c.ids = append(c.ids, backupID)
+	return nil
+}
+
+// last returns the most recently committed generation.
+func (c *recordingCommitter) last(t *testing.T) string {
+	t.Helper()
+	require.NotEmpty(t, c.ids, "no generation was committed")
+	return c.ids[len(c.ids)-1]
 }
 
 // newRunnerHarness builds a Runner writing to the real MinIO container, with
@@ -83,17 +101,18 @@ func newRunnerHarness(t *testing.T, projectName string, volumes ...string) *runn
 	}
 
 	containers := &recordingContainers{}
+	committer := &recordingCommitter{}
 	store := newStore(t)
 
 	runner := agentbackup.NewRunner(
 		agentbackup.NewCoordinator(), containers, store,
-		retainedOwnership{}, noopConditions{}, nil,
+		retainedOwnership{}, noopConditions{}, committer, nil,
 		agentbackup.Config{DataRoot: dataRoot, NodeName: "node-a", CaraVersion: "e2e"},
 		zap.NewNop(),
 	)
 
 	return &runnerHarness{
-		runner: runner, store: store, containers: containers,
+		runner: runner, store: store, containers: containers, committer: committer,
 		project: project, dataRoot: dataRoot,
 	}
 }
@@ -112,7 +131,7 @@ func readJSON(t *testing.T, store objectstore.ObjectStore, key string) []byte {
 
 // TestBackupWritesOneGenerationToMinio is the end-to-end shape of a backup:
 // every Managed volume captured under one backupID, a manifest describing
-// them, and only then the pointer a restore reads.
+// them, and only then the commit a restore reads.
 func TestBackupWritesOneGenerationToMinio(t *testing.T) {
 	h := newRunnerHarness(t, "e2e-generation", "db-data", "uploads")
 	ctx := context.Background()
@@ -122,16 +141,14 @@ func TestBackupWritesOneGenerationToMinio(t *testing.T) {
 	assert.Equal(t, []string{"stop", "start"}, h.containers.calls,
 		"the project must be quiesced for the archive and brought back after")
 
-	latestKey, err := agentbackup.LatestKey("default", "e2e-generation")
-	require.NoError(t, err)
-	latest, err := agentbackup.UnmarshalLatest(readJSON(t, h.store, latestKey))
-	require.NoError(t, err)
-	assert.NotEmpty(t, latest.BackupID)
+	committed := h.committer.last(t)
 
-	// The pointer must reference a manifest that exists.
-	manifest, err := agentbackup.UnmarshalManifest(readJSON(t, h.store, latest.ManifestKey))
+	// The commit must name a manifest that exists.
+	manifestKey, err := agentbackup.ManifestKey("default", "e2e-generation", committed)
 	require.NoError(t, err)
-	assert.Equal(t, latest.BackupID, manifest.BackupID)
+	manifest, err := agentbackup.UnmarshalManifest(readJSON(t, h.store, manifestKey))
+	require.NoError(t, err)
+	assert.Equal(t, committed, manifest.BackupID)
 	assert.Equal(t, "node-a", manifest.SourceNode)
 	assert.Equal(t, int64(5), manifest.ProjectResourceVersion)
 	assert.Equal(t, "tar-offline", manifest.BackupMethod)
@@ -149,11 +166,11 @@ func TestBackupWritesOneGenerationToMinio(t *testing.T) {
 	}
 }
 
-// TestBackupLeavesNoLatestPointerWhenAVolumeFails is the cross-volume
+// TestBackupCommitsNothingWhenAVolumeFails is the cross-volume
 // atomicity guarantee. If any volume cannot be captured, the whole generation
 // is abandoned: a restore must never pair one volume's new archive with
 // another's old one.
-func TestBackupLeavesNoLatestPointerWhenAVolumeFails(t *testing.T) {
+func TestBackupCommitsNothingWhenAVolumeFails(t *testing.T) {
 	h := newRunnerHarness(t, "e2e-atomicity", "db-data", "uploads")
 	ctx := context.Background()
 
@@ -166,11 +183,7 @@ func TestBackupLeavesNoLatestPointerWhenAVolumeFails(t *testing.T) {
 	err := h.runner.Run(ctx, h.project)
 	require.Error(t, err)
 
-	latestKey, keyErr := agentbackup.LatestKey("default", "e2e-atomicity")
-	require.NoError(t, keyErr)
-	_, headErr := h.store.Head(ctx, latestKey)
-	assert.ErrorIs(t, headErr, objectstore.ErrNotFound,
-		"latest.json must not exist when the generation was abandoned")
+	assert.Empty(t, h.committer.ids, "nothing may be committed when the generation was abandoned")
 
 	// No manifest may be written for an incomplete generation either.
 	prefix, prefixErr := agentbackup.ProjectPrefix("default", "e2e-atomicity")
@@ -186,33 +199,29 @@ func TestBackupLeavesNoLatestPointerWhenAVolumeFails(t *testing.T) {
 		"a failed backup must still bring the service back")
 }
 
-// TestBackupDoesNotAdvanceLatestOnFailure is the guarantee that protects an
+// TestBackupDoesNotCommitOnFailure is the guarantee that protects an
 // existing restore point: a later run that fails must leave the previous
 // generation current.
-func TestBackupDoesNotAdvanceLatestOnFailure(t *testing.T) {
+func TestBackupDoesNotCommitOnFailure(t *testing.T) {
 	h := newRunnerHarness(t, "e2e-no-regress", "db-data")
 	ctx := context.Background()
 
 	// First run succeeds and establishes a restore point.
 	require.NoError(t, h.runner.Run(ctx, h.project))
 
-	latestKey, err := agentbackup.LatestKey("default", "e2e-no-regress")
-	require.NoError(t, err)
-	firstLatest, err := agentbackup.UnmarshalLatest(readJSON(t, h.store, latestKey))
-	require.NoError(t, err)
+	first := h.committer.last(t)
 
-	// Second run fails after the pointer already exists.
+	// Second run fails after a restore point already exists.
 	require.NoError(t, os.RemoveAll(
 		filepath.Join(h.dataRoot, "volumes", "default", "e2e-no-regress", "db-data")))
 	require.Error(t, h.runner.Run(ctx, h.project))
 
-	secondLatest, err := agentbackup.UnmarshalLatest(readJSON(t, h.store, latestKey))
-	require.NoError(t, err)
-	assert.Equal(t, firstLatest.BackupID, secondLatest.BackupID,
-		"a failed run must leave the previous generation current")
+	assert.Equal(t, first, h.committer.last(t), "a failed run must leave the previous generation current")
 
-	// And the generation it points at is still fully intact.
-	manifest, err := agentbackup.UnmarshalManifest(readJSON(t, h.store, secondLatest.ManifestKey))
+	// And that generation is still fully intact.
+	manifestKey, err := agentbackup.ManifestKey("default", "e2e-no-regress", first)
+	require.NoError(t, err)
+	manifest, err := agentbackup.UnmarshalManifest(readJSON(t, h.store, manifestKey))
 	require.NoError(t, err)
 	for _, vol := range manifest.Volumes {
 		_, headErr := h.store.Head(ctx, vol.ArchiveKey)
@@ -228,7 +237,7 @@ func TestBackupRefusedWithoutObjectStore(t *testing.T) {
 
 	runner := agentbackup.NewRunner(
 		agentbackup.NewCoordinator(), h.containers, nil,
-		retainedOwnership{}, noopConditions{}, nil,
+		retainedOwnership{}, noopConditions{}, h.committer, nil,
 		agentbackup.Config{DataRoot: h.dataRoot, NodeName: "node-a", CaraVersion: "e2e"},
 		zap.NewNop(),
 	)
@@ -248,11 +257,9 @@ func TestBackupArchiveContainsVolumeData(t *testing.T) {
 
 	require.NoError(t, h.runner.Run(ctx, h.project))
 
-	latestKey, err := agentbackup.LatestKey("default", "e2e-contents")
+	manifestKey, err := agentbackup.ManifestKey("default", "e2e-contents", h.committer.last(t))
 	require.NoError(t, err)
-	latest, err := agentbackup.UnmarshalLatest(readJSON(t, h.store, latestKey))
-	require.NoError(t, err)
-	manifest, err := agentbackup.UnmarshalManifest(readJSON(t, h.store, latest.ManifestKey))
+	manifest, err := agentbackup.UnmarshalManifest(readJSON(t, h.store, manifestKey))
 	require.NoError(t, err)
 	require.Len(t, manifest.Volumes, 1)
 

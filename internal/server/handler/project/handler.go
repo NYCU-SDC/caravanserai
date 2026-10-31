@@ -12,6 +12,7 @@
 //	DELETE /api/v1/projects/{name}/conditions/{type}  — Agent clears one condition
 //	PUT    /api/v1/projects/{name}/recovery/workload-stopped   — assigned Agent records that every container is stopped
 //	PUT    /api/v1/projects/{name}/recovery/resources-removed  — cleanup owner records that its resources are removed
+//	PUT    /api/v1/projects/{name}/recovery/committed-backup   — assigned Agent makes a backup the restore source
 //	POST   /api/v1/projects/{name}/recovery/takeover           — operator overrides the release gate (operator token)
 //	GET    /api/v1/projects/{name}/recovery/takeover-audit     — recorded takeovers of the Project (operator token)
 package project
@@ -22,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -78,6 +80,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("DELETE /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.deleteCondition))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/workload-stopped", mid.HandlerFunc(h.putWorkloadStopped))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/resources-removed", mid.HandlerFunc(h.putResourcesRemoved))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/committed-backup", mid.HandlerFunc(h.putCommittedBackup))
 	mux.HandleFunc("POST /api/v1/projects/{name}/recovery/takeover", mid.HandlerFunc(h.postTakeover))
 	mux.HandleFunc("GET /api/v1/projects/{name}/recovery/takeover-audit", mid.HandlerFunc(h.getTakeoverAudit))
 }
@@ -1023,6 +1026,48 @@ func (h *Handler) putWorkloadStopped(w http.ResponseWriter, r *http.Request) {
 	}
 	err := h.store.RecordWorkloadStopped(traceCtx, name, ref, time.Now().UTC())
 	h.writeEvidenceResult(traceCtx, w, logger, name, "WorkloadStopped", err)
+}
+
+// backupIDPattern is the shape backup.NewBackupID produces. The Agent builds
+// object store keys from the committed value, so it is checked here too.
+var backupIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`)
+
+// committedBackupRequest is the body of the committed-backup endpoint.
+type committedBackupRequest struct {
+	UID                  string `json:"uid"`
+	NodeRef              string `json:"nodeRef"`
+	AssignmentGeneration *int64 `json:"assignmentGeneration"`
+	BackupID             string `json:"backupID"`
+}
+
+// putCommittedBackup handles PUT /api/v1/projects/{name}/recovery/committed-backup.
+//
+// The currently assigned Agent calls it after a generation's archives and
+// manifest are in the object store. Until then the generation is not a restore
+// source, and an Agent whose assignment was released cannot make it one.
+func (h *Handler) putCommittedBackup(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putCommittedBackup")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	var req committedBackupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return
+	}
+	if !backupIDPattern.MatchString(req.BackupID) {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("backupID", req.BackupID, "backupID is not a valid backup generation"), logger)
+		return
+	}
+	ref, ok := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
+	if !ok {
+		return
+	}
+	err := h.store.RecordCommittedBackup(traceCtx, name, ref, req.BackupID, time.Now().UTC())
+	h.writeEvidenceResult(traceCtx, w, logger, name, "CommittedBackup", err)
 }
 
 // putResourcesRemoved handles PUT /api/v1/projects/{name}/recovery/resources-removed.

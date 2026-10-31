@@ -4,7 +4,7 @@
 // restores from.
 //
 // This file holds the pure, orchestration-free pieces: key layout, ID
-// generation, and the manifest/latest.json data model. Nothing here touches
+// generation, and the manifest data model. Nothing here touches
 // Docker, the object store, or a mutex — that lives in the BackupManager
 // (stage 5), which calls into this file's functions from within its
 // stop-containers/upload/restart workflow. Keeping this split lets the
@@ -32,8 +32,8 @@ const backupMethod = "tar-offline"
 
 // NewBackupID generates a new backup generation identifier. IDs are lexically
 // sortable by creation time and unique per generation, but callers must never
-// rely on that ordering to find the latest one — see Correction 2 in CARA-59:
-// "latest" is only ever read from latest.json, never derived by listing keys.
+// rely on that ordering to find the latest one: the restore source is whatever
+// the server has committed, never derived by listing keys.
 //
 // Format: {RFC3339-ish UTC timestamp with no separators}-{8 hex chars}, e.g.
 // "20260724T140000Z-6e27c7b2".
@@ -63,8 +63,7 @@ type VolumeManifestEntry struct {
 // Manifest describes one backup generation: every Managed volume captured
 // together, from a single stop-the-project run. It is written only after
 // every volume's archive has been uploaded and verified — see
-// BuildManifest — and is immutable once written; latest.json is the only
-// object a generation's completion updates afterward.
+// BuildManifest — and is immutable once written.
 type Manifest struct {
 	FormatVersion int `json:"formatVersion"`
 
@@ -122,45 +121,4 @@ func UnmarshalManifest(data []byte) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("backup: unmarshal manifest: %w", err)
 	}
 	return m, nil
-}
-
-// Latest is the small, mutable pointer at the root of a Project's backup
-// prefix. It is the only object CARA-59 overwrites in place — everything
-// else (archives, manifest.json) is written once under a unique backupID and
-// never modified. CARA-60 reads Latest first and never lists keys to guess
-// the newest generation.
-type Latest struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	BackupID      string `json:"backupID"`
-	// ManifestKey is the object store key of this generation's manifest.json.
-	ManifestKey string    `json:"manifestKey"`
-	CreatedAt   time.Time `json:"createdAt"`
-}
-
-// NewLatest builds the Latest pointer for a just-completed generation.
-func NewLatest(backupID, manifestKey string, now time.Time) Latest {
-	return Latest{
-		SchemaVersion: formatVersion,
-		BackupID:      backupID,
-		ManifestKey:   manifestKey,
-		CreatedAt:     now.UTC(),
-	}
-}
-
-// Marshal serialises the pointer to indented JSON for upload.
-func (l Latest) Marshal() ([]byte, error) {
-	b, err := json.MarshalIndent(l, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("backup: marshal latest: %w", err)
-	}
-	return b, nil
-}
-
-// UnmarshalLatest parses a latest.json previously written by Marshal.
-func UnmarshalLatest(data []byte) (Latest, error) {
-	var l Latest
-	if err := json.Unmarshal(data, &l); err != nil {
-		return Latest{}, fmt.Errorf("backup: unmarshal latest: %w", err)
-	}
-	return l, nil
 }

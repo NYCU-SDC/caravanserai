@@ -141,6 +141,45 @@ type fakeOwnership struct{ result Ownership }
 
 func (f fakeOwnership) Resolve(context.Context, ResourceKey) Ownership { return f.result }
 
+// hasManifest reports whether any generation's manifest has been written.
+func (s *fakeStore) hasManifest() bool {
+	for _, k := range s.keys() {
+		if strings.Contains(k, "manifest.json") {
+			return true
+		}
+	}
+	return false
+}
+
+// fakeCommitter records what a run asked the server to commit.
+type fakeCommitter struct {
+	mu       sync.Mutex
+	ids      []string
+	fences   []string
+	err      error
+	onCommit func()
+}
+
+func (f *fakeCommitter) CommitBackup(_ context.Context, _ ResourceKey, uid, nodeRef string, generation int64, backupID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.onCommit != nil {
+		f.onCommit()
+	}
+	if f.err != nil {
+		return f.err
+	}
+	f.ids = append(f.ids, backupID)
+	f.fences = append(f.fences, fmt.Sprintf("%s/%s/%d", uid, nodeRef, generation))
+	return nil
+}
+
+func (f *fakeCommitter) committed() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.ids...)
+}
+
 type fakeConditions struct {
 	mu     sync.Mutex
 	calls  []string
@@ -191,6 +230,7 @@ type harness struct {
 	containers *fakeContainers
 	store      *fakeStore
 	conditions *fakeConditions
+	committer  *fakeCommitter
 	routes     *fakeRoutes
 	dataRoot   string
 	project    *v1.Project
@@ -223,6 +263,7 @@ func newHarness(t *testing.T, volumeNames ...string) *harness {
 		containers: &fakeContainers{},
 		store:      newFakeStore(),
 		conditions: &fakeConditions{},
+		committer:  &fakeCommitter{},
 		routes:     &fakeRoutes{},
 		dataRoot:   dataRoot,
 		project:    project,
@@ -230,7 +271,7 @@ func newHarness(t *testing.T, volumeNames ...string) *harness {
 
 	h.runner = NewRunner(
 		NewCoordinator(), h.containers, h.store,
-		fakeOwnership{result: OwnershipRetained}, h.conditions, h.routes,
+		fakeOwnership{result: OwnershipRetained}, h.conditions, h.committer, h.routes,
 		Config{DataRoot: dataRoot, NodeName: "node-a", CaraVersion: "1.0.0"},
 		zap.NewNop(),
 	)
@@ -298,41 +339,64 @@ func TestRunHappyPathOrdering(t *testing.T) {
 	assert.Equal(t, 1, h.routes.count(), "routes must be refreshed after restart")
 
 	keys := h.store.keys()
-	require.Len(t, keys, 4, "two archives, one manifest, one latest pointer")
+	require.Len(t, keys, 3, "two archives and one manifest")
 
-	// Both archives precede the manifest, and the manifest precedes
-	// latest.json — the ordering that keeps latest.json from ever pointing at
-	// an incomplete generation.
+	// Both archives precede the manifest.
 	assert.Contains(t, keys[0], ".tar.gz")
 	assert.Contains(t, keys[1], ".tar.gz")
 	assert.Contains(t, keys[2], "manifest.json")
-	assert.Contains(t, keys[3], "latest.json")
 }
 
-func TestRunWritesConsistentManifestAndLatest(t *testing.T) {
+// The commit is what makes a generation a restore source, so everything it
+// names must already be in the store, and it must carry this run's assignment.
+func TestRunCommitsOnlyAfterTheManifestIsWritten(t *testing.T) {
+	h := newHarness(t, "db-data")
+	h.project.ObjectMeta.UID = "uid-1"
+	h.project.Status.NodeRef = "node-a"
+	h.project.Status.AssignmentGeneration = 7
+
+	var keysAtCommit []string
+	h.committer.onCommit = func() { keysAtCommit = h.store.keys() }
+
+	require.NoError(t, h.runner.Run(context.Background(), h.project))
+
+	require.Len(t, keysAtCommit, 2)
+	assert.Contains(t, keysAtCommit[1], "manifest.json")
+	assert.Equal(t, []string{"uid-1/node-a/7"}, h.committer.fences)
+}
+
+// A refused commit is how an Agent whose assignment was released finds out. The
+// generation is not a restore point, and the run says so.
+func TestRunFailsWhenTheCommitIsRefused(t *testing.T) {
+	h := newHarness(t, "db-data")
+	h.committer.err = errors.New("stale assignment")
+
+	err := h.runner.Run(context.Background(), h.project)
+
+	require.ErrorContains(t, err, "commit generation")
+	assert.Equal(t, []string{"stop", "start"}, h.containers.history(), "containers must come back after a failure")
+}
+
+func TestRunWritesConsistentManifest(t *testing.T) {
 	h := newHarness(t, "db-data", "uploads")
 
 	require.NoError(t, h.runner.Run(context.Background(), h.project))
 
-	latestKey, err := LatestKey("default", "blog")
-	require.NoError(t, err)
-	rc, _, err := h.store.Get(context.Background(), latestKey)
-	require.NoError(t, err)
-	latestBytes, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	latest, err := UnmarshalLatest(latestBytes)
+	committed := h.committer.committed()
+	require.Len(t, committed, 1)
+	manifestKey, err := ManifestKey("default", "blog", committed[0])
 	require.NoError(t, err)
 
-	// latest.json must point at a manifest that actually exists.
-	require.True(t, h.store.has(latest.ManifestKey))
-	rc, _, err = h.store.Get(context.Background(), latest.ManifestKey)
+	// The commit must name a manifest that actually exists.
+	require.True(t, h.store.has(manifestKey))
+	rc, _, err := h.store.Get(context.Background(), manifestKey)
 	require.NoError(t, err)
 	manifestBytes, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	manifest, err := UnmarshalManifest(manifestBytes)
 	require.NoError(t, err)
 
-	assert.Equal(t, latest.BackupID, manifest.BackupID, "the pointer and manifest must agree on the generation")
+	assert.Equal(t, committed[0], manifest.BackupID, "the commit and manifest must agree on the generation")
 	assert.Equal(t, "node-a", manifest.SourceNode)
 	assert.Equal(t, int64(7), manifest.ProjectResourceVersion)
 	assert.Equal(t, "tar-offline", manifest.BackupMethod)
@@ -370,7 +434,7 @@ func TestRunAllVolumesShareOneGeneration(t *testing.T) {
 	assert.Equal(t, 1, manifestKeys)
 }
 
-func TestRunUploadFailureLeavesNoLatestPointer(t *testing.T) {
+func TestRunUploadFailureCommitsNothing(t *testing.T) {
 	// Cross-volume atomicity: if any archive fails, the generation is
 	// abandoned. A restore must never pair a new archive with an old one.
 	h := newHarness(t, "db-data", "uploads")
@@ -379,9 +443,7 @@ func TestRunUploadFailureLeavesNoLatestPointer(t *testing.T) {
 	err := h.runner.Run(context.Background(), h.project)
 
 	require.Error(t, err)
-	latestKey, keyErr := LatestKey("default", "blog")
-	require.NoError(t, keyErr)
-	assert.False(t, h.store.has(latestKey), "latest.json must not advance when a volume failed")
+	assert.Empty(t, h.committer.committed(), "nothing may be committed when a volume failed")
 
 	for _, k := range h.store.keys() {
 		assert.NotContains(t, k, "manifest.json", "no manifest may be written for an incomplete generation")
@@ -399,21 +461,17 @@ func TestRunDetectsTruncatedUpload(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does not match archive size")
-	latestKey, keyErr := LatestKey("default", "blog")
-	require.NoError(t, keyErr)
-	assert.False(t, h.store.has(latestKey))
+	assert.Empty(t, h.committer.committed())
 }
 
-func TestRunManifestFailureLeavesNoLatestPointer(t *testing.T) {
+func TestRunManifestFailureCommitsNothing(t *testing.T) {
 	h := newHarness(t, "db-data")
 	h.store.failOnKey = "manifest.json"
 
 	err := h.runner.Run(context.Background(), h.project)
 
 	require.Error(t, err)
-	latestKey, keyErr := LatestKey("default", "blog")
-	require.NoError(t, keyErr)
-	assert.False(t, h.store.has(latestKey))
+	assert.Empty(t, h.committer.committed())
 	assert.Equal(t, []string{"stop", "start"}, h.containers.history())
 }
 
@@ -467,9 +525,7 @@ func TestRunContinuesWhenMaintenanceConditionFails(t *testing.T) {
 	require.NoError(t, h.runner.Run(context.Background(), h.project))
 
 	assert.Equal(t, []string{"stop", "start"}, h.containers.history())
-	latestKey, err := LatestKey("default", "blog")
-	require.NoError(t, err)
-	assert.True(t, h.store.has(latestKey), "the backup must still complete")
+	assert.Len(t, h.committer.committed(), 1, "the backup must still complete")
 }
 
 func TestRunReleasesClaimOnEveryPath(t *testing.T) {
