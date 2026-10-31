@@ -117,6 +117,10 @@ type RunConfig struct {
 	// Allocatable reported to the server.
 	SystemReserved SystemReserved
 
+	// DataRoot is where Managed volume data lives, whether or not backups are
+	// enabled. Cleanup tasks quarantine local data under it.
+	DataRoot string
+
 	// Routes maintains proxy routes for projects with ingress definitions.
 	// Nil disables proxy route maintenance.
 	Routes RouteUpdater
@@ -219,7 +223,7 @@ func Run(ctx context.Context, cfg RunConfig) {
 	// Every resource kind this Agent can hold for an assignment. Cleanup
 	// tasks and termination both remove through it and report
 	// ResourcesRemoved only when it finds nothing left.
-	cleaner := defaultCleaner(runtime, routes)
+	cleaner := defaultCleaner(runtime, routes, cfg.DataRoot)
 	if cleaner == nil {
 		logger.Warn("Runtime cannot remove a single assignment; cleanup obligations will not be resolved by this agent")
 	}

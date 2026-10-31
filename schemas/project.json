@@ -51,6 +51,14 @@
         "resourcesRemoved": {
           "$ref": "#/$defs/ResourcesRemovedEvidence",
           "description": "ResourcesRemoved is the cleanup owner's evidence that every\ndeletion-scoped runtime resource it held for this assignment is gone.\nNil means the obligation is unresolved."
+        },
+        "managedDataOwed": {
+          "type": "boolean",
+          "description": "ManagedDataOwed records that the Project moved away while declaring a\nManaged volume, so this Node's local data has to leave the active path\n(ADR-0024 C2) before the Node may hold the Project again. A deletion does\nnot set it: local Managed data is retained then."
+        },
+        "managedDataQuarantined": {
+          "$ref": "#/$defs/ManagedDataQuarantinedEvidence",
+          "description": "ManagedDataQuarantined is the cleanup owner's evidence that it did so. It\nis separate from ResourcesRemoved because each can be true without the\nother."
         }
       },
       "additionalProperties": false,
@@ -213,6 +221,20 @@
         "port"
       ],
       "description": "IngressTarget is the backend service and port for an ingress rule."
+    },
+    "ManagedDataQuarantinedEvidence": {
+      "properties": {
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "observedAt"
+      ],
+      "description": "ManagedDataQuarantinedEvidence records when the cleanup owner of an obligation moved its local Managed data out of the active path, or found none there."
     },
     "ObjectMeta": {
       "properties": {

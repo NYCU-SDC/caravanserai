@@ -202,7 +202,7 @@ The file is the one named by `--config` or `CARA_CONFIG`, and a named file that 
 | `headscale_api_url` | `HEADSCALE_API_URL` | _(optional)_ | Headscale management API URL. Enables the `/api/v1/overlay` endpoints when set together with the API key |
 | `headscale_api_key` | `HEADSCALE_API_KEY` | _(optional)_ | Headscale management API key (secret, never logged) |
 | `running_grace_period` | `RUNNING_GRACE_PERIOD` | `3m` | How long a Running Project may stay on a NotReady node before its release is attempted |
-| `grace_expired_release` | `GRACE_EXPIRED_RELEASE` | `false` | Move Projects with no Managed volume off a node that stayed NotReady past the grace period, with no proof it stopped; a partitioned node keeps its copy running until it reconnects |
+| `grace_expired_release` | `GRACE_EXPIRED_RELEASE` | `false` | Move Projects off a node that stayed NotReady past the grace period, with no proof it stopped; a partitioned node keeps its copy running until it reconnects. A Project with a Managed volume moves only once it has a committed backup, and restores from it |
 | `headscale_user` | `HEADSCALE_USER` | `cara-node` | Headscale user new pre-auth keys are created under |
 
 ### cara-agent
@@ -290,6 +290,7 @@ All endpoints are under `/api/v1/`.
 | `DELETE` | `/api/v1/projects/{name}` | Delete a project |
 | `PATCH` | `/api/v1/projects/{name}/status` | Update project status (agent only) |
 | `PUT` | `/api/v1/projects/{name}/recovery/workload-stopped` | Record that every container is stopped (currently assigned agent only; requires the assignment fence) |
+| `PUT` | `/api/v1/projects/{name}/recovery/managed-data-quarantined` | Record that local Managed data left the active path (the obligation's agent only) |
 | `PUT` | `/api/v1/projects/{name}/recovery/committed-backup` | Make a backup generation the restore source (currently assigned agent only; requires the assignment fence) |
 | `PUT` | `/api/v1/projects/{name}/recovery/resources-removed` | Resolve a cleanup obligation after removing its runtime resources (the obligation's agent only; requires the assignment fence) |
 | `POST` | `/api/v1/projects/{name}/recovery/takeover` | Override the release gate for a Node that will not report back (temporary `OPERATOR_TOKEN` bearer until ADR-0018 is decided; disabled when unset; `caractl takeover`) |

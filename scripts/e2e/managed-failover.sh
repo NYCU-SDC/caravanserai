@@ -2,38 +2,27 @@
 set -Eeuo pipefail
 
 # Isolated rehearsal of losing the Agent under Projects with Managed volume
-# data. Since CARA-84 it proves the Projects are not moved while the lost Node
-# may still be running them. The CARA-87 scenarios — a clean destination
-# restores the backed-up bytes, and a destination that already holds
-# unprovable bytes refuses to start rather than adopt them — need an
-# authorized takeover and are reported NOT RUN until one exists.
+# data (ADR-0024). node-a's Agent stops while its containers keep running.
 #
-# Two Docker-in-Docker daemons stand in for two Nodes. They are separate on
-# purpose: stopping an Agent does not stop its containers, and container names
-# are derived from (project, service), so a single shared daemon would make
-# Node B collide with containers Node A never got to release.
+#   backed up, clean B  moves by itself and restores the committed generation,
+#                       serving the same bytes.
 #
-# Node A's Agent stops while its containers keep running. Since CARA-84 the
-# control plane must not reassign on that alone (ADR-0017): the run first
-# proves both Projects stay on node-a, marked TakeoverRequired, with nothing
-# started on node-b.
+#   backed up, stale B  moves by itself, but B holds bytes from an earlier
+#                       placement and a v1 marker: RecoveryBlocked. No container,
+#                       no rewritten marker, no deleted bytes, no new generation.
 #
-# Two destination scenarios then need the control plane to reassign. That now
-# takes an authorized takeover, which does not exist yet, so they are kept
-# below and reported NOT RUN until it does:
+#   no backup           the only copy may be on node-a, so it stays there with
+#                       TakeoverRequired. After an operator takes over it refuses
+#                       to start rather than starting empty.
 #
-#   clean B  Node B holds nothing for the Project.
-#            → restores the generation A backed up, serves the same bytes.
+#   no Managed volume   moves by itself.
 #
-#   stale B  Node B holds bytes from an earlier placement and a v1 marker.
-#            → RecoveryBlocked. No container, no rewritten marker, no deleted
-#              bytes, no new backup generation.
+# When node-a returns it must remove its containers without starting them, and
+# move its Managed data to quarantine, leaving the active paths empty.
 #
-# The second is the regression test. Before CARA-87 a v1 marker was proof
-# enough to skip the restore, so that Project would have started on the stale
-# bytes and then had them archived over the good generation. Verify that by
-# running this script against the parent commit: the stale scenario must fail
-# there, or it is not testing the defect.
+# The stale case is the regression test for CARA-87. Before it a v1 marker was
+# proof enough to skip the restore, so that Project would have started on the
+# stale bytes and then had them archived over the good generation.
 #
 # Managed volume data must be visible at the same path to the Agent (on the
 # host) and to the workload containers (inside DinD). It defaults to /var/tmp;
@@ -179,7 +168,9 @@ committed_backup_id() {
 	project_field "$1" '(p["status"].get("recovery") or {}).get("committedBackup",{}).get("backupID","")'
 }
 
-backup_published() { [[ -n "$(committed_backup_id "$1")" ]]; }
+# A generation's ID starts with when its run began, so one newer than the payload
+# was captured after it was written. An earlier one may hold nothing.
+backup_published() { [[ "$(committed_backup_id "$1")" > "$payload_written" ]]; }
 
 marker_field() {
 	python3 -c '
@@ -343,6 +334,24 @@ for project in "$clean_project" "$stale_project"; do
 	assigned_to "$project" node-a || fail "$project was not placed on node-a"
 done
 
+# Managed data with no backup: the only copy is on node-a, so nothing may move it
+# without a person deciding to.
+unbacked_project=failover-unbacked
+create_project '{
+	"apiVersion":"caravanserai/v1",
+	"kind":"Project",
+	"metadata":{"name":"'"$unbacked_project"'","namespace":"default"},
+	"spec":{
+		"services":[{
+			"name":"web","image":"nginx:alpine",
+			"volumeMounts":[{"name":"content","mountPath":"/usr/share/nginx/html"}]
+		}],
+		"volumes":[{"name":"content","type":"Managed"}]
+	}
+}'
+wait_until 120 "$unbacked_project Running on node-a" phase_is "$unbacked_project" Running
+assigned_to "$unbacked_project" node-a || fail "$unbacked_project was not placed on node-a"
+
 # No Managed volume, so ADR-0024 lets it move on the grace period alone.
 stateless_project=failover-stateless
 create_project '{
@@ -356,12 +365,14 @@ assigned_to "$stateless_project" node-a || fail "$stateless_project was not plac
 # Deterministic content: the failover is only proven if the exact bytes come
 # back, so compare a checksum rather than "the file exists".
 declare -A expected_sum
-for project in "$clean_project" "$stale_project"; do
+for project in "$clean_project" "$stale_project" "$unbacked_project"; do
 	payload="$data_root_a/volumes/default/$project/content/data/index.html"
 	printf 'cara-87 failover payload for %s, run %s\n' "$project" "$suffix" >"$payload"
 	expected_sum["$project"]="$(sha256sum "$payload" | cut -d' ' -f1)"
 	log "$project payload checksum ${expected_sum[$project]}"
 done
+
+payload_written="$(date -u +%Y%m%dT%H%M%SZ)"
 
 log "waiting for node-a to publish a complete backup of each Project"
 for project in "$clean_project" "$stale_project"; do
@@ -422,30 +433,30 @@ wait_until 180 "node-a NotReady" node_is node-a NotReady
 
 stateless_moved() { assigned_to "$stateless_project" node-b && phase_is "$stateless_project" Running; }
 
-# ── The release gate: an unconfirmed Node keeps its Projects ────────────────
+# ── Moving by itself (ADR-0024) ─────────────────────────────────────────────
 #
-# node-a's containers are still running, and its Agent cannot confirm them
-# stopped. ADR-0017 forbids handing the Projects to node-b on that basis: the
-# Rescheduler must keep each assignment on node-a and mark it
-# TakeoverRequired once the grace period is over, and node-b must start
-# nothing. Before CARA-84 this was the point where both Projects moved.
+# node-a's containers are still running and its Agent cannot confirm them
+# stopped. A Project with a committed backup, or with no Managed volume, moves
+# once the grace period is over, with nobody acting. One whose only copy may be
+# on node-a stays, marked TakeoverRequired, and node-b starts nothing.
 
-log "waiting for both Projects to be marked TakeoverRequired (grace period applies)"
+log "waiting for the Project with no backup to be marked TakeoverRequired (grace period applies)"
+wait_until 300 "$unbacked_project TakeoverRequired" takeover_required "$unbacked_project"
+
+log "waiting for the rest to move with no operator action"
+wait_until 180 "$stateless_project Running on node-b" stateless_moved
 for project in "$clean_project" "$stale_project"; do
-	wait_until 300 "$project TakeoverRequired" takeover_required "$project"
+	wait_until 300 "$project assigned to node-b" assigned_to "$project" node-b
 done
+log "$stateless_project and the backed-up Managed Projects moved by themselves"
 
 # The mark proves the grace period is over and the release was attempted.
 # Hold for two more 30-second resync rounds to prove the refusal holds rather
 # than being the first of several attempts.
-log "waiting for the Project with no Managed volume to move by itself"
-wait_until 180 "$stateless_project Running on node-b" stateless_moved
-log "$stateless_project moved to node-b with no operator action; Managed Projects stayed"
-
 log "holding for two more resync rounds"
 sleep 65
 
-for project in "$clean_project" "$stale_project"; do
+for project in "$unbacked_project"; do
 	assigned_to "$project" node-a ||
 		fail "$project left node-a without a release authorization (nodeRef now '$(node_ref "$project")')"
 	takeover_required "$project" ||
@@ -463,15 +474,14 @@ done
 
 # ── CARA-87 destination scenarios ────────────────────────────────────────────
 #
-# Both need the Projects reassigned to node-b, which requires a takeover
-# authorization ADR-0017 accepts for a Node that may still be running the
-# workload. Here that is an audited operator override (CARA-89), sent the way an
-# operator would, through caractl.
+# The moved Projects are already on node-b. The one with no backup needs an
+# audited operator override (CARA-89), sent the way an operator would, through
+# caractl, and must then refuse to start rather than start empty.
 
 takeover_supported=1
 
 authorize_takeover() {
-	for project in "$clean_project" "$stale_project"; do
+	for project in "$unbacked_project"; do
 		CARA_OPERATOR_TOKEN="$operator_token" "$test_root/bin/caractl" --server "http://127.0.0.1:$server_port" \
 			takeover "$project" --yes --note "managed-failover e2e" ||
 			fail "$project: operator takeover was refused"
@@ -548,6 +558,32 @@ scenario_clean_destination() {
 	log "$clean_project refused a commit from the released assignment"
 }
 
+# Scenario: no committed backup, and an operator gave up on the lost Node. There
+# is nothing to restore, so it stays blocked rather than starting empty.
+scenario_no_restore_source() {
+	log "scenario: taken over with no committed backup"
+	wait_until 180 "$unbacked_project blocked on node-b" blocked_is "$unbacked_project" NoRestoreSource
+	on_b="$(count_containers dind_b "$unbacked_project-web" -a)" ||
+		fail "$unbacked_project: could not list node-b's containers"
+	[[ "$on_b" == "0" ]] || fail "$unbacked_project: started on node-b with no data ($on_b containers)"
+	log "$unbacked_project blocked on node-b with NoRestoreSource, nothing started"
+}
+
+# ADR-0024 C2: the data has left the active path and still exists.
+assert_quarantined() {
+	local project="$1" copy
+	[[ ! -e "$data_root_a/volumes/default/$project" ]] ||
+		fail "$project: node-a still holds data at the active path"
+	copy="$(find "$data_root_a/quarantine/default/$project" -path '*/content/data/index.html' 2>/dev/null | head -1)"
+	[[ -n "$copy" ]] || fail "$project: node-a's data is not in quarantine"
+	[[ "$(sha256sum "$copy" | cut -d' ' -f1)" == "${expected_sum[$project]}" ]] ||
+		fail "$project: quarantined bytes differ from what node-a held"
+}
+
+quarantine_recorded() {
+	[[ "$(project_field "$1" '[o for o in p["status"]["recovery"]["cleanupObligations"] if o["assignment"]["nodeName"]=="node-a"][0].get("managedDataQuarantined",{}).get("observedAt","")')" != "" ]]
+}
+
 # Scenario 3: the lost Node comes back after the override.
 #
 # Its containers are stopped first, as a power loss would leave them: this is
@@ -556,7 +592,7 @@ scenario_clean_destination() {
 # starting one, and the new assignment must be untouched.
 scenario_old_node_returns() {
 	log "scenario: node-a returns after the override"
-	for project in "$clean_project" "$stale_project" "$stateless_project"; do
+	for project in "$clean_project" "$stale_project" "$stateless_project" "$unbacked_project"; do
 		dind_a stop "$project-web" >/dev/null ||
 			fail "$project: could not stop node-a's container to simulate the power loss"
 	done
@@ -568,7 +604,7 @@ scenario_old_node_returns() {
 	while :; do
 		running=0
 		left=0
-		for project in "$clean_project" "$stale_project" "$stateless_project"; do
+		for project in "$clean_project" "$stale_project" "$stateless_project" "$unbacked_project"; do
 			n="$(count_containers dind_a "$project-web")" || fail "$project: could not list node-a's containers"
 			running=$((running + n))
 			n="$(count_containers dind_a "$project-web" -a)" || fail "$project: could not list node-a's containers"
@@ -583,14 +619,19 @@ scenario_old_node_returns() {
 	assigned_to "$clean_project" node-b || fail "$clean_project left node-b when node-a returned"
 	phase_is "$clean_project" Running || fail "$clean_project stopped running when node-a returned"
 	log "node-a removed the old containers without starting them; $clean_project still Running on node-b"
+
+	for project in "$clean_project" "$stale_project" "$unbacked_project"; do
+		wait_until 60 "$project quarantine recorded" quarantine_recorded "$project"
+		assert_quarantined "$project"
+	done
+	log "node-a moved its Managed data to quarantine; the active paths are empty and the bytes match"
 }
 
 if (( takeover_supported )); then
 	authorize_takeover
-	log "waiting for both Projects to be reassigned to node-b"
-	for project in "$clean_project" "$stale_project"; do
-		wait_until 300 "$project assigned to node-b" assigned_to "$project" node-b
-	done
+	log "waiting for $unbacked_project to be reassigned to node-b"
+	wait_until 300 "$unbacked_project assigned to node-b" assigned_to "$unbacked_project" node-b
+	scenario_no_restore_source
 	scenario_stale_destination
 	scenario_clean_destination
 	scenario_old_node_returns
@@ -604,8 +645,10 @@ cat <<EOF
 
 [failover-e2e] result
   agent loss            node-a stopped, NotReady
-  release gate          both Projects kept on node-a with TakeoverRequired
-                        node-a containers still running, node-b started none
+  moved by themselves   $clean_project, $stale_project, $stateless_project
+  release gate          $unbacked_project (no backup) kept on node-a with TakeoverRequired
+                        node-a container still running, node-b started none
+  after takeover        $unbacked_project blocked with NoRestoreSource, nothing started
 EOF
 
 if (( takeover_supported )); then
@@ -622,6 +665,7 @@ if (( takeover_supported )); then
                         latest generation   $after (unchanged)
   no Managed volume     $stateless_project moved to node-b with no operator action
   old node returns      stopped containers removed, none started
+                        Managed data in quarantine, active paths empty, bytes match
 EOF
 	log "PASS"
 else

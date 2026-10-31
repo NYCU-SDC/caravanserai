@@ -6,12 +6,16 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/restore"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,6 +59,9 @@ type fakeCleanupServer struct {
 	gets      int
 	reported  []v1.AssignmentIdentity
 	onGet     func()
+
+	quarantined   []v1.AssignmentIdentity
+	quarantineErr error
 }
 
 func (f *fakeCleanupServer) NodeName() string { return f.node }
@@ -72,6 +79,11 @@ func (f *fakeCleanupServer) GetProject(context.Context, string) (*v1.Project, er
 		return nil, f.getErr
 	}
 	return f.project, nil
+}
+
+func (f *fakeCleanupServer) ReportManagedDataQuarantined(_ context.Context, _ string, a v1.AssignmentIdentity) error {
+	f.quarantined = append(f.quarantined, a)
+	return f.quarantineErr
 }
 
 func (f *fakeCleanupServer) ReportResourcesRemoved(_ context.Context, _ string, a v1.AssignmentIdentity) error {
@@ -101,6 +113,72 @@ func newCleanupCase() (*fakeCleanupServer, *fakeResource) {
 		},
 	}
 	return server, &fakeResource{held: []string{"container /cara-blog-web"}}
+}
+
+// owesManagedData makes the case's obligation also owe local data, with that
+// data on disk, and returns a cleaner that can reach it.
+func owesManagedData(t *testing.T, server *fakeCleanupServer, res *fakeResource) (*assignmentCleaner, string) {
+	t.Helper()
+	dataRoot := t.TempDir()
+	data := filepath.Join(dataRoot, "volumes", "default", "blog", "db", "data")
+	require.NoError(t, os.MkdirAll(data, 0o700))
+	require.NoError(t, restore.WriteMarker(dataRoot, restore.Provenance{
+		Namespace: "default", Project: "blog", ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 3,
+	}, time.Now()))
+	server.project.Status.Recovery.CleanupObligations[0].ManagedDataOwed = true
+	cleaner := newAssignmentCleaner(res)
+	cleaner.dataRoot = dataRoot
+	return cleaner, filepath.Dir(filepath.Dir(data))
+}
+
+func TestCleanupTaskQuarantinesOwedManagedData(t *testing.T) {
+	server, res := newCleanupCase()
+	cleaner, active := owesManagedData(t, server, res)
+
+	runCleanupTasks(context.Background(), server, cleaner, backup.NewCoordinator(), zap.NewNop())
+
+	assert.Equal(t, []v1.AssignmentIdentity{owedAssignment}, server.reported)
+	assert.Equal(t, []v1.AssignmentIdentity{owedAssignment}, server.quarantined)
+	_, err := os.Stat(active)
+	assert.True(t, os.IsNotExist(err), "the active path must be empty")
+}
+
+// ADR-0024 C2: no step may run before the one ahead of it is confirmed.
+func TestCleanupTaskLeavesManagedDataWhileAContainerRemains(t *testing.T) {
+	server, res := newCleanupCase()
+	cleaner, active := owesManagedData(t, server, res)
+	res.stuck = true
+
+	runCleanupTasks(context.Background(), server, cleaner, backup.NewCoordinator(), zap.NewNop())
+
+	assert.Empty(t, server.quarantined)
+	_, err := os.Stat(active)
+	assert.NoError(t, err, "data moved out from under a container that may still use it")
+}
+
+// ResourcesRemoved can be on record already, from before the move failed.
+func TestCleanupTaskQuarantinesAfterResourcesRemovedIsOnRecord(t *testing.T) {
+	server, res := newCleanupCase()
+	cleaner, active := owesManagedData(t, server, res)
+	server.project.Status.Recovery.CleanupObligations[0].ResourcesRemoved = &v1.ResourcesRemovedEvidence{ObservedAt: time.Now()}
+
+	runCleanupTasks(context.Background(), server, cleaner, backup.NewCoordinator(), zap.NewNop())
+
+	assert.Empty(t, server.reported, "already on record")
+	assert.Equal(t, []v1.AssignmentIdentity{owedAssignment}, server.quarantined)
+	_, err := os.Stat(active)
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestCleanupTaskWithNoDataRootLeavesTheDataOwed(t *testing.T) {
+	server, res := newCleanupCase()
+	cleaner, _ := owesManagedData(t, server, res)
+	cleaner.dataRoot = ""
+
+	runCleanupTasks(context.Background(), server, cleaner, backup.NewCoordinator(), zap.NewNop())
+
+	assert.Equal(t, []v1.AssignmentIdentity{owedAssignment}, server.reported)
+	assert.Empty(t, server.quarantined)
 }
 
 func TestCleanupTaskResolvesObligation(t *testing.T) {

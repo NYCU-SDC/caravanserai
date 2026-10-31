@@ -392,6 +392,41 @@ func (c *Client) ReportResourcesRemoved(ctx context.Context, projectName string,
 	}
 }
 
+// ReportManagedDataQuarantined records that this node's local Managed data for
+// assignment left the active path. A 409 comes back as ErrStaleAssignment and a
+// 404 as ErrProjectNotFound.
+func (c *Client) ReportManagedDataQuarantined(ctx context.Context, projectName string, assignment v1.AssignmentIdentity) error {
+	gen := assignment.AssignmentGeneration
+	body, err := json.Marshal(evidenceRequest{UID: assignment.ProjectUID, NodeRef: assignment.NodeName, AssignmentGeneration: &gen})
+	if err != nil {
+		return fmt.Errorf("marshal managed-data-quarantined request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/projects/%s/recovery/managed-data-quarantined", c.serverURL, projectName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build managed-data-quarantined request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("managed-data-quarantined request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("report managed data quarantined: unexpected status %s", resp.Status)
+	}
+}
+
 // CommitBackup asks the server to make backupID the Project's restore source. A
 // 409 comes back as ErrStaleAssignment and a 404 as ErrProjectNotFound.
 func (c *Client) CommitBackup(ctx context.Context, projectName string, fence AssignmentFence, backupID string) error {

@@ -9,6 +9,7 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/restore"
 
 	"go.uber.org/zap"
 )
@@ -20,8 +21,8 @@ import (
 // file — registers a kind here and is covered by the same evidence without
 // changing it.
 //
-// Managed volume data is not a kind: it is retained on deletion and has its
-// own data-cleanup flow.
+// Managed volume data is not a kind: it is retained on deletion, and when a
+// Project moves it is quarantined with its own evidence (see runCleanupTask).
 type CleanupResource interface {
 	// Kind names the resource in logs.
 	Kind() string
@@ -36,6 +37,10 @@ type CleanupResource interface {
 // assignmentCleaner removes and accounts for every registered resource kind.
 type assignmentCleaner struct {
 	resources []CleanupResource
+
+	// dataRoot is where this Node's Managed data lives. Without one, local data
+	// stays owed rather than being reported as handled.
+	dataRoot string
 }
 
 func newAssignmentCleaner(resources ...CleanupResource) *assignmentCleaner {
@@ -109,12 +114,14 @@ func (proxyRoutes) Remaining(context.Context, docker.Assignment) ([]string, erro
 // defaultCleaner registers the kinds every Agent has. It returns nil when the
 // runtime cannot remove a single assignment, which leaves cleanup tasks
 // unhandled rather than handled by a broader removal.
-func defaultCleaner(runtime docker.Runtime, routes RouteUpdater) *assignmentCleaner {
+func defaultCleaner(runtime docker.Runtime, routes RouteUpdater, dataRoot string) *assignmentCleaner {
 	ar, ok := runtime.(assignmentRuntime)
 	if !ok {
 		return nil
 	}
-	return newAssignmentCleaner(dockerResources{runtime: ar}, proxyRoutes{routes: routes})
+	cleaner := newAssignmentCleaner(dockerResources{runtime: ar}, proxyRoutes{routes: routes})
+	cleaner.dataRoot = dataRoot
+	return cleaner
 }
 
 func assignmentOf(namespace, project string, id v1.AssignmentIdentity) docker.Assignment {
@@ -130,6 +137,7 @@ type cleanupServer interface {
 	ListCleanupTasks(ctx context.Context) ([]v1.CleanupTask, error)
 	GetProject(ctx context.Context, name string) (*v1.Project, error)
 	ReportResourcesRemoved(ctx context.Context, projectName string, assignment v1.AssignmentIdentity) error
+	ReportManagedDataQuarantined(ctx context.Context, projectName string, assignment v1.AssignmentIdentity) error
 }
 
 // runCleanupTasks works through the cleanup obligations this Node owes for
@@ -169,11 +177,14 @@ func runCleanupTask(ctx context.Context, server cleanupServer, cleaner *assignme
 		defer release()
 	}
 
-	if reason := revalidateCleanup(ctx, server, task); reason != "" {
+	obligation, reason := revalidateCleanup(ctx, server, task)
+	if reason != "" {
 		log.Info("Skipping cleanup task", zap.String("reason", reason))
 		return
 	}
 
+	// Removing and confirming run even when ResourcesRemoved is already on
+	// record: local data may move only once no container can still be using it.
 	if err := cleaner.removeAll(ctx, a); err != nil {
 		log.Warn("Cleanup incomplete, will retry next poll", zap.Error(err))
 		return
@@ -189,9 +200,47 @@ func runCleanupTask(ctx context.Context, server cleanupServer, cleaner *assignme
 		return
 	}
 
+	if !obligation.Resolved() && !reportResourcesRemoved(ctx, server, task, log) {
+		return
+	}
+	if obligation.DataOutstanding() {
+		quarantineManagedData(ctx, server, cleaner, a, task, log)
+	}
+}
+
+// quarantineManagedData moves the assignment's local Managed data out of the
+// active path and reports it. A failure reports nothing: the obligation stays
+// owed, the Node stays excluded from the Project, and the next poll retries.
+func quarantineManagedData(ctx context.Context, server cleanupServer, cleaner *assignmentCleaner, a docker.Assignment, task v1.CleanupTask, log *zap.Logger) {
+	if cleaner.dataRoot == "" {
+		log.Warn("No data root configured; local Managed data stays owed")
+		return
+	}
+	owner := restore.Provenance{
+		Namespace: a.Namespace, Project: a.Project, ProjectUID: a.UID,
+		NodeName: server.NodeName(), AssignmentGeneration: a.Generation,
+	}
+	if err := restore.Quarantine(cleaner.dataRoot, owner, nowUTC()); err != nil {
+		log.Warn("Could not quarantine local Managed data, will retry next poll", zap.Error(err))
+		return
+	}
+	switch err := server.ReportManagedDataQuarantined(ctx, task.ProjectName, task.Assignment); {
+	case err == nil:
+		log.Info("Local Managed data quarantined")
+	case errors.Is(err, ErrProjectNotFound):
+		log.Info("Project no longer exists; nothing to report")
+	default:
+		log.Warn("Failed to report quarantine, will retry next poll", zap.Error(err))
+	}
+}
+
+// reportResourcesRemoved reports the assignment's runtime resources gone, and
+// returns whether the obligation may go on to its local data.
+func reportResourcesRemoved(ctx context.Context, server cleanupServer, task v1.CleanupTask, log *zap.Logger) bool {
 	switch err := server.ReportResourcesRemoved(ctx, task.ProjectName, task.Assignment); {
 	case err == nil:
 		log.Info("Cleanup obligation resolved")
+		return true
 	case errors.Is(err, ErrProjectNotFound):
 		log.Info("Project no longer exists; nothing to report")
 	case errors.Is(err, ErrStaleAssignment):
@@ -207,6 +256,7 @@ func runCleanupTask(ctx context.Context, server cleanupServer, cleaner *assignme
 	default:
 		log.Warn("Failed to report cleanup, will retry next poll", zap.Error(err))
 	}
+	return false
 }
 
 // projectReader is the one server call obligationStands needs.
@@ -236,36 +286,36 @@ func obligationStands(ctx context.Context, server projectReader, project string,
 }
 
 // revalidateCleanup asks the server, under the claim, whether the task still
-// stands, and returns why not, or "" when it does. A listing can be stale by
+// stands. It returns the obligation as it is now, or why not. A listing can be stale by
 // the time it is acted on: the obligation resolved, the Project deleted or
 // recreated under a new UID, or assigned back to this Node.
 //
 // An unreachable server is a reason to skip, never to proceed.
-func revalidateCleanup(ctx context.Context, server cleanupServer, task v1.CleanupTask) string {
+func revalidateCleanup(ctx context.Context, server cleanupServer, task v1.CleanupTask) (*v1.CleanupObligation, string) {
 	if task.Assignment.NodeName != server.NodeName() {
-		return "obligation belongs to node " + task.Assignment.NodeName
+		return nil, "obligation belongs to node " + task.Assignment.NodeName
 	}
 	p, err := server.GetProject(ctx, task.ProjectName)
 	switch {
 	case errors.Is(err, ErrProjectNotFound):
 		// The record and its obligations are gone. What is left on this Node
 		// is the orphan sweep's to find.
-		return "project no longer exists"
+		return nil, "project no longer exists"
 	case err != nil:
-		return "could not re-read the project: " + err.Error()
+		return nil, "could not re-read the project: " + err.Error()
 	}
 	if p.ObjectMeta.UID != task.Assignment.ProjectUID {
-		return "project was recreated under another UID"
+		return nil, "project was recreated under another UID"
 	}
 	if p.Status.NodeRef == server.NodeName() {
-		return "this node holds the project's current assignment"
+		return nil, "this node holds the project's current assignment"
 	}
 	o := p.Status.Recovery.FindObligation(task.Assignment)
 	if o == nil {
-		return "obligation no longer recorded"
+		return nil, "obligation no longer recorded"
 	}
-	if o.Resolved() {
-		return "obligation already resolved"
+	if o.Resolved() && !o.DataOutstanding() {
+		return nil, "obligation already resolved"
 	}
-	return ""
+	return o, ""
 }
