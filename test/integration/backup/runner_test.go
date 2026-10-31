@@ -35,7 +35,7 @@ func (r *recordingContainers) StartProject(context.Context, *v1.Project) error {
 
 type retainedOwnership struct{}
 
-func (retainedOwnership) Resolve(context.Context, agentbackup.ResourceKey) agentbackup.Ownership {
+func (retainedOwnership) Resolve(context.Context, agentbackup.ResourceKey, string, int64) agentbackup.Ownership {
 	return agentbackup.OwnershipRetained
 }
 

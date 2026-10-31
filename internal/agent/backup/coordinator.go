@@ -135,12 +135,15 @@ const (
 	// OwnershipRetained means the Project is still assigned to this node and
 	// still expected to run.
 	OwnershipRetained Ownership = iota
-	// OwnershipReassigned means status.nodeRef now points at another node.
+	// OwnershipReassigned means the assignment the backup started under was
+	// replaced: status.nodeRef points at another node, or at this node again
+	// under a newer assignment generation.
 	OwnershipReassigned
 	// OwnershipTerminating means the Project moved to the Terminating phase.
 	OwnershipTerminating
 	// OwnershipLost means the assignment is gone for another reason: a
-	// completed drain, or the Project no longer existing at all.
+	// completed drain, or the Project no longer existing at all, including a
+	// same-name Project created since under another UID.
 	OwnershipLost
 	// OwnershipUnknown means the server could not be reached to find out.
 	OwnershipUnknown

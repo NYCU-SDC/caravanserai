@@ -626,18 +626,23 @@ func (r *DockerRuntime) StopProject(ctx context.Context, project *v1.Project) er
 	log := r.logger.With(zap.String("project", project.Name))
 	timeout := stopTimeoutSeconds
 
-	for i := len(project.Spec.Services) - 1; i >= 0; i-- {
-		svc := project.Spec.Services[i]
-		name := ContainerName(project.Name, svc.Name)
-		if err := r.client.ContainerStop(ctx, name, container.StopOptions{Timeout: &timeout}); err != nil {
+	// Every service is checked before any is stopped, so a stale container
+	// found partway cannot leave the Project half-stopped.
+	containers, err := r.ownedContainers(ctx, project)
+	if err != nil {
+		return err
+	}
+	for i := len(containers) - 1; i >= 0; i-- {
+		c := containers[i]
+		if err := r.client.ContainerStop(ctx, c.id, container.StopOptions{Timeout: &timeout}); err != nil {
 			if isNotFound(err) {
-				// Nothing to stop; treat as already satisfied so the caller's
-				// flow is idempotent.
+				// Gone since the check; treat as already satisfied so the
+				// caller's flow is idempotent.
 				continue
 			}
-			return fmt.Errorf("stop container %q: %w", name, err)
+			return fmt.Errorf("stop container %q: %w", c.name, err)
 		}
-		log.Debug("Container stopped", zap.String("service", svc.Name))
+		log.Debug("Container stopped", zap.String("container", c.name))
 	}
 	return nil
 }
@@ -648,17 +653,52 @@ func (r *DockerRuntime) StopProject(ctx context.Context, project *v1.Project) er
 func (r *DockerRuntime) StartProject(ctx context.Context, project *v1.Project) error {
 	log := r.logger.With(zap.String("project", project.Name))
 
-	for _, svc := range project.Spec.Services {
-		name := ContainerName(project.Name, svc.Name)
-		if err := r.client.ContainerStart(ctx, name, container.StartOptions{}); err != nil {
+	containers, err := r.ownedContainers(ctx, project)
+	if err != nil {
+		return err
+	}
+	for _, c := range containers {
+		if err := r.client.ContainerStart(ctx, c.id, container.StartOptions{}); err != nil {
 			if isNotFound(err) {
 				continue
 			}
-			return fmt.Errorf("start container %q: %w", name, err)
+			return fmt.Errorf("start container %q: %w", c.name, err)
 		}
-		log.Debug("Container started", zap.String("service", svc.Name))
+		log.Debug("Container started", zap.String("container", c.name))
 	}
 	return nil
+}
+
+// ownedContainer is a service container shown to belong to an assignment. It is
+// acted on by ID: the name alone could resolve to a replacement by then.
+type ownedContainer struct {
+	name string
+	id   string
+}
+
+// ownedContainers inspects every service container of project, in spec order,
+// and returns those that exist. A container that does not belong to project's
+// assignment fails the whole call with ErrContainerNotOwned, before the caller
+// has touched anything: a container left by an earlier grant has the name the
+// current one uses.
+func (r *DockerRuntime) ownedContainers(ctx context.Context, project *v1.Project) ([]ownedContainer, error) {
+	owner := ownerOf(project)
+	containers := make([]ownedContainer, 0, len(project.Spec.Services))
+	for _, svc := range project.Spec.Services {
+		name := ContainerName(project.Name, svc.Name)
+		info, err := r.client.ContainerInspect(ctx, name)
+		if err != nil {
+			if isNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("inspect %q: %w", name, err)
+		}
+		if err := r.checkContainerOwnership(name, info, owner, svc.Name); err != nil {
+			return nil, err
+		}
+		containers = append(containers, ownedContainer{name: name, id: info.ID})
+	}
+	return containers, nil
 }
 
 // InspectProject implements Runtime.

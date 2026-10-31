@@ -175,12 +175,16 @@ type Runtime interface {
 	// containers can be started again by StartProject.  Containers are stopped
 	// in reverse spec order, so a service is stopped before whatever it
 	// depends on.  Used by the backup flow, which needs the volumes quiesced
-	// but the containers intact.  Missing containers are not an error.
+	// but the containers intact.  Missing containers are not an error.  If any
+	// container belongs to another assignment, none is stopped and the error is
+	// ErrContainerNotOwned.
 	StopProject(ctx context.Context, project *v1.Project) error
 
 	// StartProject starts every existing service container in spec order,
 	// undoing StopProject.  It does not create missing containers — that is
-	// ReconcileProject's job.  Missing containers are not an error.
+	// ReconcileProject's job.  Missing containers are not an error.  If any
+	// container belongs to another assignment, none is started and the error is
+	// ErrContainerNotOwned.
 	StartProject(ctx context.Context, project *v1.Project) error
 
 	// RecoverServices puts the named services back, and touches nothing else.

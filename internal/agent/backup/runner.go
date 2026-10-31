@@ -28,9 +28,11 @@ type ContainerController interface {
 // OwnershipResolver reports whether this node should still be running a
 // Project. It is consulted after a backup finishes, because the answer may
 // have changed while the containers were stopped — see
-// ShouldRestartContainers.
+// ShouldRestartContainers. uid and generation name the assignment the backup
+// started under; the answer is about that assignment, not about the Project's
+// name or Node.
 type OwnershipResolver interface {
-	Resolve(ctx context.Context, key ResourceKey) Ownership
+	Resolve(ctx context.Context, key ResourceKey, uid string, generation int64) Ownership
 }
 
 // ConditionReporter records the Maintenance condition on the server. It
@@ -424,7 +426,7 @@ func (r *Runner) restoreService(ctx context.Context, project *v1.Project, key Re
 	// still need to run, so detach from cancellation while keeping values.
 	cleanupCtx := context.WithoutCancel(ctx)
 
-	ownership := r.ownership.Resolve(cleanupCtx, key)
+	ownership := r.ownership.Resolve(cleanupCtx, key, project.ObjectMeta.UID, project.Status.AssignmentGeneration)
 	if !ShouldRestartContainers(reason, ownership) {
 		log.Info("Leaving containers stopped after backup",
 			zap.String("reason", reason.String()),
