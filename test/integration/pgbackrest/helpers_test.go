@@ -40,7 +40,7 @@ func newRuntime(t *testing.T) *docker.DockerRuntime {
 	if host == "" {
 		host = "unix:///var/run/docker.sock"
 	}
-	r, err := docker.NewDockerRuntime(host, t.TempDir(), true, zap.NewNop())
+	r, err := docker.NewDockerRuntime(host, t.TempDir(), zap.NewNop())
 	require.NoError(t, err)
 	return r
 }

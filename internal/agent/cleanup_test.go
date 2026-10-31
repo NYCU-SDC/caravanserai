@@ -589,7 +589,7 @@ func (removalOnlyRuntime) AssignmentRemaining(context.Context, docker.Assignment
 // Docker refuses to remove a network that still has an endpoint.
 func TestRepoHostIsCleanedBeforeDockerResources(t *testing.T) {
 	repo := pgbackrest.NewRepoHost(nil, pgbackrest.Config{DataRoot: t.TempDir(), NodeName: "pve1"}, zap.NewNop())
-	cleaner := defaultCleaner(removalOnlyRuntime{}, nil, repo)
+	cleaner := defaultCleaner(removalOnlyRuntime{}, nil, repo, "")
 	require.NotNil(t, cleaner)
 	var kinds []string
 	for _, r := range cleaner.resources {
@@ -597,7 +597,7 @@ func TestRepoHostIsCleanedBeforeDockerResources(t *testing.T) {
 	}
 	assert.Equal(t, "pgbackrest", kinds[0], "kinds in order: %v", kinds)
 
-	without := defaultCleaner(removalOnlyRuntime{}, nil, nil)
+	without := defaultCleaner(removalOnlyRuntime{}, nil, nil, "")
 	for _, r := range without.resources {
 		assert.NotEqual(t, "pgbackrest", r.Kind(), "no repo host, no repo host kind")
 	}
