@@ -234,7 +234,7 @@ func TestEnsureVolumeDataRestoresTheCommittedGeneration(t *testing.T) {
 	p.Status.AssignmentHistory = v1.AssignmentHistoryKnown
 	p.Status.Recovery = &v1.ProjectRecoveryStatus{CommittedBackup: &v1.CommittedBackup{BackupID: "20261031T000000Z-aaaaaaaa"}}
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, p, zap.NewNop())
+	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode, p, zap.NewNop())
 
 	require.ErrorIs(t, err, restore.ErrGenerationMissing)
 	assert.ErrorContains(t, err, "20261031T000000Z-aaaaaaaa")

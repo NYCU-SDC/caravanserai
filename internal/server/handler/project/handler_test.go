@@ -442,8 +442,8 @@ func TestValidateProjectSpecConfiguredPostgresImage(t *testing.T) {
 	assert.NoError(t, validateProjectSpecFor(onCopy, copied))
 	assert.ErrorContains(t, validateProjectSpecFor(postgresSpec(item), copied), "its image must be")
 
-	h := NewHandler(nil, nil, nil, false, WithPostgresDifferentialImage(""))
+	h := NewHandler(nil, nil, nil, WithPostgresDifferentialImage(""))
 	assert.Equal(t, v1.PostgresDifferentialImage, h.postgresImage, "an empty setting keeps the published image")
-	h = NewHandler(nil, nil, nil, false, WithPostgresDifferentialImage(copied))
+	h = NewHandler(nil, nil, nil, WithPostgresDifferentialImage(copied))
 	assert.Equal(t, copied, h.postgresImage)
 }

@@ -139,7 +139,9 @@ func (f *fakeStore) keys() []string {
 
 type fakeOwnership struct{ result Ownership }
 
-func (f fakeOwnership) Resolve(context.Context, ResourceKey, string, int64) Ownership { return f.result }
+func (f fakeOwnership) Resolve(context.Context, ResourceKey, string, int64) Ownership {
+	return f.result
+}
 
 // hasManifest reports whether any generation's manifest has been written.
 func (s *fakeStore) hasManifest() bool {

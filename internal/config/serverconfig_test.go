@@ -43,6 +43,8 @@ func TestServerConfig_Validate_TerminatingTimeout(t *testing.T) {
 
 	cfg.TerminatingTimeout = 0
 	assert.NoError(t, cfg.Validate(), "zero means the default")
+}
+
 func TestServerFromEnvLoadsThePostgresDifferentialImage(t *testing.T) {
 	t.Setenv("POSTGRES_DIFFERENTIAL_IMAGE", "registry.example/cara-postgres:16")
 	got, err := FromEnv(&Config{}, NewConfigLogger())

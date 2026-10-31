@@ -201,7 +201,6 @@ start_agent() {
 			AGENT_LISTEN_PORT=0 \
 			PROXY_LISTEN_ADDR=127.0.0.1:0 \
 			AGENT_ADVERTISE_IP=127.0.0.1 \
-			UID_ENFORCEMENT=true \
 			"${s3[@]}" \
 			"$test_root/bin/cara-agent"
 	) >"$test_root/agent-$mode.log" 2>&1 &
@@ -299,8 +298,7 @@ server_port="$(choose_port)"
 server_url="http://127.0.0.1:$server_port"
 (
 	cd "$test_root/server-run"
-	env HOST=127.0.0.1 PORT="$server_port" UID_ENFORCEMENT=true \
-		POSTGRES_DIFFERENTIAL_IMAGE="$pg_image" \
+	env HOST=127.0.0.1 PORT="$server_port"		POSTGRES_DIFFERENTIAL_IMAGE="$pg_image" \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &
