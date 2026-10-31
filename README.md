@@ -199,6 +199,8 @@ Configuration is read in order: `config.yaml` → `.env` → environment variabl
 | `otel_collector_url` | `OTEL_COLLECTOR_URL` | _(optional)_ | OTLP gRPC endpoint |
 | `headscale_api_url` | `HEADSCALE_API_URL` | _(optional)_ | Headscale management API URL. Enables the `/api/v1/overlay` endpoints when set together with the API key |
 | `headscale_api_key` | `HEADSCALE_API_KEY` | _(optional)_ | Headscale management API key (secret, never logged) |
+| `running_grace_period` | `RUNNING_GRACE_PERIOD` | `3m` | How long a Running Project may stay on a NotReady node before its release is attempted |
+| `grace_expired_release` | `GRACE_EXPIRED_RELEASE` | `false` | Move Projects with no Managed volume off a node that stayed NotReady past the grace period, with no proof it stopped; a partitioned node keeps its copy running until it reconnects. Requires `UID_ENFORCEMENT` |
 | `headscale_user` | `HEADSCALE_USER` | `cara-node` | Headscale user new pre-auth keys are created under |
 
 ### cara-agent

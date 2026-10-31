@@ -269,7 +269,7 @@ operator_token="e2e-operator-token"
 server_url="http://127.0.0.1:$server_port"
 (
 	cd "$test_root/server-run"
-	env HOST=127.0.0.1 PORT="$server_port" UID_ENFORCEMENT=true OPERATOR_TOKEN="$operator_token" \
+	env HOST=127.0.0.1 PORT="$server_port" UID_ENFORCEMENT=true OPERATOR_TOKEN="$operator_token" GRACE_EXPIRED_RELEASE=true \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &
@@ -345,6 +345,16 @@ for project in "$clean_project" "$stale_project"; do
 	assigned_to "$project" node-a || fail "$project was not placed on node-a"
 done
 
+# No Managed volume, so ADR-0024 lets it move on the grace period alone.
+stateless_project=failover-stateless
+create_project '{
+	"apiVersion":"caravanserai/v1","kind":"Project",
+	"metadata":{"name":"'"$stateless_project"'","namespace":"default"},
+	"spec":{"services":[{"name":"web","image":"nginx:alpine"}]}
+}'
+wait_until 120 "$stateless_project Running on node-a" phase_is "$stateless_project" Running
+assigned_to "$stateless_project" node-a || fail "$stateless_project was not placed on node-a"
+
 # Deterministic content: the failover is only proven if the exact bytes come
 # back, so compare a checksum rather than "the file exists".
 declare -A expected_sum
@@ -410,6 +420,8 @@ agent_a_pid=""
 log "waiting for the control plane to mark node-a NotReady (heartbeat timeout)"
 wait_until 180 "node-a NotReady" node_is node-a NotReady
 
+stateless_moved() { assigned_to "$stateless_project" node-b && phase_is "$stateless_project" Running; }
+
 # ── The release gate: an unconfirmed Node keeps its Projects ────────────────
 #
 # node-a's containers are still running, and its Agent cannot confirm them
@@ -426,6 +438,10 @@ done
 # The mark proves the grace period is over and the release was attempted.
 # Hold for two more 30-second resync rounds to prove the refusal holds rather
 # than being the first of several attempts.
+log "waiting for the Project with no Managed volume to move by itself"
+wait_until 180 "$stateless_project Running on node-b" stateless_moved
+log "$stateless_project moved to node-b with no operator action; Managed Projects stayed"
+
 log "holding for two more resync rounds"
 sleep 65
 
@@ -526,7 +542,7 @@ scenario_clean_destination() {
 # starting one, and the new assignment must be untouched.
 scenario_old_node_returns() {
 	log "scenario: node-a returns after the override"
-	for project in "$clean_project" "$stale_project"; do
+	for project in "$clean_project" "$stale_project" "$stateless_project"; do
 		dind_a stop "$project-web" >/dev/null ||
 			fail "$project: could not stop node-a's container to simulate the power loss"
 	done
@@ -538,7 +554,7 @@ scenario_old_node_returns() {
 	while :; do
 		running=0
 		left=0
-		for project in "$clean_project" "$stale_project"; do
+		for project in "$clean_project" "$stale_project" "$stateless_project"; do
 			n="$(count_containers dind_a "$project-web")" || fail "$project: could not list node-a's containers"
 			running=$((running + n))
 			n="$(count_containers dind_a "$project-web" -a)" || fail "$project: could not list node-a's containers"
@@ -590,6 +606,7 @@ if (( takeover_supported )); then
                         stale bytes         unchanged
                         v1 marker           unchanged
                         latest generation   $after (unchanged)
+  no Managed volume     $stateless_project moved to node-b with no operator action
   old node returns      stopped containers removed, none started
 EOF
 	log "PASS"

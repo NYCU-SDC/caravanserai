@@ -203,7 +203,7 @@ func main() {
 	// ============================================
 
 	nodeAdapter := adapter.NewNodeStoreAdapter(pgStore)
-	projectAdapter := adapter.NewProjectStoreAdapter(pgStore)
+	projectAdapter := adapter.NewProjectStoreAdapter(pgStore).WithGraceExpiredRelease(cfg.GraceExpiredRelease)
 
 	ctrlManager := controller.NewManager(logger)
 
@@ -222,6 +222,7 @@ func main() {
 		nodeAdapter,
 		eventBus,
 		controller.WithTerminatingTimeout(cfg.TerminatingTimeout),
+		controller.WithRunningGracePeriod(cfg.RunningGracePeriod),
 	))
 	ctrlManager.Add(controller.NewFailedProjectReschedulerController(logger,
 		projectAdapter,

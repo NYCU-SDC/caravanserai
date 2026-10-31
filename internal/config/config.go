@@ -66,6 +66,12 @@ func (c *Config) Validate() error {
 	if c.TerminatingTimeout < 0 {
 		return errors.New("terminating_timeout must not be negative")
 	}
+	if c.RunningGracePeriod < 0 {
+		return errors.New("running_grace_period must not be negative")
+	}
+	if c.GraceExpiredRelease && !c.UIDEnforcement {
+		return errors.New("grace_expired_release requires uid_enforcement")
+	}
 	return nil
 }
 
