@@ -11,7 +11,7 @@ import (
 func TestPhaseTransitionPolicy(t *testing.T) {
 	writers := []PhaseWriter{
 		WriterAdmission, WriterDeleteAPI, WriterScheduler, WriterRescheduler,
-		WriterFailedRescheduler, WriterAgent,
+		WriterFailedRescheduler, WriterOperatorTakeover, WriterAgent,
 	}
 	phases := []ProjectPhase{
 		"", ProjectPhasePending, ProjectPhaseScheduled, ProjectPhaseRunning,
@@ -32,6 +32,9 @@ func TestPhaseTransitionPolicy(t *testing.T) {
 		"Rescheduler: Running -> Pending":   true,
 
 		"FailedRescheduler: Failed -> Pending": true,
+
+		"OperatorTakeover: Scheduled -> Pending": true,
+		"OperatorTakeover: Running -> Pending":   true,
 
 		"Agent: Scheduled -> Running":      true,
 		"Agent: Scheduled -> Failed":       true,
@@ -80,6 +83,7 @@ func TestPhaseTransitionPolicyRefusals(t *testing.T) {
 		{"the delete API does not reopen a finished deletion", WriterDeleteAPI, ProjectPhaseTerminated, ProjectPhaseTerminating},
 		{"only the cleanup owner finalizes", WriterRescheduler, ProjectPhaseTerminating, ProjectPhaseTerminated},
 		{"an Agent cannot assign itself", WriterAgent, ProjectPhasePending, ProjectPhaseScheduled},
+		{"a takeover cannot undo a deletion", WriterOperatorTakeover, ProjectPhaseTerminating, ProjectPhasePending},
 		{"an Agent cannot recover a Failed Project in place", WriterAgent, ProjectPhaseFailed, ProjectPhaseRunning},
 		{"the Scheduler only assigns Pending Projects", WriterScheduler, ProjectPhaseFailed, ProjectPhaseScheduled},
 	}

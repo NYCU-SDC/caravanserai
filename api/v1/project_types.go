@@ -270,6 +270,35 @@ type IngressDef struct {
 	Access IngressAccess `json:"access,omitempty" yaml:"access,omitempty"`
 }
 
+// TakeoverOutcome is what an operator takeover changed.
+type TakeoverOutcome string
+
+const (
+	// TakeoverReleased: the assignment was still held and is now released.
+	TakeoverReleased TakeoverOutcome = "AssignmentReleased"
+	// TakeoverObligationOverridden: the assignment was already released and
+	// its obligation was blocking the next assignment.
+	TakeoverObligationOverridden TakeoverOutcome = "ObligationOverridden"
+)
+
+// TakeoverAuditRecord is one operator takeover decision. It outlives the
+// Project it is about.
+type TakeoverAuditRecord struct {
+	RequestID   string             `json:"requestID" yaml:"requestID"`
+	Namespace   string             `json:"namespace" yaml:"namespace"`
+	ProjectName string             `json:"projectName" yaml:"projectName"`
+	Assignment  AssignmentIdentity `json:"assignment" yaml:"assignment"`
+	// Evidence is the machine evidence available when the decision was made:
+	// "WorkloadStopped" or "None".
+	Evidence string          `json:"evidence" yaml:"evidence"`
+	Outcome  TakeoverOutcome `json:"outcome" yaml:"outcome"`
+	// Caller is what the server observed about the request. It does not
+	// identify a person.
+	Caller    string    `json:"caller" yaml:"caller"`
+	Note      string    `json:"note,omitempty" yaml:"note,omitempty"`
+	CreatedAt time.Time `json:"createdAt" yaml:"createdAt"`
+}
+
 // ProjectBackupConfig configures periodic object-store backup of a Project's
 // Managed volumes.
 //
@@ -502,7 +531,8 @@ const (
 	// isolated. Not implemented yet.
 	ReleaseByProviderFencing ReleaseAuthorizationKind = "ProviderFencing"
 	// ReleaseByOperatorOverride: an operator accepted the risk of takeover
-	// without machine evidence. Not implemented yet; never fencing evidence.
+	// without machine evidence. Never fencing or cleanup evidence: the old
+	// Node still owes cleanup if it ever returns.
 	ReleaseByOperatorOverride ReleaseAuthorizationKind = "OperatorOverride"
 	// ReleaseByLeaseExpired: the Node's lease expired under the self-fencing
 	// contract proposed in ADR-0023. Not implemented yet; never cleanup
@@ -559,6 +589,33 @@ func (r *ProjectRecoveryStatus) AddObligation(assignment AssignmentIdentity, rel
 		ReleasedAt:           releasedAt,
 		ReleaseAuthorization: authorization,
 	})
+}
+
+// OverrideRelease records an operator's takeover of assignment. An obligation
+// already standing for it, from a WorkloadStopped release whose Node never
+// came back to clean up, changes authorization rather than gaining a second
+// entry. Either way it stays unresolved: the override permits a new assignment
+// and says nothing about what the old Node still holds.
+func (r *ProjectRecoveryStatus) OverrideRelease(assignment AssignmentIdentity, releasedAt time.Time) {
+	if o := r.FindObligation(assignment); o != nil {
+		o.ReleaseAuthorization = ReleaseByOperatorOverride
+		return
+	}
+	r.AddObligation(assignment, releasedAt, ReleaseByOperatorOverride)
+}
+
+// NodesOwingCleanup returns the Nodes with an unresolved obligation.
+func (r *ProjectRecoveryStatus) NodesOwingCleanup() []string {
+	if r == nil {
+		return nil
+	}
+	var nodes []string
+	for _, o := range r.CleanupObligations {
+		if !o.Resolved() {
+			nodes = append(nodes, o.Assignment.NodeName)
+		}
+	}
+	return nodes
 }
 
 // PermitsAssignment reports whether this obligation lets the Project be

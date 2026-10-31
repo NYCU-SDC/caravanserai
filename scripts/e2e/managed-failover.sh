@@ -261,13 +261,15 @@ done
 
 log "building cara-server and cara-agent"
 go build -o "$test_root/bin/cara-server" ./cmd/cara-server
+go build -o "$test_root/bin/caractl" ./cmd/caractl
 go build -o "$test_root/bin/cara-agent" ./cmd/cara-agent
 
 server_port="$(choose_port)"
+operator_token="e2e-operator-token"
 server_url="http://127.0.0.1:$server_port"
 (
 	cd "$test_root/server-run"
-	env HOST=127.0.0.1 PORT="$server_port" UID_ENFORCEMENT=true \
+	env HOST=127.0.0.1 PORT="$server_port" UID_ENFORCEMENT=true OPERATOR_TOKEN="$operator_token" \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &
@@ -445,20 +447,19 @@ done
 
 # ── CARA-87 destination scenarios ────────────────────────────────────────────
 #
-# Both need the Projects reassigned to node-b, which now requires a takeover
+# Both need the Projects reassigned to node-b, which requires a takeover
 # authorization ADR-0017 accepts for a Node that may still be running the
-# workload: an audited operator override (CARA-89) or provider fencing. Neither
-# exists yet. The scenarios are kept, unchanged in what they assert, and run
-# only once such an authorization can be applied here; until then they are
-# reported NOT RUN — never as passed.
-#
-# To enable them, implement authorize_takeover for node-a's assignments and
-# set takeover_supported=1.
+# workload. Here that is an audited operator override (CARA-89), sent the way an
+# operator would, through caractl.
 
-takeover_supported=0
+takeover_supported=1
 
 authorize_takeover() {
-	fail "authorize_takeover is not implemented: no takeover authorization exists yet"
+	for project in "$clean_project" "$stale_project"; do
+		CARA_OPERATOR_TOKEN="$operator_token" "$test_root/bin/caractl" --server "http://127.0.0.1:$server_port" \
+			takeover "$project" --yes --note "managed-failover e2e" ||
+			fail "$project: operator takeover was refused"
+	done
 }
 
 # Scenario 1: unprovable destination data is refused, not adopted.
@@ -517,6 +518,43 @@ scenario_clean_destination() {
 	log "$clean_project source generation was ${backup_before[$clean_project]}"
 }
 
+# Scenario 3: the lost Node comes back after the override.
+#
+# Its containers are stopped first, as a power loss would leave them: this is
+# the case where an Agent running local recovery before it learns the assignment
+# is gone would start a second copy. The Agent must remove them without ever
+# starting one, and the new assignment must be untouched.
+scenario_old_node_returns() {
+	log "scenario: node-a returns after the override"
+	for project in "$clean_project" "$stale_project"; do
+		dind_a stop "$project-web" >/dev/null ||
+			fail "$project: could not stop node-a's container to simulate the power loss"
+	done
+
+	start_agent node-a "$data_root_a" "$dind_a_host" "$test_root/agent-a-return.log" "$test_root/agent-a-run"
+	agent_a_pid=$!
+
+	deadline=$((SECONDS + 180))
+	while :; do
+		running=0
+		left=0
+		for project in "$clean_project" "$stale_project"; do
+			n="$(count_containers dind_a "$project-web")" || fail "$project: could not list node-a's containers"
+			running=$((running + n))
+			n="$(count_containers dind_a "$project-web" -a)" || fail "$project: could not list node-a's containers"
+			left=$((left + n))
+		done
+		(( running == 0 )) || fail "node-a restarted a workload it no longer owns ($running running)"
+		(( left == 0 )) && break
+		(( SECONDS < deadline )) || fail "node-a did not remove the old containers ($left left)"
+		sleep 1
+	done
+
+	assigned_to "$clean_project" node-b || fail "$clean_project left node-b when node-a returned"
+	phase_is "$clean_project" Running || fail "$clean_project stopped running when node-a returned"
+	log "node-a removed the old containers without starting them; $clean_project still Running on node-b"
+}
+
 if (( takeover_supported )); then
 	authorize_takeover
 	log "waiting for both Projects to be reassigned to node-b"
@@ -525,6 +563,7 @@ if (( takeover_supported )); then
 	done
 	scenario_stale_destination
 	scenario_clean_destination
+	scenario_old_node_returns
 else
 	log "NOT RUN: CARA-87 destination scenarios (stale, clean) need an authorized takeover, which does not exist yet"
 fi
@@ -551,6 +590,7 @@ if (( takeover_supported )); then
                         stale bytes         unchanged
                         v1 marker           unchanged
                         latest generation   $after (unchanged)
+  old node returns      stopped containers removed, none started
 EOF
 	log "PASS"
 else

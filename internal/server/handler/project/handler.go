@@ -12,6 +12,8 @@
 //	DELETE /api/v1/projects/{name}/conditions/{type}  — Agent clears one condition
 //	PUT    /api/v1/projects/{name}/recovery/workload-stopped   — assigned Agent records that every container is stopped
 //	PUT    /api/v1/projects/{name}/recovery/resources-removed  — cleanup owner records that its resources are removed
+//	POST   /api/v1/projects/{name}/recovery/takeover           — operator overrides the release gate (operator token)
+//	GET    /api/v1/projects/{name}/recovery/takeover-audit     — recorded takeovers of the Project (operator token)
 package project
 
 import (
@@ -48,6 +50,10 @@ type Handler struct {
 	// UID or generation falls back to the unfenced write path. When true, a
 	// report without a complete fence is rejected as a stale assignment.
 	enforceAssignment bool
+
+	// operatorToken guards the takeover routes until ADR-0018 settles API
+	// access control. Empty disables them.
+	operatorToken string
 }
 
 // NewHandler creates a Project Handler. enforceAssignment turns on strict
@@ -63,6 +69,13 @@ func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter
 	}
 }
 
+// WithOperatorToken sets the credential the takeover routes require; they stay
+// disabled without one.
+func (h *Handler) WithOperatorToken(token string) *Handler {
+	h.operatorToken = token
+	return h
+}
+
 // RegisterRoutes satisfies apiserver.RouteRegistrar.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("POST /api/v1/projects", mid.HandlerFunc(h.createProject))
@@ -75,6 +88,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("DELETE /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.deleteCondition))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/workload-stopped", mid.HandlerFunc(h.putWorkloadStopped))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/resources-removed", mid.HandlerFunc(h.putResourcesRemoved))
+	mux.HandleFunc("POST /api/v1/projects/{name}/recovery/takeover", mid.HandlerFunc(h.postTakeover))
+	mux.HandleFunc("GET /api/v1/projects/{name}/recovery/takeover-audit", mid.HandlerFunc(h.getTakeoverAudit))
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────

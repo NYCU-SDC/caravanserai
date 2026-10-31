@@ -15,6 +15,10 @@ import (
 // %w to add a caller-specific detail.
 var ErrServiceNotConfigured = errors.New("service not configured")
 
+// ErrOperatorUnauthorized is returned when an operator-only route is called
+// without the operator credential.
+var ErrOperatorUnauthorized = errors.New("operator credential required")
+
 // NewProblemMapping returns a mapping function that bridges Caravanserai's
 // store sentinel errors to summer's problem types. Pass the returned function
 // to problem.NewWithMapping to create an HttpWriter.
@@ -25,6 +29,7 @@ var ErrServiceNotConfigured = errors.New("service not configured")
 //   - store.ErrConflictState     → 409 Conflict
 //   - store.ErrVersionConflict   → 409 Conflict
 //   - ErrServiceNotConfigured    → 503 Service Unavailable
+//   - ErrOperatorUnauthorized    → 401 Unauthorized
 //
 // Unrecognised errors return an empty Problem{}, which lets summer's built-in
 // fallback logic handle them (typically producing a 500 Internal Server Error).
@@ -39,6 +44,14 @@ func NewProblemMapping() func(error) problem.Problem {
 				Title:  "Service Unavailable",
 				Status: 503,
 				Type:   "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503",
+				Detail: err.Error(),
+			}
+
+		case errors.Is(err, ErrOperatorUnauthorized):
+			return problem.Problem{
+				Title:  "Unauthorized",
+				Status: 401,
+				Type:   "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401",
 				Detail: err.Error(),
 			}
 

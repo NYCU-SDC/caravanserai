@@ -200,6 +200,13 @@ type NodeStore interface {
 // ============================================================
 
 // ProjectStore covers all Project persistence operations.
+// TakeoverAudit is what the API layer knows about an operator takeover request.
+type TakeoverAudit struct {
+	RequestID string
+	Caller    string
+	Note      string
+}
+
 type ProjectStore interface {
 	// CreateProject persists a new Project.  Returns ErrAlreadyExists if a
 	// Project with the same name already exists.
@@ -324,6 +331,22 @@ type ProjectStore interface {
 	// with the same atomic predicate and error semantics as
 	// PatchProjectConditionFenced.
 	ClearProjectConditionFenced(ctx context.Context, name string, ref AssignmentRef, conditionType v1.ConditionType) error
+
+	// TakeoverProject applies an operator's override for the assignment in ref
+	// and appends audit in one transaction, so neither can commit alone. It
+	// accepts a Scheduled or Running Project marked TakeoverRequired, and a
+	// Pending Project whose latest assignment left a blocking obligation.
+	//
+	// A RequestID already recorded for this assignment returns the original
+	// record with replayed true and changes nothing. Returns ErrStaleAssignment
+	// when ref is not the Project's latest assignment, ErrConflictState when the
+	// Project is in no state to take over or the RequestID belongs to another
+	// decision, and ErrNotFound when it is gone.
+	TakeoverProject(ctx context.Context, name string, ref AssignmentRef, audit TakeoverAudit) (record v1.TakeoverAuditRecord, replayed bool, err error)
+
+	// ListTakeoverAudit returns the recorded takeovers of the named Project,
+	// oldest first, whether or not the Project still exists.
+	ListTakeoverAudit(ctx context.Context, name string) ([]v1.TakeoverAuditRecord, error)
 
 	// RecordWorkloadStopped stores the currently assigned Agent's evidence that
 	// every Project container is stopped. The fence and the phase (Scheduled,
