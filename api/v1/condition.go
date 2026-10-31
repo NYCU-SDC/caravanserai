@@ -136,6 +136,10 @@ const (
 	// without logging into the node.
 	ConditionTypeRecoveryBlocked ConditionType = "RecoveryBlocked"
 
+	// ConditionTypeSchedulingBlocked is True on a Pending Project the scheduler
+	// could not place, and says why. It goes away with the assignment.
+	ConditionTypeSchedulingBlocked ConditionType = "SchedulingBlocked"
+
 	// ConditionTypeTeardownBlocked indicates that the assigned agent is
 	// tearing down a Terminating Project and cannot finish: a removal failed,
 	// what is left could not be read, or something survived the removal.

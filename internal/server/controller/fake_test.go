@@ -154,9 +154,10 @@ func (f *fakeNodeStore) SetNodeState(_ context.Context, name string, state v1.No
 // ---------------------------------------------------------------------------
 
 type fakeSchedulerProjectStore struct {
-	mu       sync.Mutex
-	projects map[string]schedulerProjectRecord
-	errs     map[string]error
+	SchedulingBlockedCalls []string
+	mu                     sync.Mutex
+	projects               map[string]schedulerProjectRecord
+	errs                   map[string]error
 
 	// scheduleErrs fails only SetProjectScheduled, as the adapter does when a
 	// cleanup obligation refuses the assignment; reads still succeed.
@@ -237,6 +238,13 @@ func (f *fakeSchedulerProjectStore) ListProjectsByNodeRef(_ context.Context, nod
 		out = append(out, &ProjectSnapshot{Name: n, Phase: r.Phase, NodeRef: r.NodeRef, Size: r.Size})
 	}
 	return out, nil
+}
+
+func (f *fakeSchedulerProjectStore) SetSchedulingBlocked(_ context.Context, _, reason, message string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.SchedulingBlockedCalls = append(f.SchedulingBlockedCalls, reason+": "+message)
+	return nil
 }
 
 func (f *fakeSchedulerProjectStore) SetProjectScheduled(_ context.Context, name, nodeRef string) error {

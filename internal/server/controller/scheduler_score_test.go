@@ -177,3 +177,12 @@ func TestProjectSchedulerScore(t *testing.T) {
 			"the second project goes to the node the first one did not fill")
 	})
 }
+
+func TestSchedulerReportsWhyAProjectWaits(t *testing.T) {
+	ps := newFakeSchedulerProjectStore()
+	ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhasePending, Size: v1.ProjectSizeSmall}
+	ctrl := NewProjectSchedulerController(zap.NewNop(), ps, newFakeSchedulerNodeStoreOf(), nil)
+	_, err := ctrl.Reconcile(t.Context(), "my-app")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"NoReadyNodes: no Node is Ready"}, ps.SchedulingBlockedCalls)
+}

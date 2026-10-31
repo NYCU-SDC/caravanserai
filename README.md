@@ -190,6 +190,8 @@ spec:
 
 Configuration is read in order: `config.yaml` → `.env` → environment variables → CLI flags.
 
+The file is the one named by `--config` or `CARA_CONFIG`, and a named file that cannot be read stops startup. Otherwise it is `./config.yaml`, then `/etc/cara/config.yaml`. The same applies to cara-agent.
+
 | Key | Env var | Default | Description |
 |-----|---------|---------|-------------|
 | `debug` | `DEBUG` | `false` | Enable debug logging |
