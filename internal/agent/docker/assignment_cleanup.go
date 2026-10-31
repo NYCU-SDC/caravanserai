@@ -46,8 +46,7 @@ func (a Assignment) String() string {
 // from that generation; leaving them is what lets the two obligations be
 // resolved independently, in either order.
 //
-// Ownership is always matched by UID, whatever the runtime's UID enforcement
-// setting: this removes resources on the strength of a cleanup obligation for
+// Ownership is always matched by UID: this removes resources on the strength of a cleanup obligation for
 // one lifetime, and a same-name resource from any other lifetime is not that
 // obligation's to remove. It is idempotent; anything already gone is not an
 // error.

@@ -89,15 +89,6 @@ type AgentConfig struct {
 	// OverlayHostname optionally overrides the hostname the agent registers
 	// with Headscale.  Defaults to NodeName (the OS hostname) when empty.
 	OverlayHostname string `yaml:"overlay_hostname" envconfig:"OVERLAY_HOSTNAME"`
-	// UIDEnforcement turns on Project UID ownership fencing (CARA-82). When
-	// false (the default, "compatibility mode") new Docker resources are still
-	// labelled with their Project UID but ownership decisions fall back to
-	// (namespace, name), so an agent upgraded ahead of the fleet does not
-	// quarantine still-valid pre-UID containers. Enable it cluster-wide only
-	// after every agent understands UID-bearing reconcile payloads: a same-name
-	// container carrying a different or missing UID is then treated as not owned
-	// (refused for adoption and quarantined by the orphan sweep).
-	UIDEnforcement bool `yaml:"uid_enforcement" envconfig:"UID_ENFORCEMENT"`
 
 	// configFileError is why a config file named explicitly could not be used.
 	configFileError error
@@ -270,7 +261,6 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 		HeadscaleURL:     os.Getenv("HEADSCALE_URL"),
 		PreauthKeyFile:   os.Getenv("HEADSCALE_PREAUTH_KEY_FILE"),
 		OverlayHostname:  os.Getenv("OVERLAY_HOSTNAME"),
-		UIDEnforcement:   os.Getenv("UID_ENFORCEMENT") == "true",
 		ReservedCPU:      os.Getenv("AGENT_RESERVED_CPU"),
 		ReservedMemory:   os.Getenv("AGENT_RESERVED_MEMORY"),
 		S3: S3Config{
@@ -307,7 +297,6 @@ func AgentFromFlags(cfg *AgentConfig) (*AgentConfig, error) {
 	flag.StringVar(&flagConfig.HeadscaleURL, "headscale-url", "", "Headscale control-plane URL to join on startup (enables overlay networking)")
 	flag.StringVar(&flagConfig.PreauthKeyFile, "preauth-key-file", "", "path to a file containing the Headscale pre-auth key")
 	flag.StringVar(&flagConfig.OverlayHostname, "overlay-hostname", "", "hostname to register with Headscale (default: node name)")
-	flag.BoolVar(&flagConfig.UIDEnforcement, "uid-enforcement", false, "enforce Project UID ownership fencing (default: false, compatibility mode)")
 	flag.StringVar(&flagConfig.ReservedCPU, "reserved-cpu", "", "CPU held back from node capacity for the system (default: 500m)")
 	flag.StringVar(&flagConfig.ReservedMemory, "reserved-memory", "", "memory held back from node capacity for the system (default: 512Mi)")
 	flag.String(configFlag, "", configFlagUsage)

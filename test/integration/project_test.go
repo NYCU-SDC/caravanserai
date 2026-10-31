@@ -15,6 +15,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fencedStatusBody is a status report for phase carrying the Project's current
+// assignment fence, as its Agent would send it.
+func fencedStatusBody(t *testing.T, name, phase string) []byte {
+	t.Helper()
+	p := getProject(t, name)
+	return mustMarshal(t, map[string]any{
+		"phase":                phase,
+		"uid":                  p.ObjectMeta.UID,
+		"nodeRef":              p.Status.NodeRef,
+		"assignmentGeneration": p.Status.AssignmentGeneration,
+	})
+}
+
 // TestProjectStatusPatch verifies that PATCH /api/v1/projects/{name}/status
 // rejects unrecognised phase values with 400 and accepts a valid report with
 // 204. The cases run in order against one Scheduled Project, so each valid
@@ -103,8 +116,7 @@ func TestProjectStatusPatch(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			patchBody := mustMarshal(t, map[string]string{"phase": tc.phase})
-			resp := doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", patchBody)
+			resp := doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", fencedStatusBody(t, projectName, tc.phase))
 
 			require.Equal(t, tc.wantStatus, resp.StatusCode,
 				"phase %q: expected %d", tc.phase, tc.wantStatus)
@@ -429,8 +441,7 @@ func TestProjectUpdate(t *testing.T) {
 	// Assign the Project, then report it Running and Failed through the status
 	// endpoint as its Agent would.
 	placeInPhase(t, projectName, v1.ProjectPhaseScheduled, "", "")
-	patchBody := mustMarshal(t, map[string]string{"phase": string(v1.ProjectPhaseRunning)})
-	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", patchBody)
+	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", fencedStatusBody(t, projectName, string(v1.ProjectPhaseRunning)))
 	require.Equal(t, http.StatusNoContent, resp.StatusCode, "patch to Running: expected 204")
 	drainBody(resp)
 
@@ -440,8 +451,7 @@ func TestProjectUpdate(t *testing.T) {
 
 	// ── 5. Transition to Failed, then PUT → 200 (allowed) ────────────────────
 
-	patchBody = mustMarshal(t, map[string]string{"phase": string(v1.ProjectPhaseFailed)})
-	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", patchBody)
+	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", fencedStatusBody(t, projectName, string(v1.ProjectPhaseFailed)))
 	require.Equal(t, http.StatusNoContent, resp.StatusCode, "patch to Failed: expected 204")
 	drainBody(resp)
 

@@ -113,7 +113,7 @@ func run(m *testing.M) int {
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
 	agentDialer := agentdialer.New(agentdialer.Config{Nodes: pgStore})
 	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, pgStore, agentDialer, problemWriter))
-	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter, false).WithOperatorToken(testOperatorToken))
+	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter).WithOperatorToken(testOperatorToken))
 	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
 
 	ts := httptest.NewServer(apiSrv.Handler())

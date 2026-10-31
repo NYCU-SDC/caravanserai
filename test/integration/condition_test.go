@@ -5,6 +5,8 @@ package integration
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"strconv"
 	"testing"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -32,6 +34,28 @@ func findCondition(conditions []v1.Condition, condType v1.ConditionType) (v1.Con
 		}
 	}
 	return v1.Condition{}, false
+}
+
+// fencedCondition is a condition write carrying the Project's current assignment
+// fence, as its Agent would send it.
+func fencedCondition(t *testing.T, name string, fields map[string]any) []byte {
+	t.Helper()
+	p := getProject(t, name)
+	fields["uid"] = p.ObjectMeta.UID
+	fields["nodeRef"] = p.Status.NodeRef
+	fields["assignmentGeneration"] = p.Status.AssignmentGeneration
+	return mustMarshal(t, fields)
+}
+
+// fenceQuery is the same fence as the query string of a condition clear.
+func fenceQuery(t *testing.T, name string) string {
+	t.Helper()
+	p := getProject(t, name)
+	return url.Values{
+		"uid":                  {p.ObjectMeta.UID},
+		"nodeRef":              {p.Status.NodeRef},
+		"assignmentGeneration": {strconv.FormatInt(p.Status.AssignmentGeneration, 10)},
+	}.Encode()
 }
 
 // TestProjectConditionPatchIsolatesPhase is the guarantee CARA-59 depends on:
@@ -70,7 +94,7 @@ func TestProjectConditionPatchIsolatesPhase(t *testing.T) {
 
 	resp = doRequest(t, http.MethodPatch,
 		"/api/v1/projects/"+projectName+"/conditions/Maintenance",
-		mustMarshal(t, map[string]string{
+		fencedCondition(t, projectName, map[string]any{
 			"status": "True", "reason": "BackingUp", "message": "Containers stopped for backup",
 		}))
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
@@ -99,7 +123,7 @@ func TestProjectConditionPatchIsolatesPhase(t *testing.T) {
 
 	resp = doRequest(t, http.MethodPatch,
 		"/api/v1/projects/"+projectName+"/conditions/Maintenance",
-		mustMarshal(t, map[string]string{
+		fencedCondition(t, projectName, map[string]any{
 			"status": "True", "reason": "BackingUp", "message": "Containers stopped for backup",
 		}))
 	require.Equal(t, http.StatusNoContent, resp.StatusCode, "re-asserting a condition is not an error")
@@ -108,7 +132,7 @@ func TestProjectConditionPatchIsolatesPhase(t *testing.T) {
 	// ── Clear Maintenance ───────────────────────────────────────────────────
 
 	resp = doRequest(t, http.MethodDelete,
-		"/api/v1/projects/"+projectName+"/conditions/Maintenance", nil)
+		"/api/v1/projects/"+projectName+"/conditions/Maintenance?"+fenceQuery(t, projectName), nil)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	drainBody(resp)
 
@@ -126,7 +150,7 @@ func TestProjectConditionPatchIsolatesPhase(t *testing.T) {
 	// Clearing an absent condition is a no-op, not an error — the backup's
 	// deferred cleanup may run twice.
 	resp = doRequest(t, http.MethodDelete,
-		"/api/v1/projects/"+projectName+"/conditions/Maintenance", nil)
+		"/api/v1/projects/"+projectName+"/conditions/Maintenance?"+fenceQuery(t, projectName), nil)
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 	drainBody(resp)
 }
@@ -200,7 +224,10 @@ func TestProjectConditionRejectsInvalidStatus(t *testing.T) {
 func TestProjectConditionOnMissingProject(t *testing.T) {
 	resp := doRequest(t, http.MethodPatch,
 		"/api/v1/projects/e2e-does-not-exist/conditions/Maintenance",
-		mustMarshal(t, map[string]string{"status": "True", "reason": "BackingUp"}))
+		mustMarshal(t, map[string]any{
+			"status": "True", "reason": "BackingUp",
+			"uid": "uid-1", "nodeRef": "node-a", "assignmentGeneration": 1,
+		}))
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	drainBody(resp)
 }
@@ -234,7 +261,7 @@ func TestProjectConditionRecoveryBlockedKeepsProjectRunning(t *testing.T) {
 
 	resp = doRequest(t, http.MethodPatch,
 		"/api/v1/projects/"+projectName+"/conditions/RecoveryBlocked",
-		mustMarshal(t, map[string]string{
+		fencedCondition(t, projectName, map[string]any{
 			"status": "True", "reason": "VolumeUnavailable",
 			"message": `managed volume "db-data" is missing`,
 		}))
@@ -258,7 +285,7 @@ func TestProjectConditionRecoveryBlockedKeepsProjectRunning(t *testing.T) {
 	// ── Unblock ─────────────────────────────────────────────────────────────
 
 	resp = doRequest(t, http.MethodDelete,
-		"/api/v1/projects/"+projectName+"/conditions/RecoveryBlocked", nil)
+		"/api/v1/projects/"+projectName+"/conditions/RecoveryBlocked?"+fenceQuery(t, projectName), nil)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	drainBody(resp)
 

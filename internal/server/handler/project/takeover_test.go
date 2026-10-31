@@ -15,7 +15,7 @@ import (
 
 // A server with no OPERATOR_TOKEN must not treat an empty credential as a match.
 func TestTakeoverDisabledWithoutToken(t *testing.T) {
-	h := NewHandler(zap.NewNop(), nil, problem.NewWithMapping(handler.NewProblemMapping()), true)
+	h := NewHandler(zap.NewNop(), nil, problem.NewWithMapping(handler.NewProblemMapping()))
 	for _, auth := range []string{"", "Bearer "} {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/web/recovery/takeover", strings.NewReader("{}"))
 		req.Header.Set("Authorization", auth)

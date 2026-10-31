@@ -83,20 +83,6 @@ func TestDeletingAProjectRemovesEveryGenerationOfItsLifetime(t *testing.T) {
 	assert.Empty(t, left)
 }
 
-// Compatibility mode keeps its contract: a container without UID and
-// generation labels is adopted, as it was before these checks existed.
-func TestReconcileProjectCompatibilityModeAdoptsALegacyContainer(t *testing.T) {
-	f := newRecoverFixture(t, v1.VolumeTypeManaged)
-	f.provisionManaged(t)
-	f.docker.withContainer(ContainerName("blog", "db"), "exited", map[string]string{
-		labelProject: "blog",
-		labelService: "db",
-	})
-
-	require.NoError(t, f.runtime.ReconcileProject(t.Context(), f.project))
-	assert.Contains(t, f.docker.mutations, "ContainerStart:"+fakeID("blog-db"))
-}
-
 // ── Containers of services the spec no longer declares ───────────────────────
 
 // The case a per-service walk cannot see: generation 6 declared "worker",
@@ -132,19 +118,6 @@ func TestStaleContainersFindsAPreviousLifetime(t *testing.T) {
 func TestStaleContainersIsEmptyWhenEveryContainerIsOurs(t *testing.T) {
 	f := newStrictFixture(t)
 	f.container("db", "running")
-
-	stale, err := f.runtime.StaleContainers(t.Context(), f.project)
-
-	require.NoError(t, err)
-	assert.Empty(t, stale)
-}
-
-// Compatibility mode does not compare UID or generation, so an earlier
-// generation's container is not stale there — the same contract the rest of
-// the ownership rule keeps.
-func TestStaleContainersIgnoresGenerationInCompatibilityMode(t *testing.T) {
-	f := newRecoverFixture(t, v1.VolumeTypeManaged)
-	f.staleContainer("worker", "running", labelGeneration, "6")
 
 	stale, err := f.runtime.StaleContainers(t.Context(), f.project)
 

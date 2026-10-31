@@ -125,12 +125,6 @@ type RunConfig struct {
 	// loop skip Projects with an operation in flight. Nil disables backups.
 	Backups *BackupSupport
 
-	// UIDEnforcement turns on Project UID ownership fencing in the orphan sweep
-	// (CARA-82). It must match the value passed to docker.NewDockerRuntime so
-	// the assignment identities and local container identities are built the
-	// same way.
-	UIDEnforcement bool
-
 	// PollInterval is how often assigned Projects are fetched and reconciled.
 	// Zero means defaultPollInterval. It is configurable so tests can drive the
 	// real loop at millisecond cadence; production leaves it unset.
@@ -253,7 +247,7 @@ func Run(ctx context.Context, cfg RunConfig) {
 			}
 
 		case <-pollTicker.C:
-			reconcileProjects(ctx, client, runtime, routes, cfg.Backups, orphans, cleaner, recovery, cfg.UIDEnforcement, logger)
+			reconcileProjects(ctx, client, runtime, routes, cfg.Backups, orphans, cleaner, recovery, logger)
 		}
 	}
 }
@@ -342,7 +336,7 @@ func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docke
 // cleaner removes and accounts for an assignment's resources. It may be nil,
 // which disables cleanup tasks and leaves termination unable to report
 // ResourcesRemoved.
-func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, orphans *orphanTracker, cleaner *assignmentCleaner, recovery *recoveryTracker, uidEnforcement bool, logger *zap.Logger) {
+func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, orphans *orphanTracker, cleaner *assignmentCleaner, recovery *recoveryTracker, logger *zap.Logger) {
 	assignedProjects, err := client.ListProjectsAssignedToNode(ctx)
 	if err != nil {
 		// Unknown ownership never counts toward destructive cleanup. Preserve
@@ -361,7 +355,7 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 	// Failed projects. Filtering phases before this point would misclassify a
 	// Failed-but-still-owned project as an orphan.
 	if orphans != nil {
-		sweepOrphans(ctx, runtime, routes, orphans, busy, assignedProjects, uidEnforcement, logger)
+		sweepOrphans(ctx, runtime, routes, orphans, busy, assignedProjects, logger)
 	}
 
 	// Obligations for assignments this node gave up. Independent of the

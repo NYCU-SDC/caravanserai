@@ -45,18 +45,6 @@ type Config struct {
 	// Defaults to "cara-node".
 	HeadscaleUser string `yaml:"headscale_user" envconfig:"HEADSCALE_USER"`
 
-	// UIDEnforcement turns on strict UID and assignment-generation fencing on
-	// the server side (CARA-82, CARA-83). It shares the agent's UID_ENFORCEMENT
-	// switch on purpose: UID and generation are one ownership identity, rolled
-	// out together. When false (the default, "compatibility mode") an Agent
-	// report that carries a complete UID + nodeRef + generation fence is still
-	// validated atomically, but a legacy report missing that fence is accepted
-	// through the unfenced path so an un-upgraded Agent keeps working. When
-	// true, a report missing UID or generation is rejected as a stale
-	// assignment rather than accepted. Enable it cluster-wide only after every
-	// Agent sends the fence and legacy runtime ownership has been remediated.
-	UIDEnforcement bool `yaml:"uid_enforcement" envconfig:"UID_ENFORCEMENT"`
-
 	// TerminatingTimeout is how long a Terminating Project's Node may stay
 	// NotReady before the Project is marked TerminationBlocked. Zero means the
 	// controller's default (10m). It only decides when the stuck deletion is
@@ -71,7 +59,7 @@ type Config struct {
 	// GraceExpiredRelease moves a Project with no Managed volume off a Node that
 	// stayed NotReady past the grace period, with no proof it stopped. A
 	// partitioned Node keeps its copy running until it reconnects (ADR-0024).
-	// Requires UIDEnforcement, so the returning Agent's stale writes are refused.
+	// The assignment fence refuses the returning Agent's stale writes.
 	GraceExpiredRelease bool `yaml:"grace_expired_release" envconfig:"GRACE_EXPIRED_RELEASE"`
 
 	// OperatorToken is the bearer token the operator takeover routes require.
@@ -158,7 +146,6 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		HeadscaleAPIURL:     os.Getenv("HEADSCALE_API_URL"),
 		HeadscaleAPIKey:     os.Getenv("HEADSCALE_API_KEY"),
 		HeadscaleUser:       os.Getenv("HEADSCALE_USER"),
-		UIDEnforcement:      os.Getenv("UID_ENFORCEMENT") == "true",
 		OperatorToken:       os.Getenv("OPERATOR_TOKEN"),
 		GraceExpiredRelease: os.Getenv("GRACE_EXPIRED_RELEASE") == "true",
 	}
@@ -196,10 +183,9 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.StringVar(&flagConfig.HeadscaleAPIURL, "headscale-api-url", "", "Headscale management API URL (enables overlay admin endpoints)")
 	flag.StringVar(&flagConfig.HeadscaleAPIKey, "headscale-api-key", "", "Headscale management API key")
 	flag.StringVar(&flagConfig.HeadscaleUser, "headscale-user", "", "Headscale user new pre-auth keys are created under (default: cara-node)")
-	flag.BoolVar(&flagConfig.UIDEnforcement, "uid-enforcement", false, "enforce Project UID and assignment-generation fencing (default: false, compatibility mode)")
 	flag.DurationVar(&flagConfig.TerminatingTimeout, "terminating-timeout", 0, "how long a Terminating project's node may be NotReady before the deletion is reported blocked (default: 10m)")
 	flag.DurationVar(&flagConfig.RunningGracePeriod, "running-grace-period", 0, "how long a Running Project may stay on a NotReady node before its release is attempted (default: 3m)")
-	flag.BoolVar(&flagConfig.GraceExpiredRelease, "grace-expired-release", false, "move Projects with no Managed volume off a node that stayed NotReady past the grace period (requires uid-enforcement)")
+	flag.BoolVar(&flagConfig.GraceExpiredRelease, "grace-expired-release", false, "move Projects with no Managed volume off a node that stayed NotReady past the grace period")
 	flag.String(configFlag, "", configFlagUsage)
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)

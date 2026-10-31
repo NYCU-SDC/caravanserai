@@ -56,8 +56,8 @@ func (e *VolumeUnavailableError) Unwrap() error { return ErrRecoveryVolumeUnavai
 
 // ErrContainerNotOwned reports that the container found under a service's
 // deterministic name does not belong to the assignment being recovered: it
-// carries another Project's labels, or — with UID enforcement on — another
-// lifetime's UID or an earlier grant's assignment generation.
+// carries another Project's labels, another lifetime's UID, or an earlier
+// grant's assignment generation.
 //
 // Container names are derived from (project, service), so a name alone proves
 // nothing about ownership: a container left by generation 7 has exactly the
@@ -67,8 +67,8 @@ func (e *VolumeUnavailableError) Unwrap() error { return ErrRecoveryVolumeUnavai
 // recovery refuses both and leaves the container where it is.
 //
 // What removes it depends on which label differs. A container from a previous
-// lifetime carries another UID, so under UID enforcement the orphan sweep sees
-// it as another Project's and reclaims it. One left by an earlier grant of the
+// lifetime carries another UID, so the orphan sweep sees it as another
+// Project's and reclaims it. One left by an earlier grant of the
 // same lifetime carries the same UID, so the sweep sees the Project it still
 // has assigned here and leaves it; nothing reclaims such a container yet, and
 // until that is decided an operator has to remove it.
@@ -113,8 +113,7 @@ type StaleContainer struct {
 // UID is the immutable server-generated Project identity (CARA-82). It fences
 // ownership across Project lifetimes: a leftover container from a previous
 // lifetime of the same (namespace, name) carries a different UID, and a pre-UID
-// (legacy) container carries an empty UID. UID is empty for identities built in
-// compatibility mode, where ownership falls back to (namespace, name).
+// (legacy) container carries an empty UID.
 type ProjectIdentity struct {
 	Namespace string
 	Name      string
@@ -206,8 +205,7 @@ type Runtime interface {
 	//
 	// Every existing container is checked against the assignment before it is
 	// started, removed, or counted as already recovered: the project, service
-	// and namespace labels always, and with UID enforcement on, the UID and
-	// assignment generation too. A container that fails the check is left
+	// and namespace labels, the UID, and the assignment generation. A container that fails the check is left
 	// exactly as it is and the call returns ErrContainerNotOwned.
 	//
 	// Because Docker creates a volume it cannot find — at start as readily as

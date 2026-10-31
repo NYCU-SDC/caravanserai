@@ -63,7 +63,7 @@ func TestWorkloadStoppedEvidence(t *testing.T) {
 	const name = "e2e-workload-stopped"
 	uid, gen := createAssigned(t, name, "node-a", v1.ProjectPhaseRunning)
 
-	t.Run("refused without a fence even in non-strict mode", func(t *testing.T) {
+	t.Run("refused without a fence", func(t *testing.T) {
 		before := getProject(t, name).ObjectMeta.ResourceVersion
 		assert.Equal(t, http.StatusConflict, putEvidence(t, name, "workload-stopped", []byte(`{}`)))
 		assert.Equal(t, before, getProject(t, name).ObjectMeta.ResourceVersion)

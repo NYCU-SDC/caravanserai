@@ -141,7 +141,7 @@ func main() {
 		logger.Info("Overlay networking disabled (headscale_url/preauth_key_file not set), running on underlay")
 	}
 
-	dockerRuntime, err := docker.NewDockerRuntime(cfg.DockerHost, cfg.DataRoot, cfg.UIDEnforcement, logger)
+	dockerRuntime, err := docker.NewDockerRuntime(cfg.DockerHost, cfg.DataRoot, logger)
 	if err != nil {
 		logger.Fatal("Failed to create Docker runtime", zap.Error(err))
 	}
@@ -186,7 +186,6 @@ func main() {
 		SystemReserved:    agent.SystemReserved{CPUMilli: reservedCPU, MemoryBytes: reservedMemory},
 		Routes:            routeTable,
 		Backups:           backupSupport,
-		UIDEnforcement:    cfg.UIDEnforcement,
 		Logger:            logger,
 	})
 
