@@ -82,26 +82,37 @@ func TestProjectRecoveryStatusRoundTrip(t *testing.T) {
 	drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+name+"?force=true", nil))
 }
 
-// Recovery is server-owned. A client that sends it on create — a forged retry
-// counter or forged stop evidence — must not have it stored, because recovery
+// Status is server-owned. A client that sends any of it on create — a phase and
+// Node that skip the Scheduler, an assignment history that disables immediate
+// deletion, forged stop evidence — must not have it stored, because
 // controllers would later act on it as if the server had recorded it.
-func TestCreateProjectDropsClientRecoveryStatus(t *testing.T) {
-	const name = "e2e-recovery-injection"
+func TestCreateProjectResetsClientStatus(t *testing.T) {
+	const name = "e2e-status-injection"
 	drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+name+"?force=true", nil))
 
 	forged := v1.AssignmentIdentity{ProjectUID: "forged", NodeName: "node-x", AssignmentGeneration: 99}
 	body := mustMarshal(t, v1.Project{
 		ObjectMeta: v1.ObjectMeta{Name: name},
 		Spec:       v1.ProjectSpec{Services: []v1.ServiceDef{{Name: "web", Image: "nginx:alpine"}}},
-		Status: v1.ProjectStatus{Recovery: &v1.ProjectRecoveryStatus{
-			RescheduleAttempts: 42,
-			PreferredNode:      "node-x",
-			WorkloadStopped:    &v1.WorkloadStoppedEvidence{Assignment: forged, ObservedAt: time.Now()},
-			CleanupObligations: []v1.CleanupObligation{{
-				Assignment: forged, ReleasedAt: time.Now(), ReleaseAuthorization: v1.ReleaseByOperatorOverride,
-				ResourcesRemoved: &v1.ResourcesRemovedEvidence{ObservedAt: time.Now()},
+		Status: v1.ProjectStatus{
+			Phase:                v1.ProjectPhaseRunning,
+			NodeRef:              "node-x",
+			AssignmentGeneration: 99,
+			AssignmentHistory:    v1.AssignmentHistoryKnown,
+			FailedNodes:          []string{"node-y"},
+			Conditions: []v1.Condition{{
+				Type: v1.ConditionTypePhase, Status: v1.ConditionTrue, Reason: "Forged", LastTransitionTime: time.Now(),
 			}},
-		}},
+			Recovery: &v1.ProjectRecoveryStatus{
+				RescheduleAttempts: 42,
+				PreferredNode:      "node-x",
+				WorkloadStopped:    &v1.WorkloadStoppedEvidence{Assignment: forged, ObservedAt: time.Now()},
+				CleanupObligations: []v1.CleanupObligation{{
+					Assignment: forged, ReleasedAt: time.Now(), ReleaseAuthorization: v1.ReleaseByOperatorOverride,
+					ResourcesRemoved: &v1.ResourcesRemovedEvidence{ObservedAt: time.Now()},
+				}},
+			},
+		},
 	})
 	resp := doRequest(t, http.MethodPost, "/api/v1/projects", body)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -109,8 +120,19 @@ func TestCreateProjectDropsClientRecoveryStatus(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
 	drainBody(resp)
 
-	assert.Nil(t, created.Status.Recovery, "the create response echoed client-supplied recovery status")
-	assert.Nil(t, getProject(t, name).Status.Recovery, "client-supplied recovery status was persisted")
+	assert.Equal(t, v1.InitialProjectStatus(), created.Status, "the create response echoed client-supplied status")
+	assert.Equal(t, v1.InitialProjectStatus(), getProject(t, name).Status, "client-supplied status was persisted")
+
+	// The forged Running phase must not reach the phase column either, or
+	// phase-filtered reads would see a Project the Scheduler never placed.
+	resp = doRequest(t, http.MethodGet, "/api/v1/projects?phase=Running", nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var running v1.ProjectList
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&running))
+	drainBody(resp)
+	for _, p := range running.Items {
+		assert.NotEqual(t, name, p.Name, "the forged Running phase was stored in the phase column")
+	}
 
 	drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+name+"?force=true", nil))
 }

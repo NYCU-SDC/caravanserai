@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -176,14 +177,18 @@ func TestFencedStaleReturns409(t *testing.T) {
 	}
 }
 
-// A newly created Project is always NeverAssigned at generation zero, and a
-// client cannot override that server-owned state.
-func TestCreateInitializesNeverAssigned(t *testing.T) {
+// Status is server-owned: whatever a client sends on create is replaced by the
+// initial status, not filtered field by field. The comparison is against the
+// whole value, so a status field added later is covered without editing this
+// test or createProject.
+func TestCreateResetsClientStatus(t *testing.T) {
 	s := &fenceFakeStore{}
 	h := newFenceHandler(s, false)
 
 	body := `{"metadata":{"name":"fresh"},"spec":{"services":[{"name":"web","image":"nginx"}]},` +
-		`"status":{"assignmentGeneration":99,"assignmentHistory":"Known"}}`
+		`"status":{"phase":"Running","nodeRef":"node-x","assignmentGeneration":99,"assignmentHistory":"Known",` +
+		`"failedNodes":["node-y"],"conditions":[{"type":"Phase","status":"True","reason":"Forged"}],` +
+		`"recovery":{"rescheduleAttempts":42}}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.createProject(rec, req)
@@ -194,11 +199,16 @@ func TestCreateInitializesNeverAssigned(t *testing.T) {
 	if s.created == nil {
 		t.Fatal("CreateProject was not called")
 	}
-	if s.created.Status.AssignmentHistory != v1.AssignmentHistoryNeverAssigned {
-		t.Errorf("history = %q, want NeverAssigned (client value ignored)", s.created.Status.AssignmentHistory)
+	if !reflect.DeepEqual(s.created.Status, v1.InitialProjectStatus()) {
+		t.Errorf("stored status = %+v, want the initial status %+v", s.created.Status, v1.InitialProjectStatus())
 	}
-	if s.created.Status.AssignmentGeneration != 0 {
-		t.Errorf("generation = %d, want 0 (client value ignored)", s.created.Status.AssignmentGeneration)
+
+	var resp v1.Project
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !reflect.DeepEqual(resp.Status, v1.InitialProjectStatus()) {
+		t.Errorf("response status = %+v, want the initial status", resp.Status)
 	}
 }
 

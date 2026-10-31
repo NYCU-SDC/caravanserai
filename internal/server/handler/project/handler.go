@@ -259,24 +259,17 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// New projects start in Pending phase; the Scheduler will assign a node.
-	if project.Status.Phase == "" {
-		project.Status.Phase = v1.ProjectPhasePending
-	}
-
-	// A freshly created Project is the only thing that may claim NeverAssigned
-	// at generation zero: the server is watching it from birth, so it can prove
-	// no Agent has ever owned it. Assignment generation is server-owned status,
-	// so any value a client tried to send is overwritten here rather than
-	// trusted. This is what later lets a still-Pending Project be hard-deleted
-	// directly, while a migrated Unknown row cannot.
-	project.Status.AssignmentGeneration = 0
-	project.Status.AssignmentHistory = v1.AssignmentHistoryNeverAssigned
-
-	// Recovery is server-owned for the same reason: recovery controllers read
-	// its retry counters and evidence as fact, so a value a client injected at
-	// creation would later be acted on as if the server had recorded it.
-	project.Status.Recovery = nil
+	// Status is server-owned, all of it, so whatever the client sent is
+	// replaced rather than filtered field by field. A filter only covers the
+	// fields someone remembered to list: a client could otherwise create a
+	// Project already Running on a Node of its choosing, or with forged
+	// recovery evidence, and controllers would act on it as fact.
+	//
+	// A freshly created Project is also the only thing that may claim
+	// NeverAssigned at generation zero: the server is watching it from birth,
+	// so it can prove no Agent has ever owned it. This is what later lets a
+	// still-Pending Project be hard-deleted directly.
+	project.Status = v1.InitialProjectStatus()
 
 	if err := h.store.CreateProject(traceCtx, &project); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
