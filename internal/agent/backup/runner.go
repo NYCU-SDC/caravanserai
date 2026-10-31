@@ -34,9 +34,10 @@ type OwnershipResolver interface {
 }
 
 // ConditionReporter records the Maintenance condition on the server. It
-// exists for observability and as an input to the future recovery
-// controller; it is never what protects correctness, so every method's
-// failure is logged and ignored rather than aborting a backup.
+// exists for observability and as an input to the future recovery controller;
+// it is never what protects correctness. Failing to set it does stop a backup,
+// but only because it shows the commit could not succeed either. Failing to
+// clear it is logged and ignored.
 // The uid/nodeRef/generation triple is the assignment fence the server
 // validates the Maintenance write against (CARA-83). It is passed as primitives
 // rather than a shared type so this package stays free of any dependency on the
@@ -185,8 +186,8 @@ func NewRunner(
 //
 //  1. Claim the Project so nothing else touches it and the poll loop skips
 //     it — this is what keeps the phase at Running throughout.
-//  2. Check preconditions before stopping anything, so a misconfiguration
-//     costs no downtime.
+//  2. Check preconditions before stopping anything, so a misconfiguration or
+//     an unreachable server costs no downtime.
 //  3. Stop containers, archive every Managed volume, upload and verify each.
 //  4. Write manifest.json only once every archive verified, then commit the
 //     generation to the server only once the manifest is written. A crash or a
@@ -232,9 +233,10 @@ func (r *Runner) Run(ctx context.Context, project *v1.Project) (err error) {
 
 	uid, nodeRef, generation := project.ObjectMeta.UID, project.Status.NodeRef, project.Status.AssignmentGeneration
 	if err := r.conditions.SetMaintenance(ctx, key, uid, nodeRef, generation, "BackingUp"); err != nil {
-		// Correctness is already protected by the claim above; losing the
-		// condition only costs visibility.
-		log.Warn("Failed to set Maintenance condition", zap.Error(err))
+		// A server this Agent cannot reach, or that no longer recognises this
+		// assignment, will not accept the commit. Stopping the containers now
+		// would cost downtime for a generation that can never be restored.
+		return fmt.Errorf("backup: set Maintenance condition: %w", err)
 	}
 	defer func() {
 		if clearErr := r.conditions.ClearMaintenance(context.WithoutCancel(ctx), key, uid, nodeRef, generation); clearErr != nil {

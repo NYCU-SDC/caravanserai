@@ -516,16 +516,18 @@ func TestRunRestartsWhenOwnershipUnknown(t *testing.T) {
 		"an unreachable control plane must not become a service outage")
 }
 
-func TestRunContinuesWhenMaintenanceConditionFails(t *testing.T) {
-	// Correctness rests on the in-process claim, not the server-side
-	// condition, so a failed condition write must not abort the backup.
+func TestRunCostsNoDowntimeWhenTheServerCannotBeReached(t *testing.T) {
+	// A generation that cannot be committed can never be restored, so a server
+	// that refuses or cannot take the condition stops the run before the
+	// containers do.
 	h := newHarness(t, "db-data")
 	h.conditions.setErr = errors.New("server unreachable")
 
-	require.NoError(t, h.runner.Run(context.Background(), h.project))
+	require.ErrorContains(t, h.runner.Run(context.Background(), h.project), "set Maintenance condition")
 
-	assert.Equal(t, []string{"stop", "start"}, h.containers.history())
-	assert.Len(t, h.committer.committed(), 1, "the backup must still complete")
+	assert.Empty(t, h.containers.history(), "the containers must never be stopped")
+	assert.Empty(t, h.store.keys(), "nothing may be uploaded")
+	assert.Empty(t, h.committer.committed())
 }
 
 func TestRunReleasesClaimOnEveryPath(t *testing.T) {
