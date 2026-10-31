@@ -31,7 +31,7 @@
 //	  per-incident rule.
 //
 //	  ConditionTypeFinalizationBlocked — written by ProjectTerminationController
-//	  when a Terminated Project cannot be finalized yet.
+//	  when a Project awaiting finalization cannot be finalized yet.
 //
 //	  ConditionTypeNotReadyAt — written by ProjectReschedulerController when it
 //	  observes a Running project on a NotReady node without a clock for the
@@ -96,9 +96,10 @@ const (
 	// removed when the Node returns and the teardown resumes. Server-owned.
 	ConditionTypeTerminationBlocked ConditionType = "TerminationBlocked"
 
-	// ConditionTypeFinalizationBlocked indicates that a Terminated Project's
-	// record is kept because the finalization predicate does not hold yet —
-	// typically an earlier Node has not confirmed that its resources are gone.
+	// ConditionTypeFinalizationBlocked indicates that the record of a Project
+	// awaiting finalization (Terminated, or Terminating with no current
+	// assignment) is kept because the finalization predicate does not hold yet
+	// — typically an earlier Node has not confirmed that its resources are gone.
 	// The message names what it waits for. It is not cleared: the record is
 	// deleted as soon as the predicate holds. Server-owned.
 	ConditionTypeFinalizationBlocked ConditionType = "FinalizationBlocked"

@@ -28,6 +28,14 @@ func terminated(obligations ...CleanupObligation) *Project {
 	}}
 }
 
+func unassignedTerminating(history AssignmentHistory, obligations ...CleanupObligation) *Project {
+	return &Project{Status: ProjectStatus{
+		Phase:             ProjectPhaseTerminating,
+		AssignmentHistory: history,
+		Recovery:          &ProjectRecoveryStatus{CleanupObligations: obligations},
+	}}
+}
+
 func TestFinalizationBlocker(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -45,7 +53,7 @@ func TestFinalizationBlocker(t *testing.T) {
 		},
 		{
 			name:          "not Terminated",
-			project:       &Project{Status: ProjectStatus{Phase: ProjectPhaseTerminating}},
+			project:       &Project{Status: ProjectStatus{Phase: ProjectPhasePending}},
 			wantBlockedBy: "not Terminated",
 		},
 		{
@@ -74,6 +82,46 @@ func TestFinalizationBlocker(t *testing.T) {
 			name:          "an earlier Node still owes its cleanup",
 			project:       terminated(obligation("node-b", 1, false), obligation("node-a", 3, true)),
 			wantBlockedBy: "node node-b generation 1",
+		},
+		{
+			name:          "Terminating on its node",
+			project:       &Project{Status: ProjectStatus{Phase: ProjectPhaseTerminating, NodeRef: "node-a"}},
+			wantBlockedBy: "has not reported it Terminated",
+		},
+		{
+			name:    "Terminating with no assignment, every earlier Node done",
+			project: unassignedTerminating(AssignmentHistoryKnown, obligation("node-a", 2, true), obligation("node-b", 1, true)),
+		},
+		{
+			name:          "Terminating with no assignment, an earlier Node still owes",
+			project:       unassignedTerminating(AssignmentHistoryKnown, obligation("node-a", 2, false)),
+			wantBlockedBy: "node node-a generation 2",
+		},
+		{
+			// Known history with nothing on the list means the list is
+			// incomplete, not that nothing remains.
+			name:          "Terminating with no assignment, Known history and no obligations",
+			project:       unassignedTerminating(AssignmentHistoryKnown),
+			wantBlockedBy: "no cleanup obligation records where",
+		},
+		{
+			name:          "Terminating with no assignment and Unknown history",
+			project:       unassignedTerminating(AssignmentHistoryUnknown, obligation("node-a", 2, true)),
+			wantBlockedBy: "assignment history is Unknown",
+		},
+		{
+			name:    "Terminating with no assignment, never assigned",
+			project: unassignedTerminating(AssignmentHistoryNeverAssigned),
+		},
+		{
+			// Inconsistent: a generation means some Agent was granted it.
+			name: "Terminating with no assignment, never assigned but at a generation",
+			project: func() *Project {
+				p := unassignedTerminating(AssignmentHistoryNeverAssigned)
+				p.Status.AssignmentGeneration = 2
+				return p
+			}(),
+			wantBlockedBy: "NeverAssigned but the generation is 2",
 		},
 	}
 	for _, tt := range tests {
@@ -130,5 +178,23 @@ func TestImmediateDeletionBlocker(t *testing.T) {
 				t.Fatal("allowed, want blocked")
 			}
 		})
+	}
+}
+
+func TestAwaitsFinalization(t *testing.T) {
+	tests := []struct {
+		status ProjectStatus
+		want   bool
+	}{
+		{ProjectStatus{Phase: ProjectPhaseTerminated, NodeRef: "node-a"}, true},
+		{ProjectStatus{Phase: ProjectPhaseTerminating}, true},
+		{ProjectStatus{Phase: ProjectPhaseTerminating, NodeRef: "node-a"}, false},
+		{ProjectStatus{Phase: ProjectPhasePending}, false},
+		{ProjectStatus{Phase: ProjectPhaseRunning, NodeRef: "node-a"}, false},
+	}
+	for _, tt := range tests {
+		if got := AwaitsFinalization(tt.status); got != tt.want {
+			t.Errorf("AwaitsFinalization(%s, nodeRef %q) = %v, want %v", tt.status.Phase, tt.status.NodeRef, got, tt.want)
+		}
 	}
 }

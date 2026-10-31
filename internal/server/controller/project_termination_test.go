@@ -25,7 +25,18 @@ func TestProjectTerminationReconcile(t *testing.T) {
 		assert.Empty(t, ps.SetFinalizationBlockedCalls)
 	})
 
-	t.Run("project not in Terminated phase is a no-op", func(t *testing.T) {
+	t.Run("a Terminating project its node still holds is left to that node", func(t *testing.T) {
+		ps := newFakeTerminationProjectStore()
+		ps.projects["my-app"] = terminationProjectRecord{UID: "uid-1", Phase: v1.ProjectPhaseTerminating, NodeRef: "node-a"}
+		ctrl := NewProjectTerminationController(zap.NewNop(), ps, nil)
+
+		res, err := ctrl.Reconcile(context.Background(), "my-app")
+		require.NoError(t, err)
+		assert.False(t, res.Requeue)
+		assert.Empty(t, ps.FinalizeCalls, "the assigned node reports Terminated; the server does not finalize past it")
+	})
+
+	t.Run("a Terminating project with no current assignment is finalized by the server", func(t *testing.T) {
 		ps := newFakeTerminationProjectStore()
 		ps.projects["my-app"] = terminationProjectRecord{UID: "uid-1", Phase: v1.ProjectPhaseTerminating}
 		ctrl := NewProjectTerminationController(zap.NewNop(), ps, nil)
@@ -33,7 +44,17 @@ func TestProjectTerminationReconcile(t *testing.T) {
 		res, err := ctrl.Reconcile(context.Background(), "my-app")
 		require.NoError(t, err)
 		assert.False(t, res.Requeue)
-		assert.Empty(t, ps.FinalizeCalls, "should not finalize a non-Terminated project")
+		require.Equal(t, []finalizeCall{{Name: "my-app", UID: "uid-1"}}, ps.FinalizeCalls)
+	})
+
+	t.Run("a Running project is a no-op", func(t *testing.T) {
+		ps := newFakeTerminationProjectStore()
+		ps.projects["my-app"] = terminationProjectRecord{UID: "uid-1", Phase: v1.ProjectPhaseRunning, NodeRef: "node-a"}
+		ctrl := NewProjectTerminationController(zap.NewNop(), ps, nil)
+
+		_, err := ctrl.Reconcile(context.Background(), "my-app")
+		require.NoError(t, err)
+		assert.Empty(t, ps.FinalizeCalls)
 	})
 
 	t.Run("project not found returns without error", func(t *testing.T) {
@@ -94,4 +115,17 @@ func (r *recreateAfterRead) GetProjectSnapshot(ctx context.Context, name string)
 		r.mu.Unlock()
 	}
 	return snap, err
+}
+
+func TestProjectTerminationResyncCoversUnassignedTerminating(t *testing.T) {
+	ps := newFakeTerminationProjectStore()
+	ps.projects["done"] = terminationProjectRecord{UID: "uid-1", Phase: v1.ProjectPhaseTerminated}
+	ps.projects["unassigned"] = terminationProjectRecord{UID: "uid-2", Phase: v1.ProjectPhaseTerminating}
+	ps.projects["running"] = terminationProjectRecord{UID: "uid-3", Phase: v1.ProjectPhaseRunning}
+	ctrl := NewProjectTerminationController(zap.NewNop(), ps, nil)
+
+	var enqueued []string
+	ctrl.resyncTerminated(context.Background(), func(name string) { enqueued = append(enqueued, name) })
+
+	assert.ElementsMatch(t, []string{"done", "unassigned"}, enqueued)
 }

@@ -39,6 +39,9 @@ set -Eeuo pipefail
 #                               never finalized; the node returns → cleared, torn
 #                               down and finalized (CARA-80). The server runs with
 #                               TERMINATING_TIMEOUT=15s so this takes minutes, not ten
+#   J. deleting a released Project while Pending → Terminating with no assignment,
+#                               finalized by the server once every earlier Node
+#                               confirmed its cleanup (CARA-80)
 
 log() { printf '[recovery-e2e] %s\n' "$*"; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -661,4 +664,83 @@ wait_until 90 "I: $lost finalized" lost_gone
 wait_until 30 "I: $lost_container removed" lost_container_absent
 log "I: PASS — a deletion on a lost node was kept and reported blocked, then finished when the node returned"
 
-log "PASS: stop and remove recovered; missing data blocked visibly and recovered on restore; crash loop exhausted; stale containers blocked on the Running and Scheduled paths, including one whose service the spec no longer declares; deletion removed every generation of the lifetime and nothing of another; a deletion on a lost node was kept until the node returned"
+# ── J. Deleting a previously assigned Project while it is Pending ────────────
+#
+# A released Project has no current assignment, so no Agent will ever report it
+# Terminated. Its deletion is the server's to finalize, once every Node that ran
+# it has confirmed its cleanup.
+
+unassigned=unassigned-delete
+unassigned_container="$unassigned-web"
+
+log "J: creating $unassigned"
+create_project '{
+	"apiVersion":"caravanserai/v1",
+	"kind":"Project",
+	"metadata":{"name":"'"$unassigned"'","namespace":"default"},
+	"spec":{"services":[{"name":"web","image":"nginx:alpine"}]}
+}'
+wait_until 90 "J: $unassigned Running" phase_is "$unassigned" Running
+wait_until 30 "J: $unassigned_container running" container_running "$unassigned_container"
+
+# Release the assignment the way the Rescheduler or the Failed-project
+# rescheduler does: Pending, no nodeRef, and a cleanup obligation for the
+# assignment it leaves. Neither can do it in this rehearsal — one Node, and no
+# producer of the stop evidence they require yet — so it is written straight to
+# the store. node-a goes into failedNodes so the Scheduler does not place it
+# back on the only Node. A second obligation, for a Node that does not exist,
+# holds the deletion where it can be observed.
+unassigned_uid="$(project_field "$unassigned" 'p["metadata"]["uid"]')"
+unassigned_generation="$(project_field "$unassigned" 'p["status"]["assignmentGeneration"]')"
+[[ -n "$unassigned_uid" && -n "$unassigned_generation" ]] || fail "J: could not read $unassigned's identity"
+release="$(docker exec "$postgres_name" psql -U postgres -d caravanserai -Atc \
+	"UPDATE resources SET phase = 'Pending', status = (status - 'nodeRef')
+		|| jsonb_build_object('phase', 'Pending', 'failedNodes', jsonb_build_array('node-a'), 'recovery',
+			COALESCE(status->'recovery', '{}'::jsonb) || jsonb_build_object('cleanupObligations',
+				COALESCE(status->'recovery'->'cleanupObligations', '[]'::jsonb) || jsonb_build_array(
+					jsonb_build_object(
+						'assignment', jsonb_build_object('projectUID', '$unassigned_uid', 'nodeName', 'node-a',
+							'assignmentGeneration', $unassigned_generation),
+						'releasedAt', to_jsonb(now()), 'releaseAuthorization', 'WorkloadStopped'),
+					jsonb_build_object(
+						'assignment', jsonb_build_object('projectUID', '$unassigned_uid', 'nodeName', 'node-ghost',
+							'assignmentGeneration', 98),
+						'releasedAt', to_jsonb(now()), 'releaseAuthorization', 'WorkloadStopped')))),
+		resource_version = resource_version + 1, updated_at = now()
+	WHERE kind = 'Project' AND name = '$unassigned';")"
+[[ "$release" == "UPDATE 1" ]] || fail "J: failed to release $unassigned: $release"
+
+node_a_cleaned() {
+	[[ "$(project_field "$unassigned" 'any(o.get("resourcesRemoved") for o in p["status"]["recovery"]["cleanupObligations"]
+		if o["assignment"]["nodeName"] == "node-a")')" == "True" ]]
+}
+unassigned_container_absent() {
+	listed="$(dind ps -a --format '{{.Names}}')" || return 1
+	! grep -qxF -- "$unassigned_container" <<<"$listed"
+}
+wait_until 90 "J: node-a cleaned up the released assignment" node_a_cleaned
+wait_until 30 "J: $unassigned_container removed" unassigned_container_absent
+phase_is "$unassigned" Pending || fail "J: $unassigned left Pending before the deletion"
+
+log "J: deleting $unassigned while it is Pending"
+delete_status="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$server_url/api/v1/projects/$unassigned")"
+[[ "$delete_status" == "202" ]] || fail "J: delete returned $delete_status, want 202"
+
+held_unassigned() {
+	phase_is "$unassigned" Terminating &&
+		[[ -z "$(project_field "$unassigned" 'p["status"].get("nodeRef", "")')" ]] &&
+		[[ "$(project_field "$unassigned" 'cond("FinalizationBlocked").get("message", "")')" == *"node node-ghost generation 98"* ]]
+}
+wait_until 60 "J: $unassigned Terminating with no assignment, held by node-ghost" held_unassigned
+log "J: $unassigned held at Terminating with no assignment, waiting only for node-ghost"
+
+ghost_status="$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
+	"$server_url/api/v1/projects/$unassigned/recovery/resources-removed" -H 'Content-Type: application/json' \
+	-d "{\"uid\":\"$unassigned_uid\",\"nodeRef\":\"node-ghost\",\"assignmentGeneration\":98}")"
+[[ "$ghost_status" == 2* ]] || fail "J: node-ghost's ResourcesRemoved report returned $ghost_status"
+
+unassigned_gone() { [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$server_url/api/v1/projects/$unassigned")" == "404" ]]; }
+wait_until 30 "J: $unassigned finalized by the server" unassigned_gone
+log "J: PASS — a released Project deleted while Pending was finalized by the server once every earlier Node confirmed its cleanup"
+
+log "PASS: stop and remove recovered; missing data blocked visibly and recovered on restore; crash loop exhausted; stale containers blocked on the Running and Scheduled paths, including one whose service the spec no longer declares; deletion removed every generation of the lifetime and nothing of another; a deletion on a lost node was kept until the node returned; a released Project deleted while Pending was finalized by the server"
