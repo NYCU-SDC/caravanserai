@@ -1168,6 +1168,33 @@ func (s *Store) RecordCommittedBackup(ctx context.Context, name string, ref stor
 	})
 }
 
+// stanzaPhases are the phases in which the assigned Agent creates stanzas:
+// while placing the Project and while it runs.
+var stanzaPhases = map[v1.ProjectPhase]bool{
+	v1.ProjectPhaseScheduled: true,
+	v1.ProjectPhaseRunning:   true,
+}
+
+// RecordStanza implements store.ProjectStore.
+func (s *Store) RecordStanza(ctx context.Context, name string, ref store.AssignmentRef, volume string, observedAt time.Time) error {
+	stanza := v1.StanzaName(ref.UID, volume)
+	return s.ReportProjectStatusFenced(ctx, name, ref, func(status *v1.ProjectStatus) error {
+		if !stanzaPhases[status.Phase] {
+			return fmt.Errorf("%w: project %q is %s; stanzas are recorded only while Scheduled or Running",
+				store.ErrConflictState, name, status.Phase)
+		}
+		if status.Backup.HasStanza(stanza) {
+			return nil
+		}
+		if status.Backup == nil {
+			status.Backup = &v1.ProjectBackupStatus{}
+		}
+		status.Backup.Stanzas = append(status.Backup.Stanzas,
+			v1.StanzaRecord{Name: stanza, Volume: volume, RecordedAt: observedAt.UTC()})
+		return nil
+	})
+}
+
 // RecordResourcesRemoved implements store.ProjectStore.
 //
 // The owner is any cleanup obligation in the list, which no single-row fence
@@ -1356,6 +1383,7 @@ func copyProjectStatus(src v1.ProjectStatus) v1.ProjectStatus {
 	dst.Conditions = slices.Clone(src.Conditions)
 	dst.Recovery = src.Recovery.DeepCopy()
 	dst.FailedNodes = slices.Clone(src.FailedNodes)
+	dst.Backup = src.Backup.DeepCopy()
 	return dst
 }
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	caravolume "NYCU-SDC/caravanserai/internal/agent/volume"
 
 	"go.uber.org/zap"
 )
@@ -124,13 +125,11 @@ func (h *RepoHost) tlsDir() string      { return filepath.Join(h.root(), "server
 // written, which may be ahead of the confirmed one.
 func (h *RepoHost) writtenPath() string { return filepath.Join(h.root(), "server", "written.conf") }
 
-func (h *RepoHost) projectDir(uid string) string {
-	return filepath.Join(h.root(), "projects", uid)
+// clientDirs are where a Project lifetime's client configuration and identity
+// live on the Node; the database container mounts both.
+func (h *RepoHost) clientDirs(uid string) (confDir, tlsDir string, err error) {
+	return caravolume.PgBackRestClientDirs(h.cfg.DataRoot, uid)
 }
-
-// ClientIdentityDir is where a Project lifetime's client identity lives on the
-// Node; the database container mounts it.
-func (h *RepoHost) ClientIdentityDir(uid string) string { return h.projectDir(uid) }
 
 func (h *RepoHost) loadState() (repoState, error) {
 	data, err := os.ReadFile(h.statePath())
@@ -170,7 +169,10 @@ func (h *RepoHost) IssueClientIdentity(ctx context.Context, uid, image string) (
 	if err != nil {
 		return "", err
 	}
-	dir := h.projectDir(uid)
+	_, dir, err := h.clientDirs(uid)
+	if err != nil {
+		return "", err
+	}
 	files, err := ca.IssueClient(dir, uid, h.now())
 	if err != nil {
 		return "", err
@@ -574,4 +576,65 @@ func sortedUIDs(a authorizations) []string {
 	}
 	sort.Strings(uids)
 	return uids
+}
+
+// ClientStanza is one stanza a database container uses.
+type ClientStanza struct {
+	Name       string
+	RetainFull int
+}
+
+// WriteClientConfig writes the pgBackRest configuration a Project lifetime's
+// database mounts, and returns its directory. It names the repo host, the
+// identity's paths, and each stanza with its retention: retention takes
+// effect only on the side that issues the command, which is the database.
+// It holds no secret, so it stays the Agent's and is readable by anyone.
+func (h *RepoHost) WriteClientConfig(uid string, stanzas []ClientStanza) (string, error) {
+	confDir, _, err := h.clientDirs(uid)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(confDir, identityDirMode); err != nil {
+		return "", fmt.Errorf("pgbackrest: create %s: %w", confDir, err)
+	}
+	data := renderClientConfig(stanzas)
+	path := filepath.Join(confDir, "pgbackrest.conf")
+	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, data) {
+		return confDir, nil
+	}
+	if err := writeFile(path, data, certFileMode); err != nil {
+		return "", err
+	}
+	return confDir, nil
+}
+
+// DataPath is where a PostgresDifferential database's PGDATA is mounted.
+const DataPath = "/var/lib/postgresql/data"
+
+func renderClientConfig(stanzas []ClientStanza) []byte {
+	var b strings.Builder
+	line := func(k, v string) { fmt.Fprintf(&b, "%s=%s\n", k, v) }
+	b.WriteString("[global]\n")
+	line("repo1-host", RepoAlias)
+	line("repo1-host-type", "tls")
+	line("repo1-host-ca-file", serverTLSDir+"/ca.crt")
+	line("repo1-host-cert-file", serverTLSDir+"/client.crt")
+	line("repo1-host-key-file", serverTLSDir+"/client.key")
+	line("compress-type", "zst")
+	line("archive-async", "y")
+	line("spool-path", "/var/spool/pgbackrest")
+	line("start-fast", "y")
+	line("log-level-console", "info")
+	line("log-level-file", "off")
+
+	sorted := append([]ClientStanza(nil), stanzas...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	for _, st := range sorted {
+		fmt.Fprintf(&b, "\n[%s]\n", st.Name)
+		line("pg1-path", DataPath)
+		if st.RetainFull > 0 {
+			line("repo1-retention-full", fmt.Sprint(st.RetainFull))
+		}
+	}
+	return []byte(b.String())
 }

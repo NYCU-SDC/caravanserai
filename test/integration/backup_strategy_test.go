@@ -205,3 +205,51 @@ func TestBackupStrategyDataCannotLeaveTheVolume(t *testing.T) {
 	drainBody(resp)
 	assert.Empty(t, getProject(t, name).Spec.Services[0].Env, "the rejected update must not be stored")
 }
+
+func TestStanzaInventory(t *testing.T) {
+	const name = "e2e-pgdiff-stanzas"
+	forged := postgresDifferentialProject(name, nil)
+	forged.Status.Backup = &v1.ProjectBackupStatus{Stanzas: []v1.StanzaRecord{{Name: "forged", Volume: "pgdata"}}}
+	created := createForCleanup(t, forged)
+	assert.Nil(t, getProject(t, name).Status.Backup, "the inventory is server-owned; a client cannot seed it")
+
+	ctx := context.Background()
+	require.NoError(t, suite.store.UpdateProjectStatusWithRetry(ctx, name, func(st *v1.ProjectStatus) error {
+		st.Phase, st.NodeRef, st.AssignmentGeneration = v1.ProjectPhaseScheduled, "node-a", 1
+		st.AssignmentHistory = v1.AssignmentHistoryKnown
+		return nil
+	}))
+
+	put := func(uid, node string, gen *int64, volume string) int {
+		body := map[string]any{"uid": uid, "nodeRef": node, "volume": volume}
+		if gen != nil {
+			body["assignmentGeneration"] = *gen
+		}
+		resp := doRequest(t, http.MethodPut, "/api/v1/projects/"+name+"/backup/stanzas", mustMarshal(t, body))
+		drainBody(resp)
+		return resp.StatusCode
+	}
+	one, two := int64(1), int64(2)
+	uid := created.ObjectMeta.UID
+
+	assert.Equal(t, http.StatusNoContent, put(uid, "node-a", &one, "pgdata"))
+	assert.Equal(t, http.StatusNoContent, put(uid, "node-a", &one, "pgdata"), "recording again is a no-op")
+	b := getProject(t, name).Status.Backup
+	require.NotNil(t, b)
+	require.Len(t, b.Stanzas, 1)
+	assert.Equal(t, v1.StanzaName(uid, "pgdata"), b.Stanzas[0].Name)
+	assert.Equal(t, "pgdata", b.Stanzas[0].Volume)
+
+	assert.Equal(t, http.StatusConflict, put(uid, "node-a", &two, "pgdata"), "a fence that is not current")
+	assert.Equal(t, http.StatusConflict, put(uid, "node-b", &one, "pgdata"), "another node")
+	assert.Equal(t, http.StatusConflict, put("other-uid", "node-a", &one, "pgdata"), "another lifetime")
+	assert.Equal(t, http.StatusConflict, put(uid, "node-a", nil, "pgdata"), "an incomplete fence")
+	assert.Equal(t, http.StatusBadRequest, put(uid, "node-a", &one, "nope"), "not a PostgresDifferential volume")
+
+	require.NoError(t, suite.store.UpdateProjectStatusWithRetry(ctx, name, func(st *v1.ProjectStatus) error {
+		st.Phase = v1.ProjectPhaseTerminating
+		return nil
+	}))
+	assert.Equal(t, http.StatusConflict, put(uid, "node-a", &one, "pgdata"), "not while Terminating")
+	assert.Len(t, getProject(t, name).Status.Backup.Stanzas, 1)
+}

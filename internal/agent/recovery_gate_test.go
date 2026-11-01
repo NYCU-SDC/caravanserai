@@ -60,6 +60,9 @@ type gateServer struct {
 	// Each one is also applied to current, so the next GET sees it the way a
 	// real server's would — which is what the dedupe tests depend on.
 	conditionWrites []conditionWrite
+
+	// stanzas records the volume of every stanza PUT, in order.
+	stanzas []string
 }
 
 type conditionWrite struct {
@@ -169,6 +172,18 @@ func newGateServer(t *testing.T, current *v1.Project) (*gateServer, *Client) {
 			UID: r.URL.Query().Get("uid"), NodeRef: r.URL.Query().Get("nodeRef"),
 		})
 		gs.current.Status.Conditions = withoutCondition(gs.current.Status.Conditions, condType)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("PUT /api/v1/projects/{name}/backup/stanzas", func(w http.ResponseWriter, r *http.Request) {
+		var req stanzaRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		gs.mu.Lock()
+		gs.stanzas = append(gs.stanzas, req.Volume)
+		gs.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
 

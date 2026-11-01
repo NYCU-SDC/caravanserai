@@ -6,6 +6,8 @@ import (
 	"maps"
 	"slices"
 
+	v1 "NYCU-SDC/caravanserai/api/v1"
+
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 )
@@ -127,6 +129,25 @@ func (r *DockerRuntime) RemoveContainer(ctx context.Context, nameOrID string) er
 	err := r.client.ContainerRemove(ctx, nameOrID, container.RemoveOptions{Force: true, RemoveVolumes: true})
 	if err != nil && !isNotFound(err) {
 		return fmt.Errorf("docker: remove %s: %w", nameOrID, err)
+	}
+	return nil
+}
+
+// EnsureProjectNetwork creates the Project's network if it does not exist,
+// with the same ownership checks ReconcileProject applies. It lets a Node
+// service be attached to the network before the Project's containers start.
+func (r *DockerRuntime) EnsureProjectNetwork(ctx context.Context, project *v1.Project) error {
+	return r.ensureNetwork(ctx, project.Namespace, project.Name, project.ObjectMeta.UID)
+}
+
+// RestartContainer stops and starts one container, for a setting that takes
+// effect only at process start.
+func (r *DockerRuntime) RestartContainer(ctx context.Context, nameOrID string) error {
+	if err := r.client.ContainerStop(ctx, nameOrID, container.StopOptions{}); err != nil {
+		return fmt.Errorf("docker: stop %s: %w", nameOrID, err)
+	}
+	if err := r.client.ContainerStart(ctx, nameOrID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("docker: start %s: %w", nameOrID, err)
 	}
 	return nil
 }
