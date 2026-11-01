@@ -8,7 +8,13 @@ Current versions: base `postgres:16-trixie`, pgBackRest `2.59.3-1.pgdg13+1`.
 make build-cara-postgres-image
 ```
 
-The target builds `ghcr.io/nycu-sdc/cara-postgres:16` for the host architecture and prints the image ID and the recorded versions. The image is not published to a registry yet, so every Node that needs it builds it locally under that same name; manifests do not change when publishing arrives.
+The target builds `ghcr.io/nycu-sdc/cara-postgres:16` for the host architecture and prints the image ID and the recorded versions.
+
+```bash
+make test-cara-postgres-image
+```
+
+The smoke test builds the image and checks the contract below against the host's Docker in about a minute, with no repo host or S3: PID 1, archiving off by default, recorded versions, UID/GID, certificate permissions, a full and a differential backup with `compress-type=zst` restored and queried, the async archiving crash `tini` prevents (with a control run without `tini` that must reproduce it), and repo-host mode. CI runs it on amd64 when the image or the test changes; arm64 is checked by hand on native hardware. zstd is the compression this image is tested with; use it in the configuration the Agent mounts. The image is not published to a registry yet, so every Node that needs it builds it locally under that same name; manifests do not change when publishing arrives.
 
 ## Contract
 
