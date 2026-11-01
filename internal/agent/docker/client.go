@@ -40,6 +40,10 @@ const (
 	// pre-UID resources, an empty) value and must not be adopted as the
 	// current Project.
 	labelUID = "cara.uid"
+	// labelHelper marks a throwaway container the Agent runs for one-off work
+	// (RunToCompletion). It carries no Project label, so nothing that looks
+	// for a Project's containers finds it.
+	labelHelper = "cara.helper"
 	// labelGeneration records the assignment generation a container was created
 	// under (CARA-83). Containers are assignment-scoped: within one Project
 	// lifetime (one UID) the Scheduler can grant ownership to Node A, move it to

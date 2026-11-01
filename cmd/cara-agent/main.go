@@ -16,6 +16,7 @@ import (
 	forwardhandler "NYCU-SDC/caravanserai/internal/agent/apiserver/handler/forward"
 	logshandler "NYCU-SDC/caravanserai/internal/agent/apiserver/handler/logs"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/pgbackrest"
 	"NYCU-SDC/caravanserai/internal/agent/proxy"
 	"NYCU-SDC/caravanserai/internal/appinit"
 	"NYCU-SDC/caravanserai/internal/config"
@@ -173,6 +174,25 @@ func main() {
 		logger.Fatal("Failed to configure Managed volume backups", zap.Error(err))
 	}
 
+	// ── pgBackRest repo host ────────────────────────────────────────────
+	// Only with an object store: the repo host stores stanzas there. It does
+	// nothing until a PostgresDifferential Project is authorized.
+	var repoHost *pgbackrest.RepoHost
+	if cfg.S3.Enabled() {
+		repoHost = pgbackrest.NewRepoHost(dockerRuntime, pgbackrest.Config{
+			DataRoot: cfg.DataRoot,
+			NodeName: cfg.NodeName,
+			S3: pgbackrest.S3{
+				Endpoint:  cfg.S3.Endpoint,
+				Bucket:    cfg.S3.Bucket,
+				Region:    cfg.S3.Region,
+				AccessKey: cfg.S3.AccessKey,
+				SecretKey: cfg.S3.SecretKey,
+				CAFile:    cfg.S3.CAFile,
+			},
+		}, logger)
+	}
+
 	// Validate has already rejected malformed values, so this cannot fail.
 	reservedCPU, reservedMemory, _ := cfg.SystemReserved()
 
@@ -187,6 +207,7 @@ func main() {
 		DataRoot:          cfg.DataRoot,
 		Routes:            routeTable,
 		Backups:           backupSupport,
+		RepoHost:          repoHost,
 		Logger:            logger,
 	})
 
