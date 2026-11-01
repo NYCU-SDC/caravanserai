@@ -177,9 +177,9 @@ walg-verify: .env
 		|| (echo -e "==> $(RED)Verification failed$(NC)" && exit 1)
 
 # The image for PostgresDifferential databases and the Node's pgBackRest repo
-# host. Built for the host architecture under the name manifests use, because
-# nothing publishes it yet; the image ID and recorded versions are printed so
-# two Nodes' builds can be compared.
+# host. Built for the host architecture under the name manifests use, which is
+# also what the workflow publishes; the image ID and recorded versions are
+# printed so two builds can be compared.
 CARA_POSTGRES_IMAGE ?= ghcr.io/nycu-sdc/cara-postgres:16
 
 build-cara-postgres-image:
