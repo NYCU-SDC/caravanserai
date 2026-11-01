@@ -45,6 +45,13 @@ func TestServerConfig_Validate_TerminatingTimeout(t *testing.T) {
 	assert.NoError(t, cfg.Validate(), "zero means the default")
 }
 
+func TestServerFromEnvLoadsThePostgresDifferentialImage(t *testing.T) {
+	t.Setenv("POSTGRES_DIFFERENTIAL_IMAGE", "registry.example/cara-postgres:16")
+	got, err := FromEnv(&Config{}, NewConfigLogger())
+	require.NoError(t, err)
+	assert.Equal(t, "registry.example/cara-postgres:16", got.PostgresDifferentialImage)
+}
+
 func TestServerConfig_Validate_Overlay(t *testing.T) {
 	base := func() Config {
 		return Config{DatabaseURL: "postgres://localhost/cara"}

@@ -69,6 +69,14 @@ type Config struct {
 	// Empty disables them. There is no flag for it, to keep it out of process lists.
 	OperatorToken string `yaml:"operator_token" envconfig:"OPERATOR_TOKEN"`
 
+	// PostgresDifferentialImage is the image reference a PostgresDifferential
+	// volume's service must use. Empty means the published one,
+	// ghcr.io/nycu-sdc/cara-postgres:16. Set it where that image cannot be
+	// pulled, for example a development environment using a copy pushed to
+	// another registry; Agents pull whatever the manifest names, so manifests
+	// in that environment name the same reference.
+	PostgresDifferentialImage string `yaml:"postgres_differential_image" envconfig:"POSTGRES_DIFFERENTIAL_IMAGE"`
+
 	// configFileError is why a config file named explicitly could not be used.
 	configFileError error
 }
@@ -149,6 +157,8 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		HeadscaleUser:       os.Getenv("HEADSCALE_USER"),
 		OperatorToken:       os.Getenv("OPERATOR_TOKEN"),
 		GraceExpiredRelease: os.Getenv("GRACE_EXPIRED_RELEASE") == "true",
+
+		PostgresDifferentialImage: os.Getenv("POSTGRES_DIFFERENTIAL_IMAGE"),
 	}
 
 	if raw := os.Getenv("RUNNING_GRACE_PERIOD"); raw != "" {

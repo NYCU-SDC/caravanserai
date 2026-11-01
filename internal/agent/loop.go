@@ -87,6 +87,11 @@ type BackupSupport struct {
 	// NodeName is this agent's Node name, recorded in and checked against the
 	// provenance marker.
 	NodeName string
+	// ObjectStore reports whether an object store is configured. Without one
+	// there is no Supervisor and nothing can be restored, but placement still
+	// decides from local provenance for Projects that must never start empty
+	// on data they used to have (see ensureVolumeData).
+	ObjectStore bool
 }
 
 // RouteUpdater is the narrow interface consumed by the agent loop to maintain
@@ -173,8 +178,14 @@ func Run(ctx context.Context, cfg RunConfig) {
 		// for it. Deliberately not fatal: leftovers waste disk but corrupt
 		// nothing, and refusing to start the agent over wasted disk is worse
 		// than running with it.
-		if err := restore.CleanDisplaced(cfg.Backups.DataRoot); err != nil {
-			logger.Warn("Failed to clean displaced volume data", zap.Error(err))
+		//
+		// Only with an object store: without one nothing restores, so nothing
+		// can have been displaced, and support existing for placement
+		// decisions alone is no reason to start deleting under the data root.
+		if cfg.Backups.ObjectStore {
+			if err := restore.CleanDisplaced(cfg.Backups.DataRoot); err != nil {
+				logger.Warn("Failed to clean displaced volume data", zap.Error(err))
+			}
 		}
 	}
 
@@ -545,7 +556,7 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	// is the last moment the volumes can be populated without a service seeing
 	// an empty directory.
 	if backups != nil {
-		err := ensureVolumeData(ctx, backups.Restorer, backups.Coordinator, backups.DataRoot, backups.NodeName, p, logger)
+		err := ensureVolumeData(ctx, backups.Restorer, backups.Coordinator, backups.ObjectStore, backups.DataRoot, backups.NodeName, p, logger)
 		switch {
 		case err == nil:
 		case errors.Is(err, errDeferred):

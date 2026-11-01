@@ -251,4 +251,14 @@ func TestShouldSupervise(t *testing.T) {
 	ephemeralOnly := base()
 	ephemeralOnly.Spec.Volumes = []v1.VolumeDef{{Name: "c", Type: v1.VolumeTypeEphemeral}}
 	assert.False(t, shouldSupervise(ephemeralOnly))
+
+	// pgBackRest backs this volume up, not the offline runner, so there is
+	// nothing for a supervisor to schedule.
+	postgresDifferential := base()
+	postgresDifferential.Spec.Backup.Items = []v1.BackupItem{{Volume: "db", Strategy: v1.BackupStrategyPostgresDifferential}}
+	assert.False(t, shouldSupervise(postgresDifferential))
+
+	explicitOffline := base()
+	explicitOffline.Spec.Backup.Items = []v1.BackupItem{{Volume: "db", Strategy: v1.BackupStrategyOffline}}
+	assert.True(t, shouldSupervise(explicitOffline))
 }

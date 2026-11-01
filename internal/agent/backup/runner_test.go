@@ -139,7 +139,9 @@ func (f *fakeStore) keys() []string {
 
 type fakeOwnership struct{ result Ownership }
 
-func (f fakeOwnership) Resolve(context.Context, ResourceKey, string, int64) Ownership { return f.result }
+func (f fakeOwnership) Resolve(context.Context, ResourceKey, string, int64) Ownership {
+	return f.result
+}
 
 // hasManifest reports whether any generation's manifest has been written.
 func (s *fakeStore) hasManifest() bool {
@@ -291,6 +293,20 @@ func TestRunSkipsProjectWithoutManagedVolumes(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNoManagedVolumes)
 	assert.Empty(t, h.containers.history(), "containers must never be touched when there is nothing to back up")
 	assert.Empty(t, h.store.keys())
+}
+
+func TestRunNeverTouchesPostgresDifferentialVolumes(t *testing.T) {
+	// Stopping PostgreSQL and archiving PGDATA would give the database a
+	// second, offline backup history alongside pgBackRest's, and the offline
+	// one is addressed by name.
+	h := newHarness(t, "pgdata")
+	h.project.Spec.Backup.Items = []v1.BackupItem{{Volume: "pgdata", Strategy: v1.BackupStrategyPostgresDifferential}}
+
+	err := h.runner.Run(context.Background(), h.project)
+
+	assert.ErrorIs(t, err, ErrNoManagedVolumes)
+	assert.Empty(t, h.containers.history(), "containers must never be stopped for a PostgresDifferential volume")
+	assert.Empty(t, h.store.keys(), "nothing may be uploaded for a PostgresDifferential volume")
 }
 
 func TestRunFailsClosedWithoutObjectStore(t *testing.T) {

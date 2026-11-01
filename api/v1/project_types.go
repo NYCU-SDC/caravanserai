@@ -319,6 +319,128 @@ type ProjectBackupConfig struct {
 	// OnMissing selects behaviour when no backup exists at restore time.
 	// Defaults to InitializeEmpty when empty.
 	OnMissing VolumeOnMissing `json:"onMissing,omitempty" yaml:"onMissing,omitempty"`
+
+	// Items selects a backup strategy per Managed volume. A Managed volume not
+	// listed here uses BackupStrategyOffline. Items are fixed when the Project
+	// is created: switching a live volume between strategies would leave two
+	// backup histories for the same data, and nothing can yet choose between
+	// them at restore time.
+	Items []BackupItem `json:"items,omitempty" yaml:"items,omitempty"`
+}
+
+// BackupStrategy selects how one Managed volume is backed up.
+type BackupStrategy string
+
+const (
+	// BackupStrategyOffline stops the Project's services and archives the
+	// volume directory. It is the default for a Managed volume.
+	BackupStrategyOffline BackupStrategy = "Offline"
+
+	// BackupStrategyPostgresDifferential takes pgBackRest full and
+	// differential backups with continuous WAL archiving while PostgreSQL
+	// keeps running. It requires the volume to be the PGDATA of exactly one
+	// service running PostgresDifferentialImage.
+	BackupStrategyPostgresDifferential BackupStrategy = "PostgresDifferential"
+)
+
+// JSONSchema returns a JSON Schema with the allowed BackupStrategy values.
+func (BackupStrategy) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Enum:        []any{string(BackupStrategyOffline), string(BackupStrategyPostgresDifferential)},
+		Description: "How a Managed volume is backed up.",
+	}
+}
+
+// The PostgreSQL image a PostgresDifferential volume must be the PGDATA of.
+// Cara starts it, creates the pgBackRest stanza and enables archiving in it, so
+// it relies on this image's PostgreSQL major, PGDATA path, pgBackRest version
+// and process tree.
+const (
+	PostgresDifferentialImage    = "ghcr.io/nycu-sdc/cara-postgres:16"
+	PostgresDifferentialDataPath = "/var/lib/postgresql/data"
+)
+
+// Bounds and default of BackupItem.RetainFull.
+const (
+	MinRetainFull     = 1
+	MaxRetainFull     = 12
+	DefaultRetainFull = 4
+)
+
+// BackupItem selects the backup strategy of one Managed volume.
+type BackupItem struct {
+	// Volume names a Managed volume declared in spec.volumes.
+	Volume string `json:"volume" yaml:"volume"`
+
+	// Strategy is how the volume is backed up.
+	Strategy BackupStrategy `json:"strategy" yaml:"strategy"`
+
+	// RetainFull is how many full backups pgBackRest keeps, each with the
+	// differential backups that depend on it. Only valid for
+	// PostgresDifferential; DefaultRetainFull when omitted. It is a count, not
+	// a time guarantee: extra full backups and failed runs change how far back
+	// the retained backups reach.
+	RetainFull *int `json:"retainFull,omitempty" yaml:"retainFull,omitempty"`
+}
+
+// EffectiveRetainFull returns RetainFull, or DefaultRetainFull when omitted.
+func (i BackupItem) EffectiveRetainFull() int {
+	if i.RetainFull == nil {
+		return DefaultRetainFull
+	}
+	return *i.RetainFull
+}
+
+// BackupStrategyFor returns the strategy a Managed volume is backed up with:
+// the one its item selects, or BackupStrategyOffline when no item names it.
+func (s ProjectSpec) BackupStrategyFor(volume string) BackupStrategy {
+	if s.Backup != nil {
+		for _, item := range s.Backup.Items {
+			if item.Volume == volume {
+				return item.Strategy
+			}
+		}
+	}
+	return BackupStrategyOffline
+}
+
+// SameBackupItems reports whether a and b select the same backup items, in the
+// same order. A missing backup section and an empty item list are the same.
+func SameBackupItems(a, b ProjectSpec) bool {
+	var ai, bi []BackupItem
+	if a.Backup != nil {
+		ai = a.Backup.Items
+	}
+	if b.Backup != nil {
+		bi = b.Backup.Items
+	}
+	if len(ai) != len(bi) {
+		return false
+	}
+	for i := range ai {
+		if ai[i].Volume != bi[i].Volume || ai[i].Strategy != bi[i].Strategy {
+			return false
+		}
+		if (ai[i].RetainFull == nil) != (bi[i].RetainFull == nil) {
+			return false
+		}
+		if ai[i].RetainFull != nil && *ai[i].RetainFull != *bi[i].RetainFull {
+			return false
+		}
+	}
+	return true
+}
+
+// HasPostgresDifferential reports whether any Managed volume of the spec uses
+// BackupStrategyPostgresDifferential.
+func (s ProjectSpec) HasPostgresDifferential() bool {
+	for _, v := range s.Volumes {
+		if v.Type == VolumeTypeManaged && s.BackupStrategyFor(v.Name) == BackupStrategyPostgresDifferential {
+			return true
+		}
+	}
+	return false
 }
 
 // ProjectSize is a t-shirt size declaring a Project's resource footprint. Each

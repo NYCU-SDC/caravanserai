@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -50,15 +51,37 @@ type Handler struct {
 	// operatorToken guards the takeover routes until ADR-0018 settles API
 	// access control. Empty disables them.
 	operatorToken string
+
+	// postgresImage is the image a PostgresDifferential volume's service must
+	// run (see WithPostgresDifferentialImage).
+	postgresImage string
 }
 
 // NewHandler creates a Project Handler.
-func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter) *Handler {
-	return &Handler{
+func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter, opts ...Option) *Handler {
+	h := &Handler{
 		logger:        logger,
 		store:         s,
 		tracer:        otel.Tracer("project/handler"),
 		problemWriter: pw,
+		postgresImage: v1.PostgresDifferentialImage,
+	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// Option configures a Handler.
+type Option func(*Handler)
+
+// WithPostgresDifferentialImage replaces the image a PostgresDifferential
+// volume's service must use. An empty reference keeps the published one.
+func WithPostgresDifferentialImage(ref string) Option {
+	return func(h *Handler) {
+		if ref != "" {
+			h.postgresImage = ref
+		}
 	}
 }
 
@@ -92,6 +115,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 // validateProjectSpec validates the project spec, returning a handlerutil.ValidationError
 // if any rule is violated, or nil if the spec is valid.
 func validateProjectSpec(spec v1.ProjectSpec) error {
+	return validateProjectSpecFor(spec, v1.PostgresDifferentialImage)
+}
+
+// validateProjectSpecFor is validateProjectSpec with the image a
+// PostgresDifferential volume's service must use.
+func validateProjectSpecFor(spec v1.ProjectSpec, postgresImage string) error {
 	if len(spec.Services) == 0 {
 		return handlerutil.NewValidationError("spec.services", nil, "spec.services must contain at least one service")
 	}
@@ -114,6 +143,7 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 	}
 
 	volumeNames := make(map[string]bool, len(spec.Volumes))
+	managedVolumes := make(map[string]bool, len(spec.Volumes))
 	hasManagedVolume := false
 	for _, vol := range spec.Volumes {
 		if vol.Name == "" {
@@ -127,6 +157,7 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 		switch vol.Type {
 		case v1.VolumeTypeManaged:
 			hasManagedVolume = true
+			managedVolumes[vol.Name] = true
 		case v1.VolumeTypeEphemeral:
 		default:
 			return handlerutil.NewValidationError("spec.volumes[].type", vol.Type,
@@ -149,6 +180,9 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 		if spec.Backup.OnMissing != "" && spec.Backup.OnMissing != v1.VolumeOnMissingInitializeEmpty {
 			return handlerutil.NewValidationError("spec.backup.onMissing", spec.Backup.OnMissing,
 				"spec.backup.onMissing must be \"InitializeEmpty\"")
+		}
+		if err := validateBackupItems(spec, volumeNames, managedVolumes, postgresImage); err != nil {
+			return err
 		}
 	}
 
@@ -200,6 +234,190 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 	}
 
 	return nil
+}
+
+// validateBackupItems checks spec.backup.items against the volumes and services
+// they refer to. volumeNames holds every declared volume and managedVolumes the
+// Managed ones.
+//
+// PostgresDifferential is accepted only where Cara can run it: the volume must
+// be the PGDATA of exactly one service on PostgresDifferentialImage, because
+// Cara starts that PostgreSQL, creates its stanza and enables archiving in it.
+// Mixing strategies in one Project is rejected until a backup generation can
+// hold both kinds of item.
+func validateBackupItems(spec v1.ProjectSpec, volumeNames, managedVolumes map[string]bool, postgresImage string) error {
+	seen := make(map[string]bool, len(spec.Backup.Items))
+	for _, item := range spec.Backup.Items {
+		switch {
+		case item.Volume == "":
+			return handlerutil.NewValidationError("spec.backup.items[].volume", nil,
+				"each backup item must name a volume")
+		case !volumeNames[item.Volume]:
+			return handlerutil.NewValidationError("spec.backup.items[].volume", item.Volume,
+				"backup item references undeclared volume "+item.Volume)
+		case !managedVolumes[item.Volume]:
+			return handlerutil.NewValidationError("spec.backup.items[].volume", item.Volume,
+				"backup item "+item.Volume+": only a Managed volume can have a backup strategy")
+		case seen[item.Volume]:
+			return handlerutil.NewValidationError("spec.backup.items[].volume", item.Volume,
+				"duplicate backup item for volume "+item.Volume)
+		}
+		seen[item.Volume] = true
+
+		switch item.Strategy {
+		case v1.BackupStrategyOffline:
+			if item.RetainFull != nil {
+				return handlerutil.NewValidationError("spec.backup.items[].retainFull", item.Volume,
+					"backup item "+item.Volume+": retainFull applies only to strategy \"PostgresDifferential\"")
+			}
+		case v1.BackupStrategyPostgresDifferential:
+			if n := item.EffectiveRetainFull(); n < v1.MinRetainFull || n > v1.MaxRetainFull {
+				return handlerutil.NewValidationError("spec.backup.items[].retainFull", n,
+					fmt.Sprintf("backup item %s: retainFull must be between %d and %d", item.Volume, v1.MinRetainFull, v1.MaxRetainFull))
+			}
+			if err := validatePostgresDifferentialMount(spec, item.Volume, postgresImage); err != nil {
+				return err
+			}
+		default:
+			return handlerutil.NewValidationError("spec.backup.items[].strategy", item.Strategy,
+				"backup item "+item.Volume+": strategy must be \"Offline\" or \"PostgresDifferential\"")
+		}
+	}
+
+	if spec.HasPostgresDifferential() {
+		for _, vol := range spec.Volumes {
+			if vol.Type == v1.VolumeTypeManaged && spec.BackupStrategyFor(vol.Name) != v1.BackupStrategyPostgresDifferential {
+				return handlerutil.NewValidationError("spec.backup.items", vol.Name,
+					"Managed volume "+vol.Name+" would be backed up offline, but a Project using \"PostgresDifferential\" "+
+						"cannot mix strategies yet; give every Managed volume strategy \"PostgresDifferential\"")
+			}
+		}
+	}
+	return nil
+}
+
+// validatePostgresDifferentialMount requires volume to be mounted by exactly one
+// service, running PostgresDifferentialImage, at PostgresDifferentialDataPath.
+func validatePostgresDifferentialMount(spec v1.ProjectSpec, volume, postgresImage string) error {
+	var mounts []string
+	for _, svc := range spec.Services {
+		for _, vm := range svc.VolumeMounts {
+			if vm.Name != volume {
+				continue
+			}
+			mounts = append(mounts, svc.Name)
+			if svc.Image != postgresImage {
+				return handlerutil.NewValidationError("spec.services[].image", svc.Image,
+					fmt.Sprintf("service %s mounts PostgresDifferential volume %s, so its image must be %q",
+						svc.Name, volume, postgresImage))
+			}
+			if vm.MountPath != v1.PostgresDifferentialDataPath {
+				return handlerutil.NewValidationError("spec.services[].volumeMounts[].mountPath", vm.MountPath,
+					fmt.Sprintf("service %s mounts PostgresDifferential volume %s, so it must be mounted at %q",
+						svc.Name, volume, v1.PostgresDifferentialDataPath))
+			}
+			if err := validatePostgresDifferentialEnv(svc, volume); err != nil {
+				return err
+			}
+		}
+	}
+	switch len(mounts) {
+	case 1:
+		return nil
+	case 0:
+		return handlerutil.NewValidationError("spec.backup.items[].volume", volume,
+			"PostgresDifferential volume "+volume+" is not mounted by any service")
+	default:
+		return handlerutil.NewValidationError("spec.backup.items[].volume", volume,
+			fmt.Sprintf("PostgresDifferential volume %s must be mounted by exactly one service, found %d (%s)",
+				volume, len(mounts), strings.Join(mounts, ", ")))
+	}
+}
+
+// validatePostgresDifferentialEnv rejects environment variables that would put
+// PostgreSQL's data or WAL somewhere other than the mounted volume. The
+// image's entrypoint honours all three; with any of them, the database would
+// live partly outside the volume that provenance, placement and backup treat
+// as its data, and the part outside is lost when the container is recreated.
+//
+// A value from a Secret is refused too: what it holds is only known when the
+// agent resolves it, after the Project has been accepted.
+func validatePostgresDifferentialEnv(svc v1.ServiceDef, volume string) error {
+	for _, env := range svc.Env {
+		switch env.Name {
+		case "PGDATA", "POSTGRES_INITDB_WALDIR", "POSTGRES_INITDB_ARGS":
+		default:
+			continue
+		}
+		if env.ValueFrom != nil {
+			return handlerutil.NewValidationError("spec.services[].env[].valueFrom", env.Name,
+				fmt.Sprintf("service %s uses PostgresDifferential volume %s, so %s must be a literal value that can be checked when the Project is applied",
+					svc.Name, volume, env.Name))
+		}
+		switch env.Name {
+		case "PGDATA":
+			if env.Value != v1.PostgresDifferentialDataPath {
+				return handlerutil.NewValidationError("spec.services[].env[].value", env.Value,
+					fmt.Sprintf("service %s uses PostgresDifferential volume %s, so PGDATA must be %q or unset",
+						svc.Name, volume, v1.PostgresDifferentialDataPath))
+			}
+		case "POSTGRES_INITDB_WALDIR":
+			return handlerutil.NewValidationError("spec.services[].env[].name", env.Name,
+				fmt.Sprintf("service %s uses PostgresDifferential volume %s, so the WAL directory cannot be moved out of it",
+					svc.Name, volume))
+		case "POSTGRES_INITDB_ARGS":
+			for _, arg := range strings.Fields(env.Value) {
+				if !allowedInitdbArg(arg) {
+					return handlerutil.NewValidationError("spec.services[].env[].value", env.Value,
+						fmt.Sprintf("service %s uses PostgresDifferential volume %s, so POSTGRES_INITDB_ARGS may only contain "+
+							"-k, --data-checksums or --NAME=VALUE for a supported setting, written out in full (%q is not)",
+							svc.Name, volume, arg))
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// initdbSettings are the initdb options POSTGRES_INITDB_ARGS may set, all of
+// which take a value and none of which moves data out of PGDATA. An allowlist,
+// not a check for the dangerous ones: initdb accepts any unambiguous prefix of
+// a long option, so "--wald=/tmp/x" moves the WAL as surely as "--waldir"
+// does, and no list of forbidden spellings can be complete.
+var initdbSettings = map[string]bool{
+	"--encoding":        true,
+	"--locale":          true,
+	"--lc-collate":      true,
+	"--lc-ctype":        true,
+	"--lc-messages":     true,
+	"--lc-monetary":     true,
+	"--lc-numeric":      true,
+	"--lc-time":         true,
+	"--locale-provider": true,
+	"--icu-locale":      true,
+	"--auth":            true,
+	"--auth-host":       true,
+	"--auth-local":      true,
+	"--wal-segsize":     true,
+}
+
+// initdbValue is what a setting's value may contain. The image's entrypoint
+// passes POSTGRES_INITDB_ARGS through eval, so a value is shell input: "$",
+// quotes, backslashes and the like would let it expand into further arguments
+// (--encoding=UTF8${IFS}--waldir=/tmp/x is two of them). Every encoding,
+// locale, authentication method and segment size is spelled with these.
+var initdbValue = regexp.MustCompile(`^[A-Za-z0-9_.@-]+$`)
+
+// allowedInitdbArg reports whether arg is a flag initdb may be given for a
+// PostgresDifferential volume: -k or --data-checksums, or a setting from
+// initdbSettings written as --NAME=VALUE with a literal value. Anything else,
+// including a value given as a separate word, is refused rather than parsed.
+func allowedInitdbArg(arg string) bool {
+	if arg == "-k" || arg == "--data-checksums" {
+		return true
+	}
+	name, value, ok := strings.Cut(arg, "=")
+	return ok && initdbSettings[name] && initdbValue.MatchString(value)
 }
 
 // validateEnvVar enforces the EnvVar contract from CARA-57: value and
@@ -264,7 +482,7 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		project.Namespace = v1.DefaultNamespace
 	}
 
-	if err := validateProjectSpec(project.Spec); err != nil {
+	if err := validateProjectSpecFor(project.Spec, h.postgresImage); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
@@ -280,6 +498,20 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 	// so it can prove no Agent has ever owned it. This is what later lets a
 	// still-Pending Project be hard-deleted directly.
 	project.Status = v1.InitialProjectStatus()
+
+	// A Project asking for a strategy that does not run yet must say so from
+	// the moment it exists; otherwise an accepted manifest reads as protected
+	// data. Server-owned, so any value a client sent is replaced.
+	project.Status.Conditions = v1.RemoveConditions(project.Status.Conditions, v1.ConditionTypeBackupActive)
+	if project.Spec.HasPostgresDifferential() {
+		project.Status.Conditions = append(project.Status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypeBackupActive,
+			Status:             v1.ConditionFalse,
+			LastTransitionTime: time.Now().UTC(),
+			Reason:             v1.ReasonStrategyNotActive,
+			Message:            "PostgresDifferential backups are not running yet; nothing backs up this Project's data",
+		})
+	}
 
 	if err := h.store.CreateProject(traceCtx, &project); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
@@ -328,8 +560,18 @@ func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request) {
 		project.Namespace = v1.DefaultNamespace
 	}
 
-	if err := validateProjectSpec(project.Spec); err != nil {
+	if err := validateProjectSpecFor(project.Spec, h.postgresImage); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	// Checked here for a clear field-level answer; the store repeats the check
+	// inside its update, which is what holds against a concurrent update.
+	if current, err := h.store.GetProject(traceCtx, name); err == nil && !v1.SameBackupItems(current.Spec, project.Spec) {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("spec.backup.items", nil,
+				"spec.backup.items cannot change after the Project is created; in-place changes of backup strategy or retainFull are not supported"),
+			logger)
 		return
 	}
 

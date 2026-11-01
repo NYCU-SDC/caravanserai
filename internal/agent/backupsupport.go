@@ -56,11 +56,11 @@ const restoreTimeout = 30 * time.Minute
 
 // NewBackupSupport wires up Managed volume backups from the agent's config.
 //
-// It returns nil when no object store is configured, which disables backups
-// entirely: Managed volumes are still provisioned and mounted, they are
-// simply never uploaded. A Project that declares a backup policy while this
-// agent has no object store is failed loudly by the runner rather than
-// running silently unbacked.
+// Without an object store configured, backups are disabled entirely: there is
+// no Supervisor, Managed volumes are still provisioned and mounted, they are
+// simply never uploaded or restored. Support is still returned, without an
+// object store, so placement can decide PostgresDifferential Projects from
+// local provenance on every agent (see ensureVolumeData).
 func NewBackupSupport(
 	cfg config.AgentConfig,
 	client *Client,
@@ -71,7 +71,17 @@ func NewBackupSupport(
 ) (*BackupSupport, error) {
 	if !cfg.S3.Enabled() {
 		logger.Info("Object store not configured; Managed volume backups are disabled")
-		return nil, nil
+		return &BackupSupport{
+			Coordinator: backup.NewCoordinator(),
+			// No store: only the local operations (initialising empty
+			// volumes, writing provenance) are reachable without one.
+			Restorer: restore.NewRestorer(nil, restore.Config{
+				DataRoot: cfg.DataRoot,
+				NodeName: cfg.NodeName,
+			}, logger),
+			DataRoot: cfg.DataRoot,
+			NodeName: cfg.NodeName,
+		}, nil
 	}
 
 	host, secure, err := objectstore.ParseEndpoint(cfg.S3.Endpoint)
@@ -136,5 +146,6 @@ func NewBackupSupport(
 		Restorer:    restorer,
 		DataRoot:    cfg.DataRoot,
 		NodeName:    cfg.NodeName,
+		ObjectStore: true,
 	}, nil
 }

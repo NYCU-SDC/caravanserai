@@ -11,6 +11,7 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/restore"
+	caravolume "NYCU-SDC/caravanserai/internal/agent/volume"
 	"NYCU-SDC/caravanserai/internal/objectstore"
 
 	"github.com/stretchr/testify/assert"
@@ -76,7 +77,7 @@ func newSupport(t *testing.T, store restore.Store) (*restore.Restorer, *backup.C
 func TestEnsureVolumeDataNoRestorerIsNotAnError(t *testing.T) {
 	// An agent with no object store still runs Managed volumes; they simply
 	// live and die on local disk.
-	err := ensureVolumeData(context.Background(), nil, backup.NewCoordinator(), t.TempDir(), testNode,
+	err := ensureVolumeData(context.Background(), nil, backup.NewCoordinator(), true, t.TempDir(), testNode,
 		testProject(managedVolume("db-data")), zap.NewNop())
 	assert.NoError(t, err)
 }
@@ -85,7 +86,7 @@ func TestEnsureVolumeDataIgnoresProjectsWithoutManagedVolumes(t *testing.T) {
 	restorer, coordinator, dataRoot := newSupport(t, refusingStore{t})
 
 	p := testProject(v1.VolumeDef{Name: "cache", Type: v1.VolumeTypeEphemeral})
-	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
+	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
 		p, zap.NewNop()))
 
 	// No marker either: a Project with nothing to restore should leave no
@@ -114,7 +115,7 @@ func TestEnsureVolumeDataSkipsWhenProvenanceMatches(t *testing.T) {
 	writeLive(t, dataRoot, p, "db-data", "mine")
 	require.NoError(t, restore.WriteMarker(dataRoot, currentProvenance(p, "20260801T000000Z"), nowUTC()))
 
-	assert.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
+	assert.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
 		p, zap.NewNop()))
 }
 
@@ -127,7 +128,7 @@ func TestEnsureVolumeDataBlocksDataWithNoProvenance(t *testing.T) {
 	p := testProject(managedVolume("db-data"))
 	live := writeLive(t, dataRoot, p, "db-data", "someone else's")
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
+	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
 		p, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
@@ -154,7 +155,7 @@ func TestEnsureVolumeDataBlocksAnotherAssignmentsData(t *testing.T) {
 	older.AssignmentGeneration = 5
 	require.NoError(t, restore.WriteMarker(dataRoot, older, nowUTC()))
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
+	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
 		p, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
@@ -172,7 +173,7 @@ func TestEnsureVolumeDataInitialisesEmptyOnlyOnTheFirstPlacement(t *testing.T) {
 	p := testProject(managedVolume("db-data"))
 	p.Status.AssignmentGeneration = 1 // an Agent only ever sees history Known
 
-	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
+	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
 		p, zap.NewNop()))
 
 	live := filepath.Join(dataRoot, "volumes", p.Namespace, p.Name, "db-data", "data")
@@ -206,7 +207,7 @@ func TestEnsureVolumeDataBlocksWhenAPlacedProjectHasNoBackup(t *testing.T) {
 			p := testProject(managedVolume("db-data")) // generation 7: placed before
 			p.Status.AssignmentHistory = history
 
-			err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
+			err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
 				p, zap.NewNop())
 
 			var blocked *restore.PlacementBlockedError
@@ -233,7 +234,7 @@ func TestEnsureVolumeDataRestoresTheCommittedGeneration(t *testing.T) {
 	p.Status.AssignmentHistory = v1.AssignmentHistoryKnown
 	p.Status.Recovery = &v1.ProjectRecoveryStatus{CommittedBackup: &v1.CommittedBackup{BackupID: "20261031T000000Z-aaaaaaaa"}}
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode, p, zap.NewNop())
+	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode, p, zap.NewNop())
 
 	require.ErrorIs(t, err, restore.ErrGenerationMissing)
 	assert.ErrorContains(t, err, "20261031T000000Z-aaaaaaaa")
@@ -247,7 +248,7 @@ func TestPlacementBlockDetailsNameNoHostPaths(t *testing.T) {
 	p := testProject(managedVolume("db-data"))
 	writeLive(t, dataRoot, p, "db-data", "unproven")
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
+	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
 		p, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
@@ -266,7 +267,7 @@ func TestEnsureVolumeDataDefersWhenProjectIsBusy(t *testing.T) {
 	require.True(t, ok)
 	defer release()
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
+	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
 		p, zap.NewNop())
 	assert.ErrorIs(t, err, errDeferred, "a lost race is a retry, not a failure")
 }
@@ -282,7 +283,7 @@ func TestEnsureVolumeDataReleasesClaimOnReturn(t *testing.T) {
 		p := testProject(managedVolume("db-data"))
 		p.Status.AssignmentGeneration = 1 // an Agent only ever sees history Known
 
-		require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
+		require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
 			p, zap.NewNop()))
 
 		assert.False(t, coordinator.IsBusy(key))
@@ -292,7 +293,7 @@ func TestEnsureVolumeDataReleasesClaimOnReturn(t *testing.T) {
 		restorer, coordinator, dataRoot := newSupport(t, missingStore{})
 		p := testProject(managedVolume("db-data"))
 
-		require.Error(t, ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
+		require.Error(t, ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
 			p, zap.NewNop()))
 
 		assert.False(t, coordinator.IsBusy(key))
@@ -350,7 +351,7 @@ func TestEnsureVolumeDataCorruptMarkerBlocksEvenInShadowMode(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
 
 	for _, strict := range []bool{false, true} {
-		err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
+		err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
 			p, zap.NewNop())
 
 		var blocked *restore.PlacementBlockedError
@@ -370,11 +371,98 @@ func TestEnsureVolumeDataBlocksWhenOneVolumeIsMissing(t *testing.T) {
 
 	require.NoError(t, restore.WriteMarker(dataRoot, currentProvenance(p, "20260801T000000Z"), nowUTC()))
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, dataRoot, testNode,
+	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
 		p, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
 	require.ErrorAs(t, err, &blocked)
 	assert.Equal(t, restore.BlockMissingData, blocked.Reason)
 	assert.Contains(t, blocked.Detail, "uploads")
+}
+
+// postgresDifferentialProject is testProject with one Managed volume whose
+// backup strategy is PostgresDifferential.
+func postgresDifferentialProject(history v1.AssignmentHistory) *v1.Project {
+	p := testProject(managedVolume("pgdata"))
+	p.Spec.Backup = &v1.ProjectBackupConfig{
+		Interval: "24h",
+		Items:    []v1.BackupItem{{Volume: "pgdata", Strategy: v1.BackupStrategyPostgresDifferential}},
+	}
+	p.Status.AssignmentHistory = history
+	return p
+}
+
+func TestEnsureVolumeDataBlocksPostgresDifferentialRestore(t *testing.T) {
+	// A previously placed Project with nothing local needs a restore. For a
+	// PostgresDifferential volume that must be refused before the object
+	// store is read: the offline archives there are addressed by name and may
+	// belong to an earlier same-name Project. refusingStore fails the test if
+	// it is consulted.
+	restorer, coordinator, dataRoot := newSupport(t, refusingStore{t})
+	p := postgresDifferentialProject(v1.AssignmentHistoryKnown)
+
+	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode, p, zap.NewNop())
+
+	var blocked *restore.PlacementBlockedError
+	require.ErrorAs(t, err, &blocked)
+	assert.Equal(t, restore.BlockStrategyRestoreUnavailable, blocked.Reason)
+}
+
+func TestEnsureVolumeDataBlocksPostgresDifferentialWithoutObjectStore(t *testing.T) {
+	// Without an object store, other Projects are not decided at all. A
+	// PostgresDifferential one still is: starting its PostgreSQL on an empty
+	// directory would initialise a new database in place of the one it had.
+	dataRoot := t.TempDir()
+	restorer := restore.NewRestorer(nil, restore.Config{DataRoot: dataRoot, NodeName: testNode}, zap.NewNop())
+	p := postgresDifferentialProject(v1.AssignmentHistoryKnown)
+
+	err := ensureVolumeData(context.Background(), restorer, backup.NewCoordinator(), false, dataRoot, testNode, p, zap.NewNop())
+
+	var blocked *restore.PlacementBlockedError
+	require.ErrorAs(t, err, &blocked)
+	assert.Equal(t, restore.BlockStrategyRestoreUnavailable, blocked.Reason)
+
+	path, pathErr := caravolume.HostPath(dataRoot, p.Namespace, p.Name, "pgdata")
+	require.NoError(t, pathErr)
+	_, statErr := os.Stat(path)
+	assert.True(t, os.IsNotExist(statErr), "no empty volume may be created for a Project that has held data")
+}
+
+func TestEnsureVolumeDataPostgresDifferentialFirstPlacementWithoutObjectStore(t *testing.T) {
+	// A Project that has never been placed has nothing to lose: it starts
+	// empty, and the provenance written then lets the next placement on this
+	// node reuse the data instead of being refused.
+	dataRoot := t.TempDir()
+	restorer := restore.NewRestorer(nil, restore.Config{DataRoot: dataRoot, NodeName: testNode}, zap.NewNop())
+	coordinator := backup.NewCoordinator()
+	p := postgresDifferentialProject(v1.AssignmentHistoryKnown)
+	p.Status.AssignmentGeneration = 1 // the first assignment this Project ever had
+
+	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, false, dataRoot, testNode, p, zap.NewNop()))
+
+	marker, err := restore.ReadMarker(dataRoot, p.Namespace, p.Name)
+	require.NoError(t, err)
+	require.NotNil(t, marker, "first placement must record provenance")
+
+	// The same assignment on the next tick, after PostgreSQL has written to
+	// the volume: proven local data, reused.
+	path, err := caravolume.HostPath(dataRoot, p.Namespace, p.Name, "pgdata")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(path, "PG_VERSION"), []byte("16\n"), 0o600))
+	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, false, dataRoot, testNode, p, zap.NewNop()))
+}
+
+func TestEnsureVolumeDataOfflineWithoutObjectStoreIsUndecided(t *testing.T) {
+	// The behaviour before strategies existed: with no object store, an
+	// Offline Project's volumes just live on local disk and nothing decides
+	// placement for them.
+	dataRoot := t.TempDir()
+	restorer := restore.NewRestorer(nil, restore.Config{DataRoot: dataRoot, NodeName: testNode}, zap.NewNop())
+	p := testProject(managedVolume("data"))
+
+	require.NoError(t, ensureVolumeData(context.Background(), restorer, backup.NewCoordinator(), false, dataRoot, testNode, p, zap.NewNop()))
+
+	marker, err := restore.ReadMarker(dataRoot, p.Namespace, p.Name)
+	require.NoError(t, err)
+	assert.Nil(t, marker, "an undecided placement writes no provenance")
 }
