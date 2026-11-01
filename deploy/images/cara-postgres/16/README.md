@@ -14,7 +14,13 @@ The target builds `ghcr.io/nycu-sdc/cara-postgres:16` for the host architecture 
 make test-cara-postgres-image
 ```
 
-The smoke test builds the image and checks the contract below against the host's Docker in about a minute, with no repo host or S3: PID 1, archiving off by default, recorded versions, UID/GID, certificate permissions, a full and a differential backup with `compress-type=zst` restored and queried, the async archiving crash `tini` prevents (with a control run without `tini` that must reproduce it), and repo-host mode. CI runs it on amd64 when the image or the test changes; arm64 is checked by hand on native hardware. zstd is the compression this image is tested with; use it in the configuration the Agent mounts. The image is not published to a registry yet, so every Node that needs it builds it locally under that same name; manifests do not change when publishing arrives.
+The smoke test builds the image and checks the contract below against the host's Docker in about a minute, with no repo host or S3: PID 1, archiving off by default, recorded versions, UID/GID, certificate permissions, a full and a differential backup with `compress-type=zst` restored and queried, the async archiving crash `tini` prevents (with a control run without `tini` that must reproduce it), and repo-host mode. CI runs it on amd64 and arm64 when the image or the test changes. zstd is the compression this image is tested with; use it in the configuration the Agent mounts.
+
+## Publishing
+
+The `cara-postgres image` workflow publishes `ghcr.io/nycu-sdc/cara-postgres:16` for amd64 and arm64 when the image or the workflow changes on `main`, or when it is run by hand. Each architecture pushes the image its own smoke test passed, so nothing is published without passing it. The package must be public, because Nodes pull with no credentials; the workflow fails if it is not.
+
+Each run also publishes `16-<run>.<attempt>`, which is never reused. `16-<run>.<attempt>-amd64` and `-arm64` are the single-architecture images it is made from.
 
 ## Contract
 
@@ -48,14 +54,14 @@ Retention, bundling and block-incremental settings (`repo1-retention-full`, `rep
 
 ### One tag is not one content
 
-Two Nodes building `:16` at different times can get different PostgreSQL minors. pgBackRest is pinned exactly, but a bump on one Node and not another still produces different images under the same tag. The labels, the version file and the image ID printed by the build target exist so this can be checked; the repo host compares client and server pgBackRest versions when it starts. Immutable versions or digest-pinned deployment come with registry publishing.
+`:16` moves with each publish, and a Node pulls an image only when it has none, so two Nodes can hold different contents under `:16`, with different PostgreSQL minors or, after a bump, different pgBackRest versions. The labels and the version file exist so this can be checked; the repo host compares client and server pgBackRest versions when it starts. To keep every Node on one content, set the server's `POSTGRES_DIFFERENTIAL_IMAGE` to a `16-<run>.<attempt>` tag; manifests then name that same reference.
 
 ## Updating
 
 | What | How |
 |---|---|
-| PostgreSQL minor | Rebuild. The base tag `postgres:16-trixie` follows the latest 16.x |
-| pgBackRest | Change `PGBACKREST_VERSION` in the Dockerfile to a version in the PGDG `trixie-pgdg` repository for both amd64 and arm64, rebuild, and run the smoke test. Every Node must be rebuilt, because the repo host and the databases must agree |
+| PostgreSQL minor | Run the workflow by hand. The base tag `postgres:16-trixie` follows the latest 16.x |
+| pgBackRest | Change `PGBACKREST_VERSION` in the Dockerfile to a version in the PGDG `trixie-pgdg` repository for both amd64 and arm64, and merge. Every Node must then pull the new image, because the repo host and the databases must agree |
 | Debian release | Change the base tag and the `pgdgNN` suffix of `PGBACKREST_VERSION` together; the package is built per release |
 | PostgreSQL major | A new image directory and reference (for example `17/`), not an edit here. PGDATA is not compatible across majors |
 

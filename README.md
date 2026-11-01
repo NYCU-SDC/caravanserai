@@ -227,7 +227,7 @@ The file is the one named by `--config` or `CARA_CONFIG`, and a named file that 
 | `running_grace_period` | `RUNNING_GRACE_PERIOD` | `3m` | How long a Running Project may stay on a NotReady node before its release is attempted |
 | `grace_expired_release` | `GRACE_EXPIRED_RELEASE` | `false` | Move Projects off a node that stayed NotReady past the grace period, with no proof it stopped; a partitioned node keeps its copy running until it reconnects. A Project with a Managed volume moves only once it has a committed backup, and restores from it |
 | `headscale_user` | `HEADSCALE_USER` | `cara-node` | Headscale user new pre-auth keys are created under |
-| `postgres_differential_image` | `POSTGRES_DIFFERENTIAL_IMAGE` | `ghcr.io/nycu-sdc/cara-postgres:16` | Image a `PostgresDifferential` volume's service must use. Set it only where the published image cannot be pulled; manifests in that environment then name the same reference |
+| `postgres_differential_image` | `POSTGRES_DIFFERENTIAL_IMAGE` | `ghcr.io/nycu-sdc/cara-postgres:16` | Image a `PostgresDifferential` volume's service must use. Set it where the published image cannot be pulled, or to a `16-<run>.<attempt>` tag to keep every Node on one content; manifests then name the same reference |
 
 ### cara-agent
 

@@ -3,14 +3,14 @@ name: cara-postgres image
 # Separate from CI so the image is built and checked only when something it
 # depends on changes; the smoke test pulls a base image and starts several
 # PostgreSQL containers, which every Go-only change would otherwise pay for.
-# Makefile is included because the job runs the test through it.
+# Makefile is included for pull requests because the job runs the test through
+# it. It is left out for main because every run there moves :16, and a Makefile
+# change is no reason to give new Nodes another PostgreSQL minor.
 on:
   push:
     branches: [main]
     paths:
       - deploy/images/cara-postgres/**
-      - scripts/image/cara-postgres-smoke.sh
-      - Makefile
       - .github/workflows/cara-postgres-image.yml
   pull_request:
     branches: [main]
@@ -19,11 +19,32 @@ on:
       - scripts/image/cara-postgres-smoke.sh
       - Makefile
       - .github/workflows/cara-postgres-image.yml
+  # A rebuild for a new PostgreSQL minor, which changes nothing in this repository.
+  workflow_dispatch:
+
+# Two runs finishing out of order must not leave :16 on the older image.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+env:
+  IMAGE: ghcr.io/nycu-sdc/cara-postgres
+  # Never reused, so a Node can stay on one content while :16 moves.
+  VERSION_TAG: 16-${{ github.run_number }}.${{ github.run_attempt }}
 
 jobs:
-  smoke-amd64:
-    name: Build & smoke test (amd64)
-    runs-on: ubuntu-latest
+  smoke:
+    name: Build & smoke test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout code
@@ -31,3 +52,46 @@ jobs:
 
       - name: Build image and run smoke test
         run: make test-cara-postgres-image
+
+      # The image the smoke test just passed, not a second build that could get
+      # another PostgreSQL minor.
+      - name: Push the tested image
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "$IMAGE:16" "$IMAGE:$VERSION_TAG-${{ matrix.arch }}"
+          docker push "$IMAGE:$VERSION_TAG-${{ matrix.arch }}"
+
+  publish:
+    name: Publish :16
+    needs: smoke
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Combine the architectures under :16 and the version tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker buildx imagetools create \
+            -t "$IMAGE:16" -t "$IMAGE:$VERSION_TAG" \
+            "$IMAGE:$VERSION_TAG-amd64" "$IMAGE:$VERSION_TAG-arm64"
+
+      # Nodes pull with no credentials, so a package that is not public fails
+      # here rather than on a Node placing a database.
+      - name: Check a Node could pull both architectures
+        run: |
+          docker logout ghcr.io
+          raw=$(docker buildx imagetools inspect --raw "$IMAGE:$VERSION_TAG")
+          for arch in amd64 arm64; do
+            echo "$raw" | jq -e --arg arch "$arch" \
+              '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)] | length > 0' >/dev/null \
+              || { echo "$IMAGE:$VERSION_TAG has no linux/$arch image"; exit 1; }
+          done
+          echo "Published $IMAGE:16 and $IMAGE:$VERSION_TAG" >> "$GITHUB_STEP_SUMMARY"
