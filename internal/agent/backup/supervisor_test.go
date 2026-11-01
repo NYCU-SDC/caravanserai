@@ -2,8 +2,11 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,7 +58,7 @@ func supervisedProject(t *testing.T, dataRoot, name, interval string) *v1.Projec
 
 func TestSupervisorStartsAndStopsWithProjects(t *testing.T) {
 	s, _, _ := newTestSupervisor(t)
-	dataRoot := s.runner.cfg.DataRoot
+	dataRoot := s.runner.(*Runner).cfg.DataRoot
 	ctx := context.Background()
 
 	p := supervisedProject(t, dataRoot, "blog", "1h")
@@ -69,7 +72,7 @@ func TestSupervisorStartsAndStopsWithProjects(t *testing.T) {
 
 func TestSupervisorDoesNotDuplicateAcrossPolls(t *testing.T) {
 	s, _, _ := newTestSupervisor(t)
-	dataRoot := s.runner.cfg.DataRoot
+	dataRoot := s.runner.(*Runner).cfg.DataRoot
 	ctx := context.Background()
 	p := supervisedProject(t, dataRoot, "blog", "1h")
 
@@ -84,7 +87,7 @@ func TestSupervisorDoesNotDuplicateAcrossPolls(t *testing.T) {
 
 func TestSupervisorIgnoresProjectsWithoutBackupPolicy(t *testing.T) {
 	s, _, _ := newTestSupervisor(t)
-	dataRoot := s.runner.cfg.DataRoot
+	dataRoot := s.runner.(*Runner).cfg.DataRoot
 	ctx := context.Background()
 
 	p := supervisedProject(t, dataRoot, "blog", "1h")
@@ -96,7 +99,7 @@ func TestSupervisorIgnoresProjectsWithoutBackupPolicy(t *testing.T) {
 
 func TestSupervisorIgnoresProjectsWithoutManagedVolumes(t *testing.T) {
 	s, _, _ := newTestSupervisor(t)
-	dataRoot := s.runner.cfg.DataRoot
+	dataRoot := s.runner.(*Runner).cfg.DataRoot
 	ctx := context.Background()
 
 	p := supervisedProject(t, dataRoot, "blog", "1h")
@@ -108,7 +111,7 @@ func TestSupervisorIgnoresProjectsWithoutManagedVolumes(t *testing.T) {
 
 func TestSupervisorIgnoresNonRunningProjects(t *testing.T) {
 	s, _, _ := newTestSupervisor(t)
-	dataRoot := s.runner.cfg.DataRoot
+	dataRoot := s.runner.(*Runner).cfg.DataRoot
 	ctx := context.Background()
 
 	for _, phase := range []v1.ProjectPhase{
@@ -127,7 +130,7 @@ func TestSupervisorIgnoresNonRunningProjects(t *testing.T) {
 
 func TestSupervisorIgnoresUnparsableInterval(t *testing.T) {
 	s, _, _ := newTestSupervisor(t)
-	dataRoot := s.runner.cfg.DataRoot
+	dataRoot := s.runner.(*Runner).cfg.DataRoot
 	ctx := context.Background()
 
 	p := supervisedProject(t, dataRoot, "blog", "not-a-duration")
@@ -138,7 +141,7 @@ func TestSupervisorIgnoresUnparsableInterval(t *testing.T) {
 
 func TestSupervisorRestartsWhenIntervalChanges(t *testing.T) {
 	s, _, _ := newTestSupervisor(t)
-	dataRoot := s.runner.cfg.DataRoot
+	dataRoot := s.runner.(*Runner).cfg.DataRoot
 	ctx := context.Background()
 
 	p := supervisedProject(t, dataRoot, "blog", "1h")
@@ -165,7 +168,7 @@ func TestSupervisorRestartsWhenIntervalChanges(t *testing.T) {
 
 func TestSupervisorRefreshesSpecWithoutRestarting(t *testing.T) {
 	s, _, _ := newTestSupervisor(t)
-	dataRoot := s.runner.cfg.DataRoot
+	dataRoot := s.runner.(*Runner).cfg.DataRoot
 	ctx := context.Background()
 
 	p := supervisedProject(t, dataRoot, "blog", "1h")
@@ -192,7 +195,7 @@ func TestSupervisorRefreshesSpecWithoutRestarting(t *testing.T) {
 
 func TestSupervisorRunsBackupOnSchedule(t *testing.T) {
 	s, store, containers := newTestSupervisor(t)
-	dataRoot := s.runner.cfg.DataRoot
+	dataRoot := s.runner.(*Runner).cfg.DataRoot
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -209,7 +212,7 @@ func TestSupervisorRunsBackupOnSchedule(t *testing.T) {
 
 func TestSupervisorStopHaltsScheduledBackups(t *testing.T) {
 	s, store, _ := newTestSupervisor(t)
-	dataRoot := s.runner.cfg.DataRoot
+	dataRoot := s.runner.(*Runner).cfg.DataRoot
 	ctx := context.Background()
 
 	p := supervisedProject(t, dataRoot, "blog", "30ms")
@@ -252,13 +255,160 @@ func TestShouldSupervise(t *testing.T) {
 	ephemeralOnly.Spec.Volumes = []v1.VolumeDef{{Name: "c", Type: v1.VolumeTypeEphemeral}}
 	assert.False(t, shouldSupervise(ephemeralOnly))
 
-	// pgBackRest backs this volume up, not the offline runner, so there is
-	// nothing for a supervisor to schedule.
+	// pgBackRest backs this volume up, on the same schedule.
 	postgresDifferential := base()
 	postgresDifferential.Spec.Backup.Items = []v1.BackupItem{{Volume: "db", Strategy: v1.BackupStrategyPostgresDifferential}}
-	assert.False(t, shouldSupervise(postgresDifferential))
+	assert.True(t, shouldSupervise(postgresDifferential))
 
 	explicitOffline := base()
 	explicitOffline.Spec.Backup.Items = []v1.BackupItem{{Volume: "db", Strategy: v1.BackupStrategyOffline}}
 	assert.True(t, shouldSupervise(explicitOffline))
+}
+
+// countingRunner counts runs and the projects they were given.
+type countingRunner struct {
+	mu   sync.Mutex
+	runs []*v1.Project
+}
+
+func (c *countingRunner) Run(_ context.Context, p *v1.Project) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.runs = append(c.runs, p)
+	return nil
+}
+
+// Work belongs to one assignment. A same-name Project with another UID, or the
+// same Project reassigned, is supervised afresh, and the old work is cancelled.
+func TestSupervisorRestartsWorkForANewAssignment(t *testing.T) {
+	s := NewSupervisor(&countingRunner{}, zap.NewNop())
+	ctx := context.Background()
+	p := &v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: "blog", Namespace: "default", UID: "uid-1"},
+		Status:     v1.ProjectStatus{Phase: v1.ProjectPhaseRunning, AssignmentGeneration: 1},
+		Spec: v1.ProjectSpec{
+			Volumes: []v1.VolumeDef{{Name: "db", Type: v1.VolumeTypeManaged}},
+			Backup:  &v1.ProjectBackupConfig{Interval: "1h"},
+		},
+	}
+	key := ResourceKey{Namespace: "default", Name: "blog"}
+	s.Sync(ctx, []*v1.Project{p})
+	first := s.entries[key]
+
+	s.Sync(ctx, []*v1.Project{p})
+	assert.Same(t, first, s.entries[key], "the same assignment keeps its work")
+
+	reassigned := *p
+	reassigned.Status.AssignmentGeneration = 2
+	s.Sync(ctx, []*v1.Project{&reassigned})
+	second := s.entries[key]
+	assert.NotSame(t, first, second)
+	assert.Equal(t, int64(2), second.generation)
+
+	recreated := reassigned
+	recreated.ObjectMeta.UID = "uid-2"
+	s.Sync(ctx, []*v1.Project{&recreated})
+	assert.NotSame(t, second, s.entries[key])
+	assert.Equal(t, "uid-2", s.entries[key].uid)
+	assert.Equal(t, 1, s.Count())
+	s.Stop()
+}
+
+// scriptedRunner fails while failing is set, and counts its runs.
+type scriptedRunner struct {
+	failing atomic.Bool
+	runs    atomic.Int64
+}
+
+func (r *scriptedRunner) Run(context.Context, *v1.Project) error {
+	defer r.runs.Add(1)
+	if r.failing.Load() {
+		return errors.New("repo host unavailable")
+	}
+	return nil
+}
+
+type recordingHealth struct {
+	mu     sync.Mutex
+	calls  []string
+	setErr error
+}
+
+func (h *recordingHealth) SetBackupFailing(context.Context, *v1.Project) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, "set")
+	return h.setErr
+}
+
+func (h *recordingHealth) ClearBackupFailing(context.Context, *v1.Project) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, "clear")
+	return nil
+}
+
+func (h *recordingHealth) history() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.calls...)
+}
+
+func healthProject() *v1.Project {
+	return &v1.Project{ObjectMeta: v1.ObjectMeta{Name: "blog", Namespace: "default"}}
+}
+
+var healthKey = ResourceKey{Namespace: "default", Name: "blog"}
+
+// Told once when backups start failing and once when they recover, however many
+// runs that takes, since every report is a write and an event on the Project.
+func TestSupervisorReportsFailingBackupsOnChange(t *testing.T) {
+	health := &recordingHealth{}
+	runner := &scriptedRunner{}
+	s := NewSupervisor(runner, zap.NewNop()).WithHealthReporter(health)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p := supervisedProject(t, t.TempDir(), "blog", "5ms")
+	runner.failing.Store(true)
+	s.Sync(ctx, []*v1.Project{p})
+	require.Eventually(t, func() bool { return runner.runs.Load() >= 5 }, 2*time.Second, time.Millisecond)
+	runner.failing.Store(false)
+	require.Eventually(t, func() bool { return len(health.history()) == 2 }, 2*time.Second, time.Millisecond)
+	seen := runner.runs.Load()
+	require.Eventually(t, func() bool { return runner.runs.Load() >= seen+5 }, 2*time.Second, time.Millisecond)
+	s.Stop()
+
+	assert.Equal(t, []string{"set", "clear"}, health.history())
+}
+
+func TestReportHealth(t *testing.T) {
+	t.Run("a healthy run writes nothing", func(t *testing.T) {
+		health := &recordingHealth{}
+		s := NewSupervisor(nil, zap.NewNop()).WithHealthReporter(health)
+		assert.False(t, s.reportHealth(context.Background(), healthKey, healthProject(), false, false))
+		assert.Empty(t, health.history())
+	})
+
+	t.Run("a report that failed is tried again by the next failure", func(t *testing.T) {
+		health := &recordingHealth{setErr: errors.New("server unreachable")}
+		s := NewSupervisor(nil, zap.NewNop()).WithHealthReporter(health)
+		assert.False(t, s.reportHealth(context.Background(), healthKey, healthProject(), true, false))
+		assert.False(t, s.reportHealth(context.Background(), healthKey, healthProject(), true, false))
+		assert.Equal(t, []string{"set", "set"}, health.history())
+	})
+
+	t.Run("a condition left by an earlier Agent process is cleared by a success", func(t *testing.T) {
+		health := &recordingHealth{}
+		s := NewSupervisor(nil, zap.NewNop()).WithHealthReporter(health)
+		p := healthProject()
+		p.Status.Conditions = []v1.Condition{{Type: v1.ConditionTypeBackupFailing, Status: v1.ConditionTrue}}
+		assert.False(t, s.reportHealth(context.Background(), healthKey, p, false, false))
+		assert.Equal(t, []string{"clear"}, health.history())
+	})
+
+	t.Run("no reporter is not an error", func(t *testing.T) {
+		s := NewSupervisor(nil, zap.NewNop())
+		assert.False(t, s.reportHealth(context.Background(), healthKey, healthProject(), true, false))
+	})
 }

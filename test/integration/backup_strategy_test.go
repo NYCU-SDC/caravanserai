@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -68,7 +69,7 @@ func TestBackupStrategyCreateRoundTripsAndReportsNotActive(t *testing.T) {
 	cond, ok := findCondition(got.Status.Conditions, v1.ConditionTypeBackupActive)
 	require.True(t, ok, "a PostgresDifferential Project must say nothing protects it yet")
 	assert.Equal(t, v1.ConditionFalse, cond.Status)
-	assert.Equal(t, v1.ReasonStrategyNotActive, cond.Reason)
+	assert.Equal(t, v1.ReasonNoAcceptedBackup, cond.Reason)
 }
 
 func TestBackupStrategyOmittedItemsAreUnchanged(t *testing.T) {
@@ -104,7 +105,7 @@ func TestBackupStrategyConditionIsServerOwned(t *testing.T) {
 	cond, ok := findCondition(got.Status.Conditions, v1.ConditionTypeBackupActive)
 	require.True(t, ok)
 	assert.Equal(t, v1.ConditionFalse, cond.Status)
-	assert.Equal(t, v1.ReasonStrategyNotActive, cond.Reason)
+	assert.Equal(t, v1.ReasonNoAcceptedBackup, cond.Reason)
 
 	// ...nor can an agent flip or clear it afterwards.
 	path := "/api/v1/projects/e2e-pgdiff-forged/conditions/" + string(v1.ConditionTypeBackupActive)
@@ -252,4 +253,82 @@ func TestStanzaInventory(t *testing.T) {
 	}))
 	assert.Equal(t, http.StatusConflict, put(uid, "node-a", &one, "pgdata"), "not while Terminating")
 	assert.Len(t, getProject(t, name).Status.Backup.Stanzas, 1)
+}
+
+func TestBackupCompletion(t *testing.T) {
+	const name = "e2e-pgdiff-completions"
+	created := createForCleanup(t, postgresDifferentialProject(name, nil))
+	uid := created.ObjectMeta.UID
+	ctx := context.Background()
+	assign := func(phase v1.ProjectPhase, node string, gen int64) {
+		require.NoError(t, suite.store.UpdateProjectStatusWithRetry(ctx, name, func(st *v1.ProjectStatus) error {
+			st.Phase, st.NodeRef, st.AssignmentGeneration = phase, node, gen
+			st.AssignmentHistory = v1.AssignmentHistoryKnown
+			return nil
+		}))
+	}
+	put := func(backupID, puid, node string, gen *int64, items []v1.BackupCompletionItem) int {
+		body := map[string]any{"uid": puid, "nodeRef": node, "items": items}
+		if gen != nil {
+			body["assignmentGeneration"] = *gen
+		}
+		resp := doRequest(t, http.MethodPut, "/api/v1/projects/"+name+"/backup/completions/"+backupID, mustMarshal(t, body))
+		drainBody(resp)
+		return resp.StatusCode
+	}
+	full := []v1.BackupCompletionItem{{Volume: "pgdata", Stanza: v1.StanzaName(uid, "pgdata"), Label: "20261017-030000F", Type: "full"}}
+	one, two := int64(1), int64(2)
+	const first, second = "20261017T030000Z-0000000a", "20261018T030000Z-0000000b"
+
+	assign(v1.ProjectPhaseScheduled, "node-a", 1)
+	assert.Equal(t, http.StatusConflict, put(first, uid, "node-a", &one, full), "not before Running")
+
+	assign(v1.ProjectPhaseRunning, "node-a", 1)
+	cond, ok := findCondition(getProject(t, name).Status.Conditions, v1.ConditionTypeBackupActive)
+	require.True(t, ok)
+	assert.Equal(t, v1.ConditionFalse, cond.Status)
+
+	assert.Equal(t, http.StatusNoContent, put(first, uid, "node-a", &one, full))
+	assert.Equal(t, http.StatusNoContent, put(first, uid, "node-a", &one, full), "a retry is accepted again")
+	p := getProject(t, name)
+	require.NotNil(t, p.Status.Backup)
+	require.Len(t, p.Status.Backup.Completions, 1, "and recorded once")
+	got := p.Status.Backup.Completions[0]
+	assert.Equal(t, first, got.BackupID)
+	assert.Equal(t, "node-a", got.NodeRef)
+	assert.Equal(t, int64(1), got.AssignmentGeneration)
+	assert.Equal(t, v1.BackupManifestKey(uid, first), got.ManifestKey)
+	assert.Equal(t, full, got.Items)
+	cond, ok = findCondition(p.Status.Conditions, v1.ConditionTypeBackupActive)
+	require.True(t, ok)
+	assert.Equal(t, v1.ConditionTrue, cond.Status)
+	assert.Equal(t, v1.ReasonBackupAccepted, cond.Reason)
+
+	assert.Equal(t, http.StatusConflict, put(second, uid, "node-a", &two, full), "a fence that is not current")
+	assert.Equal(t, http.StatusConflict, put(second, uid, "node-b", &one, full), "another node")
+	assert.Equal(t, http.StatusConflict, put(second, "other-uid", "node-a", &one,
+		[]v1.BackupCompletionItem{{Volume: "pgdata", Stanza: v1.StanzaName("other-uid", "pgdata"), Label: "x", Type: "full"}}),
+		"another lifetime")
+	assert.Equal(t, http.StatusConflict, put(second, uid, "node-a", nil, full), "an incomplete fence")
+	assert.Equal(t, http.StatusBadRequest, put("latest", uid, "node-a", &one, full), "not a backup ID")
+	assert.Equal(t, http.StatusBadRequest, put(second, uid, "node-a", &one, nil), "no items")
+	assert.Equal(t, http.StatusBadRequest, put(second, uid, "node-a", &one,
+		[]v1.BackupCompletionItem{{Volume: "pgdata", Stanza: "other-uid-pgdata", Label: "x", Type: "full"}}), "another lifetime's stanza")
+	assert.Equal(t, http.StatusBadRequest, put(second, uid, "node-a", &one,
+		[]v1.BackupCompletionItem{{Volume: "pgdata", Stanza: v1.StanzaName(uid, "pgdata"), Label: "x", Type: "incr"}}), "an unknown type")
+
+	// Reassigned: the accepted backup is still accepted on retry; a new one
+	// from the old assignment is not.
+	assign(v1.ProjectPhaseRunning, "node-b", 2)
+	assert.Equal(t, http.StatusNoContent, put(first, uid, "node-a", &one, full))
+	assert.Equal(t, http.StatusConflict, put(second, uid, "node-a", &one, full))
+	assert.Len(t, getProject(t, name).Status.Backup.Completions, 1)
+
+	// Bounded: the oldest falls off.
+	for i := 0; i < v1.MaxBackupCompletions; i++ {
+		require.Equal(t, http.StatusNoContent, put(fmt.Sprintf("20261019T0300%02dZ-0000000c", i), uid, "node-b", &two, full))
+	}
+	completions := getProject(t, name).Status.Backup.Completions
+	require.Len(t, completions, v1.MaxBackupCompletions)
+	assert.Nil(t, getProject(t, name).Status.Backup.Completion(first))
 }

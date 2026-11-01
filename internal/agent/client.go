@@ -510,6 +510,51 @@ func (c *Client) RecordStanza(ctx context.Context, projectName string, fence Ass
 	}
 }
 
+// completionRequest is the body of
+// PUT /api/v1/projects/{name}/backup/completions/{backupID}.
+type completionRequest struct {
+	evidenceRequest
+	Items []v1.BackupCompletionItem `json:"items"`
+}
+
+// RecordBackupCompletion reports a completed backup under the assignment
+// fence. Retrying with the same backupID is safe: an accepted one is accepted
+// again. A 409 means the fence is no longer current and the backup was never
+// accepted (ErrStaleAssignment).
+func (c *Client) RecordBackupCompletion(ctx context.Context, projectName string, fence AssignmentFence, backupID string, items []v1.BackupCompletionItem) error {
+	gen := fence.Generation
+	body, err := json.Marshal(completionRequest{
+		evidenceRequest: evidenceRequest{UID: fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &gen},
+		Items:           items,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal completion request: %w", err)
+	}
+	url := fmt.Sprintf("%s/api/v1/projects/%s/backup/completions/%s", c.serverURL, projectName, backupID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build completion request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("completion request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("record backup completion: unexpected status %s", resp.Status)
+	}
+}
+
 // conditionPatchRequest is the body sent to
 // PATCH /api/v1/projects/{name}/conditions/{type}. The uid/nodeRef/generation
 // triple is the assignment fence the server validates atomically.

@@ -21,16 +21,34 @@ import (
 // rescheduler would move the very Project being backed up — the backup would
 // cause the failure it exists to protect against.
 type Supervisor struct {
-	runner *Runner
+	runner ProjectRunner
 	logger *zap.Logger
+	health HealthReporter
 
 	mu      sync.Mutex
 	entries map[ResourceKey]*supervisorEntry
 }
 
+// HealthReporter tells the server whether scheduled backups are working. Its
+// failures are logged and retried by the next run: a backup is never affected.
+type HealthReporter interface {
+	SetBackupFailing(ctx context.Context, project *v1.Project) error
+	ClearBackupFailing(ctx context.Context, project *v1.Project) error
+}
+
+// ProjectRunner takes one backup of a Project. *Runner is the Offline one.
+type ProjectRunner interface {
+	Run(ctx context.Context, project *v1.Project) error
+}
+
 type supervisorEntry struct {
 	cancel   context.CancelFunc
 	interval time.Duration
+	// uid and generation identify the assignment the work belongs to. A
+	// Project deleted and recreated under the same name, or reassigned, is
+	// other work: its backups belong to another lifetime or fence.
+	uid        string
+	generation int64
 
 	// mu guards project, which Sync refreshes on every poll so a run always
 	// archives the current spec rather than whatever was current when the
@@ -52,7 +70,13 @@ func (e *supervisorEntry) update(p *v1.Project) {
 }
 
 // NewSupervisor creates a Supervisor driving runner.
-func NewSupervisor(runner *Runner, logger *zap.Logger) *Supervisor {
+// WithHealthReporter makes the Supervisor report whether backups are working.
+func (s *Supervisor) WithHealthReporter(health HealthReporter) *Supervisor {
+	s.health = health
+	return s
+}
+
+func NewSupervisor(runner ProjectRunner, logger *zap.Logger) *Supervisor {
 	return &Supervisor{
 		runner:  runner,
 		logger:  logger,
@@ -100,19 +124,24 @@ func (s *Supervisor) Sync(ctx context.Context, projects []*v1.Project) {
 		}
 
 		if entry, ok := s.entries[key]; ok {
-			if entry.interval == interval {
+			if entry.interval == interval && entry.uid == project.ObjectMeta.UID &&
+				entry.generation == project.Status.AssignmentGeneration {
 				// Already supervised at the right cadence; just refresh the
 				// spec the next run will use.
 				entry.update(project)
 				continue
 			}
-			// The interval changed, so the timer must be rebuilt.
+			// The interval or the assignment changed: cancel the old work, and
+			// start again from this snapshot.
 			entry.cancel()
 			delete(s.entries, key)
 		}
 
 		runCtx, cancel := context.WithCancel(ctx)
-		entry := &supervisorEntry{cancel: cancel, interval: interval, project: project}
+		entry := &supervisorEntry{
+			cancel: cancel, interval: interval, project: project,
+			uid: project.ObjectMeta.UID, generation: project.Status.AssignmentGeneration,
+		}
 		s.entries[key] = entry
 
 		go s.loop(runCtx, key, entry)
@@ -148,6 +177,7 @@ func (s *Supervisor) Count() int {
 func (s *Supervisor) loop(ctx context.Context, key ResourceKey, entry *supervisorEntry) {
 	timer := time.NewTimer(entry.interval)
 	defer timer.Stop()
+	reportedFailing := false
 
 	for {
 		select {
@@ -155,18 +185,63 @@ func (s *Supervisor) loop(ctx context.Context, key ResourceKey, entry *superviso
 			return
 		case <-timer.C:
 			project := entry.current()
-			if err := s.runner.Run(ctx, project); err != nil && !errors.Is(err, ErrNoManagedVolumes) {
+			err := s.runner.Run(ctx, project)
+			if errors.Is(err, ErrNoManagedVolumes) {
+				err = nil
+			}
+			if err != nil {
 				s.logger.Error("Backup failed",
 					zap.String("project", key.String()), zap.Error(err))
+			}
+			// A run cancelled because the work ended says nothing about backups.
+			if ctx.Err() == nil {
+				reportedFailing = s.reportHealth(ctx, key, project, err != nil, reportedFailing)
 			}
 			timer.Reset(entry.interval)
 		}
 	}
 }
 
+// reportHealth tells the server the outcome of a run when it changes what the
+// server shows, and returns whether the server now shows BackupFailing. The
+// condition may have been left by an earlier Agent process, so a success also
+// clears one found on the Project.
+func (s *Supervisor) reportHealth(ctx context.Context, key ResourceKey, project *v1.Project, failed, reported bool) bool {
+	if s.health == nil {
+		return reported
+	}
+	if failed {
+		if reported {
+			return true
+		}
+		if err := s.health.SetBackupFailing(ctx, project); err != nil {
+			s.logger.Warn("Failed to report a failing backup", zap.String("project", key.String()), zap.Error(err))
+			return false
+		}
+		return true
+	}
+	if !reported && !backupFailingOn(project) {
+		return false
+	}
+	if err := s.health.ClearBackupFailing(ctx, project); err != nil {
+		s.logger.Warn("Failed to clear BackupFailing", zap.String("project", key.String()), zap.Error(err))
+		return true
+	}
+	return false
+}
+
+func backupFailingOn(project *v1.Project) bool {
+	for _, c := range project.Status.Conditions {
+		if c.Type == v1.ConditionTypeBackupFailing && c.Status == v1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
 // shouldSupervise reports whether a Project needs a backup goroutine: it must
 // be Running on this node, declare a backup policy, and have at least one
-// Managed volume to capture.
+// Managed volume to capture, offline or with PostgresDifferential.
 func shouldSupervise(p *v1.Project) bool {
 	if p.Status.Phase != v1.ProjectPhaseRunning {
 		return false
@@ -174,7 +249,7 @@ func shouldSupervise(p *v1.Project) bool {
 	if p.Spec.Backup == nil {
 		return false
 	}
-	return len(managedVolumes(p.Spec)) > 0
+	return len(managedVolumes(p.Spec)) > 0 || p.Spec.HasPostgresDifferential()
 }
 
 // backupInterval parses a Project's configured backup cadence.

@@ -55,6 +55,9 @@
 //	  ConditionTypeTeardownBlocked — set by the agent while it cannot finish
 //	  removing a Terminating Project's resources, and cleared once it has.
 //
+//	  ConditionTypeBackupFailing — set by the agent when a scheduled backup
+//	  fails, and cleared by the next one that succeeds.
+//
 //	  ConditionTypeBackupActive — server-owned, part of the initial status of
 //	  a Project whose backup uses a strategy that is not running yet.
 package v1
@@ -179,13 +182,21 @@ const (
 
 	// ConditionTypeBackupActive says whether the Project's backup is enabled
 	// and has had at least one successful backup accepted. Status=False with
-	// Reason=ReasonStrategyNotActive means a strategy the Project selected,
-	// such as PostgresDifferential, does not run yet, so nothing protects its
-	// data even though the manifest asks for backups.
+	// Reason=ReasonNoAcceptedBackup means no backup of the strategy the Project
+	// selected, such as PostgresDifferential, has been accepted yet, so nothing
+	// protects its data even though the manifest asks for backups.
+	// Status=True with Reason=ReasonBackupAccepted follows the first one.
 	//
 	// It is server-owned; agents cannot write it. It does not say the Project
-	// can be restored automatically, nor that the latest backup is recent.
+	// can be restored automatically, nor that the latest backup is recent:
+	// BackupFailing is what says backups have stopped working.
 	ConditionTypeBackupActive ConditionType = "BackupActive"
+
+	// ConditionTypeBackupFailing says the most recent scheduled backup failed,
+	// so the restore point is getting older. An Agent that cannot reach the
+	// server cannot set it; the time of the last accepted backup is the check
+	// that holds then.
+	ConditionTypeBackupFailing ConditionType = "BackupFailing"
 
 	// ConditionTypeDiskPressure indicates whether the node's disk usage is
 	// approaching capacity. Set by the NodeConditionController based on
@@ -198,10 +209,18 @@ const (
 	ConditionTypeMemoryPressure ConditionType = "MemoryPressure"
 )
 
-// ReasonStrategyNotActive is the BackupActive reason for a Project whose
-// selected backup strategy has not produced an accepted backup because it does
-// not run yet.
-const ReasonStrategyNotActive = "StrategyNotActive"
+// BackupActive reasons.
+const (
+	// ReasonNoAcceptedBackup: the Project's selected strategy has not had a
+	// backup accepted by the server yet.
+	ReasonNoAcceptedBackup = "NoAcceptedBackup"
+	// ReasonBackupAccepted: the server has accepted at least one backup of
+	// the Project's current lifetime.
+	ReasonBackupAccepted = "BackupAccepted"
+)
+
+// ReasonBackupAttemptFailed is the reason of BackupFailing.
+const ReasonBackupAttemptFailed = "BackupAttemptFailed"
 
 // MaintenanceStaleAfter is how long a Maintenance condition stays meaningful.
 // An agent that dies mid-backup leaves the condition behind with nothing to

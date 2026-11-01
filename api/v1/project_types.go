@@ -610,6 +610,65 @@ type ProjectBackupStatus struct {
 	// including those of volumes later removed from the spec. It only grows:
 	// deleting a lifetime's backups has to find every stanza it ever wrote.
 	Stanzas []StanzaRecord `json:"stanzas,omitempty" yaml:"stanzas,omitempty"`
+
+	// Completions lists the most recent backups the server accepted from this
+	// lifetime's assigned Agents, oldest first, at most MaxBackupCompletions.
+	// Accepted means the backup completed under the assignment current at
+	// the time; it does not make the backup a restore source.
+	Completions []BackupCompletion `json:"completions,omitempty" yaml:"completions,omitempty"`
+}
+
+// MaxBackupCompletions bounds ProjectBackupStatus.Completions. A retry of a
+// backupID older than the bound is no longer recognised as accepted.
+const MaxBackupCompletions = 20
+
+// BackupCompletion is one backup the server accepted.
+type BackupCompletion struct {
+	BackupID string `json:"backupID" yaml:"backupID"`
+	// NodeRef and AssignmentGeneration are the assignment it completed under.
+	NodeRef              string    `json:"nodeRef" yaml:"nodeRef"`
+	AssignmentGeneration int64     `json:"assignmentGeneration" yaml:"assignmentGeneration"`
+	AcceptedAt           time.Time `json:"acceptedAt" yaml:"acceptedAt"`
+	// ManifestKey is where the Agent wrote the backup's manifest.
+	ManifestKey string                 `json:"manifestKey" yaml:"manifestKey"`
+	Items       []BackupCompletionItem `json:"items" yaml:"items"`
+}
+
+// BackupCompletionItem is the backup of one volume within a completion.
+type BackupCompletionItem struct {
+	Volume string `json:"volume" yaml:"volume"`
+	Stanza string `json:"stanza" yaml:"stanza"`
+	// Label is the pgBackRest backup label.
+	Label string `json:"label" yaml:"label"`
+	// Type is full or diff.
+	Type string `json:"type" yaml:"type"`
+}
+
+// BackupManifestKey is the object key of a backup's manifest. Like every key of
+// a Project's backups it is derived from the Project UID, never its name.
+func BackupManifestKey(projectUID, backupID string) string {
+	return "cara/v2/projects/" + projectUID + "/generations/" + backupID + "/manifest.json"
+}
+
+// Completion returns the accepted completion with backupID, or nil.
+func (b *ProjectBackupStatus) Completion(backupID string) *BackupCompletion {
+	if b == nil {
+		return nil
+	}
+	for i := range b.Completions {
+		if b.Completions[i].BackupID == backupID {
+			return &b.Completions[i]
+		}
+	}
+	return nil
+}
+
+// LastCompletion returns the most recently accepted completion, or nil.
+func (b *ProjectBackupStatus) LastCompletion() *BackupCompletion {
+	if b == nil || len(b.Completions) == 0 {
+		return nil
+	}
+	return &b.Completions[len(b.Completions)-1]
 }
 
 // StanzaRecord is one pgBackRest stanza a Project lifetime created.
@@ -646,6 +705,10 @@ func (b *ProjectBackupStatus) DeepCopy() *ProjectBackupStatus {
 	}
 	out := *b
 	out.Stanzas = slices.Clone(b.Stanzas)
+	out.Completions = slices.Clone(b.Completions)
+	for i := range out.Completions {
+		out.Completions[i].Items = slices.Clone(b.Completions[i].Items)
+	}
 	return &out
 }
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -225,6 +226,27 @@ func (r *DockerRuntime) RunToCompletion(ctx context.Context, image, user string,
 		return ExecResult{}, fmt.Errorf("docker: read helper output: %w", err)
 	}
 	return ExecResult{ExitCode: int(code), Stdout: stdout.String(), Stderr: stderr.String()}, nil
+}
+
+// LogLines returns every log line Docker still holds for a container, stdout
+// and stderr interleaved as they were written, each prefixed with Docker's
+// timestamp. The timestamps make lines distinct, which is what lets a reader
+// tell a log that continued from one that was rotated or truncated.
+func (r *DockerRuntime) LogLines(ctx context.Context, containerID string) ([]string, error) {
+	logs, err := r.client.ContainerLogs(ctx, containerID, container.LogsOptions{ShowStdout: true, ShowStderr: true, Timestamps: true})
+	if err != nil {
+		return nil, fmt.Errorf("docker: logs of %s: %w", containerID, err)
+	}
+	defer func() { _ = logs.Close() }()
+	var all bytes.Buffer
+	if _, err := stdcopy.StdCopy(&all, &all, logs); err != nil {
+		return nil, fmt.Errorf("docker: read logs of %s: %w", containerID, err)
+	}
+	text := strings.TrimSuffix(all.String(), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	return strings.Split(text, "\n"), nil
 }
 
 // createPulling runs create, and when it fails because image is not on the

@@ -8,6 +8,7 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/pgbackup"
 	"NYCU-SDC/caravanserai/internal/agent/restore"
 	"NYCU-SDC/caravanserai/internal/config"
 	"NYCU-SDC/caravanserai/internal/objectstore"
@@ -37,6 +38,16 @@ func (c conditionReporter) SetMaintenance(ctx context.Context, key backup.Resour
 func (c conditionReporter) ClearMaintenance(ctx context.Context, key backup.ResourceKey, uid, nodeRef string, generation int64) error {
 	fence := AssignmentFence{UID: uid, NodeRef: nodeRef, Generation: generation}
 	return c.client.ClearProjectCondition(ctx, key.Name, fence, v1.ConditionTypeMaintenance)
+}
+
+func (c conditionReporter) SetBackupFailing(ctx context.Context, project *v1.Project) error {
+	return c.client.PatchProjectCondition(ctx, project.Name, fenceForProject(project),
+		v1.ConditionTypeBackupFailing, v1.ConditionTrue, v1.ReasonBackupAttemptFailed,
+		"The most recent scheduled backup failed; see this Node's Agent log")
+}
+
+func (c conditionReporter) ClearBackupFailing(ctx context.Context, project *v1.Project) error {
+	return c.client.ClearProjectCondition(ctx, project.Name, fenceForProject(project), v1.ConditionTypeBackupFailing)
 }
 
 // backupCommitter adapts Client to backup.BackupCommitter.
@@ -96,6 +107,7 @@ func NewBackupSupport(
 		Secure:    secure,
 		AccessKey: cfg.S3.AccessKey,
 		SecretKey: cfg.S3.SecretKey,
+		CAFile:    cfg.S3.CAFile,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("agent: create object store: %w", err)
@@ -140,12 +152,44 @@ func NewBackupSupport(
 		NodeName:     cfg.NodeName,
 	}, logger)
 
+	strategies := strategyRunner{offline: runner}
+	if rt, ok := runtime.(pgRuntimeWithLogs); ok {
+		continuity := pgbackup.NewFileContinuity(cfg.DataRoot, rt)
+		strategies.postgres = pgbackup.NewRunner(coordinator, rt, continuity,
+			newCompletionRecorder(client, store, caraVersion), logger)
+	}
+
 	return &BackupSupport{
-		Supervisor:  backup.NewSupervisor(runner, logger),
+		Supervisor:  backup.NewSupervisor(strategies, logger).WithHealthReporter(conditionReporter{client: client}),
 		Coordinator: coordinator,
 		Restorer:    restorer,
 		DataRoot:    cfg.DataRoot,
 		NodeName:    cfg.NodeName,
 		ObjectStore: true,
 	}, nil
+}
+
+// pgRuntimeWithLogs is what PostgreSQL backups need from the runtime: running
+// commands in the database container and reading its log.
+type pgRuntimeWithLogs interface {
+	pgbackup.Runtime
+	pgbackup.LogReader
+}
+
+// strategyRunner sends each Project's backup to the runner of its strategy. A
+// Project uses one strategy for every Managed volume, which validation
+// enforces.
+type strategyRunner struct {
+	offline  *backup.Runner
+	postgres *pgbackup.Runner
+}
+
+func (s strategyRunner) Run(ctx context.Context, project *v1.Project) error {
+	if project.Spec.HasPostgresDifferential() {
+		if s.postgres == nil {
+			return fmt.Errorf("agent: this Node's container runtime cannot run PostgreSQL backups for %s", project.Name)
+		}
+		return s.postgres.Run(ctx, project)
+	}
+	return s.offline.Run(ctx, project)
 }

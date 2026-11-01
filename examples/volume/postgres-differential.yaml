@@ -2,11 +2,12 @@
 # strategy: pgBackRest full and differential backups with WAL archiving, taken
 # while PostgreSQL keeps running.
 #
-# Not running yet. The Project is accepted and placed, but nothing backs it up:
-# `caractl describe project pg-differential` shows BackupActive=False with
-# reason StrategyNotActive, and the offline backup runner leaves this volume
-# alone. A placement that would need this data from the object store is
-# refused with StrategyRestoreUnavailable rather than started empty.
+# The Project reaches Running once its database archives WAL through the Node's
+# repo host. `caractl describe project pg-differential` shows
+# BackupActive=False with reason NoAcceptedBackup until the first backup is
+# accepted, and the last accepted backup after that. A placement that would
+# need this data from the object store is refused with
+# StrategyRestoreUnavailable rather than started empty.
 #
 # The service must use the image below with the volume mounted at its PGDATA,
 # every Managed volume of the Project must use this strategy, and backup.items

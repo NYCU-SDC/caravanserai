@@ -611,6 +611,9 @@ func (h *RepoHost) WriteClientConfig(uid string, stanzas []ClientStanza) (string
 // DataPath is where a PostgresDifferential database's PGDATA is mounted.
 const DataPath = "/var/lib/postgresql/data"
 
+// archivePushQueueMax bounds the WAL a database keeps while it cannot archive.
+const archivePushQueueMax = "4GiB"
+
 func renderClientConfig(stanzas []ClientStanza) []byte {
 	var b strings.Builder
 	line := func(k, v string) { fmt.Fprintf(&b, "%s=%s\n", k, v) }
@@ -621,7 +624,16 @@ func renderClientConfig(stanzas []ClientStanza) []byte {
 	line("repo1-host-cert-file", serverTLSDir+"/client.crt")
 	line("repo1-host-key-file", serverTLSDir+"/client.key")
 	line("compress-type", "zst")
+	// Block incremental: a backup stores only the changed blocks of a file.
+	// It needs bundling, and takes effect on the side running the backup.
+	line("repo1-bundle", "y")
+	line("repo1-block", "y")
 	line("archive-async", "y")
+	// While the repository cannot be reached, WAL waits in the spool and
+	// pg_wal. Past this, pgBackRest drops it and logs that it did, rather than
+	// filling the Node's disk for every Project on it; the dropped range breaks
+	// point-in-time recovery across it, and the next backup is full.
+	line("archive-push-queue-max", archivePushQueueMax)
 	line("spool-path", "/var/spool/pgbackrest")
 	line("start-fast", "y")
 	line("log-level-console", "info")

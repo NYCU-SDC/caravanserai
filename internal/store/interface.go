@@ -392,6 +392,16 @@ type ProjectStore interface {
 	// ErrStaleAssignment for a fence that is not current.
 	RecordStanza(ctx context.Context, name string, ref AssignmentRef, volume string, observedAt time.Time) error
 
+	// RecordBackupCompletion accepts a backup the assigned Agent completed.
+	// A completion whose backupID is already recorded for the lifetime is
+	// accepted again unchanged, even after a reassignment, so an Agent whose
+	// response was lost can retry. Otherwise ref must be the current
+	// assignment of a Running Project; the completion is appended (keeping at
+	// most v1.MaxBackupCompletions) and BackupActive becomes True. Returns
+	// ErrStaleAssignment for a fence that is not current, and ErrConflictState
+	// when the Project is not Running.
+	RecordBackupCompletion(ctx context.Context, name string, ref AssignmentRef, completion v1.BackupCompletion) error
+
 	// UpdateProjectSpec writes only the user-mutable fields of a Project
 	// (spec, labels, annotations). Status is preserved. The update is only
 	// allowed when the project's current phase is Pending or Failed; returns

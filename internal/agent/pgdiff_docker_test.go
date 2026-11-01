@@ -16,6 +16,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/agent/backup"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
 	"NYCU-SDC/caravanserai/internal/agent/pgbackrest"
+	"NYCU-SDC/caravanserai/internal/agent/pgbackup"
 	"NYCU-SDC/caravanserai/internal/agent/restore"
 
 	"github.com/stretchr/testify/assert"
@@ -151,4 +152,68 @@ func TestPostgresPlacementArchivesThroughTheRepoHost(t *testing.T) {
 	after, err := dockerCLI("inspect", "-f", "{{.State.StartedAt}}", db)
 	require.NoError(t, err)
 	assert.Equal(t, before, after, "finishing again does not restart a database that already archives")
+
+	// Backups while PostgreSQL runs: full first, then differential.
+	rec := &itemRecorder{}
+	runner := pgbackup.NewRunner(backups.Coordinator, runtime, pgbackup.NewFileContinuity(dataRoot, runtime), rec, zap.NewNop())
+	running.Status.Phase = v1.ProjectPhaseRunning
+	sql := func(q string) string {
+		out, err := psql(ctx, runtime, db, q)
+		require.NoError(t, err, out)
+		return out
+	}
+	sql("CREATE TABLE notes (id int)")
+	sql("INSERT INTO notes SELECT generate_series(1, 1000)")
+	require.NoError(t, runner.Run(ctx, running))
+	sql("INSERT INTO notes SELECT generate_series(1001, 2000)")
+	require.NoError(t, runner.Run(ctx, running))
+	require.Len(t, rec.items, 2)
+	assert.Equal(t, pgbackup.TypeFull, rec.items[0][0].Type)
+	assert.Equal(t, pgbackup.TypeDiff, rec.items[1][0].Type,
+		"the log continued from the first backup to the second, so continuity is known")
+	logs, err := runtime.LogLines(ctx, db)
+	require.NoError(t, err)
+	assert.Contains(t, strings.Join(logs, "\n"), "archive-push",
+		"archive-push reports through PostgreSQL's log, where a dropped-WAL warning would appear")
+	assert.True(t, strings.HasPrefix(rec.items[1][0].Label, rec.items[0][0].Label+"_"),
+		"the differential depends on the full: %s, %s", rec.items[0][0].Label, rec.items[1][0].Label)
+	assert.Equal(t, 16, rec.items[0][0].PGMajor)
+	state, err := dockerCLI("inspect", "-f", "{{.State.Running}}", db)
+	require.NoError(t, err)
+	assert.Equal(t, "true", state, "a backup does not stop the database")
+
+	// A cancelled run leaves no backup process behind.
+	cancelCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+	require.ErrorIs(t, runner.Run(cancelCtx, running), context.Canceled, "the run was cancelled mid-backup")
+	require.Eventually(t, func() bool {
+		res, err := runtime.Exec(ctx, db, "postgres", []string{"sh", "-c",
+			`for d in /proc/[0-9]*; do tr '\0' ' ' < $d/cmdline 2>/dev/null; echo; done | grep -c '^pgbackrest.* backup' || true`})
+		return err == nil && strings.TrimSpace(res.Stdout) == "0"
+	}, 30*time.Second, 500*time.Millisecond, "no pgbackrest backup process is left in the container")
+	// And the next run is not blocked by it.
+	require.NoError(t, runner.Run(ctx, running))
+
+	// The repo host stops while the Project runs. Nothing places a Running
+	// Project again; the Agent's supervision brings the repo host back, and
+	// archiving with it.
+	out, err := dockerCLI("stop", repoName)
+	require.NoError(t, err, out)
+	superviseCtx, stopSupervising := context.WithCancel(ctx)
+	defer stopSupervising()
+	go superviseRepoHost(superviseCtx, repo, 200*time.Millisecond, time.Minute, time.Second, zap.NewNop())
+	require.Eventually(t, func() bool {
+		res, err := runtime.Exec(ctx, db, "postgres", []string{"pgbackrest", "--stanza=" + stanza, "check"})
+		return err == nil && res.ExitCode == 0
+	}, 90*time.Second, time.Second, "archiving works again once the repo host is back")
+}
+
+type itemRecorder struct{ items [][]pgbackup.Item }
+
+func (r *itemRecorder) Record(_ context.Context, _ *v1.Project, _ string, items []pgbackup.Item) error {
+	r.items = append(r.items, items)
+	return nil
 }
