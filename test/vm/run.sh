@@ -121,6 +121,7 @@ cleanup() {
 	fi
 	log "deleting the VMs"
 	provider_down "${all_vms[@]}"
+	[[ -n "${bin:-}" ]] && rm -rf "$bin"
 	local left
 	left="$(provider_list | grep -E '^vt-' || true)"
 	if [[ -n "$left" ]]; then
@@ -135,7 +136,8 @@ trap 'log "interrupted"; exit 130' INT TERM
 log "commit $sha; scenarios ${scenarios[*]}; about $minutes min plus about 5 min of setup; $power_offs hard power-off(s)"
 log "record: $out"
 
-bin="$out/bin"
+# The binaries are not part of the record: the commit names them.
+bin="$(mktemp -d)"
 log "building $short"
 deploy_build "$sha" "$bin" || { log "build failed"; exit 1; }
 
@@ -181,6 +183,8 @@ failed=$(jq -s '[.[] | select(.verdict == "FAIL")] | length' "$out/results.jsonl
 	echo "- 由 \`test/vm/run.sh\` 產生；每項只跑一次，耗時都是單次值"
 	echo
 	echo "## 結果"
+	echo
+	echo "通過 $(jq -s '[.[] | select(.verdict == "pass")] | length' "$out/results.jsonl")、失敗 $failed、觀測值 $(jq -s '[.[] | select(.verdict == "observed")] | length' "$out/results.jsonl")。"
 	echo
 	echo "| 情境 | 檢查 | 期望 | 實際 | 判定 |"
 	echo "|---|---|---|---|---|"
