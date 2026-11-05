@@ -99,6 +99,29 @@ type Store interface {
 	ProjectStore
 	SecretStore
 	PreAuthKeyStore
+	APITokenStore
+}
+
+// ============================================================
+// APIToken
+// ============================================================
+
+// APITokenStore persists the bearer tokens that identify API callers
+// (ADR-0031). It sees only token hashes, never tokens.
+type APITokenStore interface {
+	// CreateAPIToken records a token by its hash.
+	CreateAPIToken(ctx context.Context, kind v1.APITokenKind, name, tokenHash, createdBy string) (v1.APIToken, error)
+
+	// LookupAPIToken returns the token with this hash. It returns ErrNotFound
+	// for an unknown hash and for a revoked token alike.
+	LookupAPIToken(ctx context.Context, tokenHash string) (v1.APIToken, error)
+
+	// ListAPITokens returns every token, revoked ones included, oldest first.
+	ListAPITokens(ctx context.Context) ([]v1.APIToken, error)
+
+	// RevokeAPIToken stops the token with this ID from authenticating.
+	// Revoking a revoked token is a no-op; an unknown ID returns ErrNotFound.
+	RevokeAPIToken(ctx context.Context, id int64) error
 }
 
 // ============================================================

@@ -15,6 +15,7 @@ for command in docker curl go python3; do
 done
 
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/cara-orphan-e2e.XXXXXX")"
+. "$(dirname "${BASH_SOURCE[0]}")/lib/auth.sh"
 suffix="${PPID}-$$"
 postgres_name="cara69-postgres-${suffix}"
 dind_name="cara69-dind-${suffix}"
@@ -173,6 +174,7 @@ server_url="http://127.0.0.1:$server_port"
 	env \
 		HOST=127.0.0.1 \
 		PORT="$server_port" \
+		BREAK_GLASS_TOKEN_FILE="$e2e_admin_token_file" \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &
@@ -183,10 +185,12 @@ cat >"$test_root/agent-run/config.yaml" <<EOF
 data_root: "$data_root"
 EOF
 
+agent_token_file="$(node_token_file node-a)"
 (
 	cd "$test_root/agent-run"
 	env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
 		SERVER_URL="$server_url" \
+		AGENT_TOKEN_FILE="$agent_token_file" \
 		NODE_NAME=node-a \
 		HEARTBEAT_INTERVAL=1s \
 		DOCKER_HOST="$dind_host" \

@@ -2,8 +2,11 @@
 package handler
 
 import (
+	"context"
 	"errors"
+	"fmt"
 
+	"NYCU-SDC/caravanserai/internal/server/auth"
 	"NYCU-SDC/caravanserai/internal/store"
 
 	"github.com/NYCU-SDC/summer/pkg/problem"
@@ -15,9 +18,27 @@ import (
 // %w to add a caller-specific detail.
 var ErrServiceNotConfigured = errors.New("service not configured")
 
-// ErrOperatorUnauthorized is returned when an operator-only route is called
-// without the operator credential.
+// ErrOperatorUnauthorized is returned when an admin-only route is reached with
+// no authenticated caller. The authentication middleware normally answers
+// first; this covers a handler served without it.
 var ErrOperatorUnauthorized = errors.New("operator credential required")
+
+// ErrForbidden is returned when the authenticated caller may not make the
+// request.
+var ErrForbidden = errors.New("forbidden")
+
+// RequireAdmin returns nil when the request's caller is an admin, and the error
+// to write otherwise.
+func RequireAdmin(ctx context.Context) error {
+	p, ok := auth.FromContext(ctx)
+	if !ok {
+		return ErrOperatorUnauthorized
+	}
+	if !p.IsAdmin() {
+		return fmt.Errorf("%w: %s may not do this", ErrForbidden, p)
+	}
+	return nil
+}
 
 // NewProblemMapping returns a mapping function that bridges Caravanserai's
 // store sentinel errors to summer's problem types. Pass the returned function
@@ -30,6 +51,7 @@ var ErrOperatorUnauthorized = errors.New("operator credential required")
 //   - store.ErrVersionConflict   → 409 Conflict
 //   - ErrServiceNotConfigured    → 503 Service Unavailable
 //   - ErrOperatorUnauthorized    → 401 Unauthorized
+//   - ErrForbidden               → 403 Forbidden
 //
 // Unrecognised errors return an empty Problem{}, which lets summer's built-in
 // fallback logic handle them (typically producing a 500 Internal Server Error).
@@ -52,6 +74,14 @@ func NewProblemMapping() func(error) problem.Problem {
 				Title:  "Unauthorized",
 				Status: 401,
 				Type:   "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401",
+				Detail: err.Error(),
+			}
+
+		case errors.Is(err, ErrForbidden):
+			return problem.Problem{
+				Title:  "Forbidden",
+				Status: 403,
+				Type:   "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/403",
 				Detail: err.Error(),
 			}
 

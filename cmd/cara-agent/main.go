@@ -83,6 +83,19 @@ func main() {
 	defer stop()
 
 	agentClient := agent.NewClient(logger, cfg.ServerURL, cfg.NodeName)
+	if cfg.TokenFile == "" {
+		logger.Warn("No token file configured (AGENT_TOKEN_FILE): cara-server will refuse this agent's requests")
+	} else {
+		raw, err := os.ReadFile(cfg.TokenFile)
+		if err != nil {
+			logger.Fatal("Cannot read the Node token", zap.String("path", cfg.TokenFile), zap.Error(err))
+		}
+		token := strings.TrimSpace(string(raw))
+		if token == "" {
+			logger.Fatal("The Node token file is empty", zap.String("path", cfg.TokenFile))
+		}
+		agentClient.SetToken(token)
+	}
 
 	// ── Headscale overlay join ────────────────────────────────────────────
 	// Overlay networking is opt-in in 1.0 (CARA-55): the agent joins the

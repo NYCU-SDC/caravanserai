@@ -61,6 +61,7 @@ rm -rf -- "$anonymous_config"
 shared_root="${E2E_SHARED_ROOT:-/var/tmp}"
 [[ -d "$shared_root" && -w "$shared_root" ]] || fail "E2E_SHARED_ROOT is not a writable directory: $shared_root"
 test_root="$(mktemp -d "$shared_root/cara-pgdiff-e2e.XXXXXX")"
+. "$(dirname "${BASH_SOURCE[0]}")/lib/auth.sh"
 suffix="${PPID}-$$"
 postgres_name="cara126-postgres-${suffix}"
 dind_name="cara126-dind-${suffix}"
@@ -219,7 +220,8 @@ completions_at_least() { [[ "$(completions "$1")" -ge "$2" ]] 2>/dev/null; }
 
 # start_agent with-s3|without-s3 starts node-a's agent.
 start_agent() {
-	local mode=$1 s3=()
+	local mode=$1 s3=() token_file
+	token_file="$(node_token_file node-a)"
 	if [[ "$mode" == with-s3 ]]; then
 		s3=(S3_ENDPOINT="$minio_endpoint" S3_CA_FILE="$certs/ca.crt" S3_BUCKET="$bucket"
 			S3_ACCESS_KEY=caraadmin S3_SECRET_KEY=caraadmin123)
@@ -228,6 +230,7 @@ start_agent() {
 		cd "$test_root/agent-run"
 		env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
 			SERVER_URL="$server_url" \
+			AGENT_TOKEN_FILE="$token_file" \
 			NODE_NAME=node-a \
 			HEARTBEAT_INTERVAL=1s \
 			DOCKER_HOST="$dind_host" \
@@ -354,7 +357,7 @@ server_port="$(choose_port)"
 server_url="http://127.0.0.1:$server_port"
 (
 	cd "$test_root/server-run"
-	env HOST=127.0.0.1 PORT="$server_port"		POSTGRES_DIFFERENTIAL_IMAGE="$pg_image" \
+	env HOST=127.0.0.1 PORT="$server_port" BREAK_GLASS_TOKEN_FILE="$e2e_admin_token_file" POSTGRES_DIFFERENTIAL_IMAGE="$pg_image" \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &

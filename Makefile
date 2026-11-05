@@ -145,9 +145,12 @@ dev-reset: .env
 		&& echo -e "==> $(BLUE)Development environment reset complete$(NC)" \
 		|| (echo -e "==> $(RED)Failed to reset development environment$(NC)" && exit 1)
 
+# The dev server's break-glass token lives in .dev-break-glass-token, created on
+# first use. Export it as CARA_TOKEN to use caractl against the dev server.
 dev-server: dev-up build
-	@echo -e ":: $(GREEN)Starting cara-server...$(NC)"
-	@./bin/cara-server
+	@[ -s .dev-break-glass-token ] || (umask 077 && openssl rand -base64 32 > .dev-break-glass-token)
+	@echo -e ":: $(GREEN)Starting cara-server (CARA_TOKEN is in .dev-break-glass-token)...$(NC)"
+	@BREAK_GLASS_TOKEN_FILE=.dev-break-glass-token ./bin/cara-server
 
 dev-logs:
 	@docker compose logs -f
