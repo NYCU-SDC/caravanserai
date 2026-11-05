@@ -67,13 +67,19 @@ func Resolve(ctx context.Context, cfg Config, joiner Joiner, logger *zap.Logger)
 		return token, nil
 	}
 
+	// An operator may delete the join token once the Node is enrolled and
+	// leave JOIN_TOKEN_FILE set: a missing file means no join token, not a
+	// failure. An empty one is still a mistake worth stopping for.
 	var joinToken string
 	if cfg.JoinTokenFile != "" {
 		t, err := readSecret(cfg.JoinTokenFile)
-		if err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
 			return "", fmt.Errorf("join token (JOIN_TOKEN_FILE): %w", err)
+		default:
+			joinToken = t
 		}
-		joinToken = t
 	}
 
 	kept, err := readKept(cfg.Dir)
@@ -85,6 +91,9 @@ func Resolve(ctx context.Context, cfg Config, joiner Joiner, logger *zap.Logger)
 		return kept.token, nil
 	}
 	if joinToken == "" {
+		if cfg.JoinTokenFile != "" {
+			return "", fmt.Errorf("%w (%s does not exist)", ErrNoCredential, cfg.JoinTokenFile)
+		}
 		return "", ErrNoCredential
 	}
 

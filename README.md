@@ -104,7 +104,7 @@ JOIN_TOKEN_FILE=my-node.join-token \
 # heartbeating and polling for work
 ```
 
-The agent keeps its Node token in `<data_root>/identity/` and needs no join token on later starts. A join token works once, for the Node it names, for an hour unless `--ttl` says otherwise.
+The agent keeps its Node token in `<data_root>/identity/` and needs no join token on later starts; the join token file can be deleted once the Node is enrolled. A join token works once, for the Node it names, for an hour unless `--ttl` says otherwise.
 
 `caractl node revoke my-node` stops the Node's token at once; the agent logs that it was refused. To bring the Node back, issue a new join token, put it in the same file and restart the agent.
 

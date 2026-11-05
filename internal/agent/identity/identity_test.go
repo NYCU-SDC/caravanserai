@@ -205,3 +205,28 @@ func TestEmptyFilesAreRefused(t *testing.T) {
 	_, err = Resolve(context.Background(), cfg, &fakeJoiner{}, zap.NewNop())
 	assert.ErrorContains(t, err, "is empty")
 }
+
+// Found on VMs: deleting the used join token after enrolment, with
+// JOIN_TOKEN_FILE still set, stopped the agent from starting.
+func TestJoinTokenFileRemovedAfterEnrolment(t *testing.T) {
+	dir := t.TempDir()
+	joinFile := writeFile(t, dir, "join", "cara_join1")
+	cfg := config(t, joinFile)
+	joiner := &fakeJoiner{tokens: map[string]string{"cara_join1": "cara_node1"}}
+	_, err := Resolve(context.Background(), cfg, joiner, zap.NewNop())
+	require.NoError(t, err)
+
+	require.NoError(t, os.Remove(joinFile))
+	token, err := Resolve(context.Background(), cfg, joiner, zap.NewNop())
+	require.NoError(t, err)
+	assert.Equal(t, "cara_node1", token)
+}
+
+// Before enrolment a missing join token file leaves the agent with nothing,
+// and the error names the file.
+func TestJoinTokenFileMissingBeforeEnrolment(t *testing.T) {
+	cfg := config(t, filepath.Join(t.TempDir(), "no-such-file"))
+	_, err := Resolve(context.Background(), cfg, &fakeJoiner{}, zap.NewNop())
+	assert.ErrorIs(t, err, ErrNoCredential)
+	assert.ErrorContains(t, err, "no-such-file")
+}
