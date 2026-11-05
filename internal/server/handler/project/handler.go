@@ -50,10 +50,6 @@ type Handler struct {
 	tracer        trace.Tracer
 	problemWriter *problem.HttpWriter
 
-	// operatorToken guards the takeover routes until ADR-0018 settles API
-	// access control. Empty disables them.
-	operatorToken string
-
 	// postgresImage is the image a PostgresDifferential volume's service must
 	// run (see WithPostgresDifferentialImage).
 	postgresImage string
@@ -85,13 +81,6 @@ func WithPostgresDifferentialImage(ref string) Option {
 			h.postgresImage = ref
 		}
 	}
-}
-
-// WithOperatorToken sets the credential the takeover routes require; they stay
-// disabled without one.
-func (h *Handler) WithOperatorToken(token string) *Handler {
-	h.operatorToken = token
-	return h
 }
 
 // RegisterRoutes satisfies apiserver.RouteRegistrar.

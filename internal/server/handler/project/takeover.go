@@ -1,15 +1,13 @@
 package project
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"strings"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/server/auth"
 	"NYCU-SDC/caravanserai/internal/server/handler"
 	"NYCU-SDC/caravanserai/internal/store"
 
@@ -35,21 +33,10 @@ type TakeoverResponse struct {
 	Replayed bool                   `json:"replayed"`
 }
 
-// authorizeOperator requires the operator token. The routes stay off until one
-// is configured: an unauthenticated route that can start a second copy of a
-// workload is not a safe default.
-//
-// Temporary: this is an exception to ADR-0018, which has not chosen how the API
-// authenticates callers, and it is to be replaced by whatever that decides.
+// authorizeOperator requires an admin caller (ADR-0031). A takeover can leave
+// a workload running on two Nodes, so a Node's own token must never reach it.
 func (h *Handler) authorizeOperator(r *http.Request) error {
-	if h.operatorToken == "" {
-		return fmt.Errorf("%w: operator takeover needs OPERATOR_TOKEN on the server", handler.ErrServiceNotConfigured)
-	}
-	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(h.operatorToken)) != 1 {
-		return handler.ErrOperatorUnauthorized
-	}
-	return nil
+	return handler.RequireAdmin(r.Context())
 }
 
 // postTakeover handles POST /api/v1/projects/{name}/recovery/takeover.
@@ -131,12 +118,12 @@ func (h *Handler) getTakeoverAudit(w http.ResponseWriter, r *http.Request) {
 	handlerutil.WriteJSONResponse(w, http.StatusOK, records)
 }
 
-// operatorCaller describes the request as far as the server can observe it. A
-// shared token proves the caller holds it, not who they are.
+// operatorCaller names the authenticated caller for the audit record. The
+// break-glass token is shared, so "user:break-glass" names the credential, not
+// a person.
 func operatorCaller(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
+	if p, ok := auth.FromContext(r.Context()); ok {
+		return p.String()
 	}
-	return "operator-token@" + host
+	return "unknown"
 }

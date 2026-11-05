@@ -2250,3 +2250,75 @@ func (s *Store) ListTakeoverAudit(ctx context.Context, name string) ([]v1.Takeov
 	}
 	return records, nil
 }
+
+// ============================================================
+// APIToken
+// ============================================================
+
+const apiTokenColumns = `id, kind, name, created_by, created_at, revoked_at`
+
+func scanAPIToken(row pgx.Row) (v1.APIToken, error) {
+	var t v1.APIToken
+	err := row.Scan(&t.ID, &t.Kind, &t.Name, &t.CreatedBy, &t.CreatedAt, &t.RevokedAt)
+	return t, err
+}
+
+// CreateAPIToken implements store.APITokenStore.
+func (s *Store) CreateAPIToken(ctx context.Context, kind v1.APITokenKind, name, tokenHash, createdBy string) (v1.APIToken, error) {
+	t, err := scanAPIToken(s.pool.QueryRow(ctx, `
+		INSERT INTO api_tokens (kind, name, token_hash, created_by, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING `+apiTokenColumns, kind, name, tokenHash, createdBy, time.Now().UTC()))
+	if err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: create api token for %s:%s: %w", kind, name, err)
+	}
+	return t, nil
+}
+
+// LookupAPIToken implements store.APITokenStore.
+func (s *Store) LookupAPIToken(ctx context.Context, tokenHash string) (v1.APIToken, error) {
+	t, err := scanAPIToken(s.pool.QueryRow(ctx,
+		`SELECT `+apiTokenColumns+` FROM api_tokens WHERE token_hash = $1 AND revoked_at IS NULL`, tokenHash))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v1.APIToken{}, store.ErrNotFound
+	}
+	if err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: look up api token: %w", err)
+	}
+	return t, nil
+}
+
+// ListAPITokens implements store.APITokenStore.
+func (s *Store) ListAPITokens(ctx context.Context) ([]v1.APIToken, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+apiTokenColumns+` FROM api_tokens ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list api tokens: %w", err)
+	}
+	defer rows.Close()
+
+	tokens := []v1.APIToken{}
+	for rows.Next() {
+		t, err := scanAPIToken(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: scan api token: %w", err)
+		}
+		tokens = append(tokens, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list api tokens: %w", err)
+	}
+	return tokens, nil
+}
+
+// RevokeAPIToken implements store.APITokenStore.
+func (s *Store) RevokeAPIToken(ctx context.Context, id int64) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE api_tokens SET revoked_at = COALESCE(revoked_at, $2) WHERE id = $1`, id, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("postgres: revoke api token %d: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: api token %d", store.ErrNotFound, id)
+	}
+	return nil
+}

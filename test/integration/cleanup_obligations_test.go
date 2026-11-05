@@ -103,6 +103,7 @@ func TestAgentClientResolvesCleanupObligation(t *testing.T) {
 	require.True(t, released)
 
 	client := agent.NewClient(zap.NewNop(), suite.serverURL, "node-a")
+	client.SetToken(testAdminToken)
 	tasks, err := client.ListCleanupTasks(ctx)
 	require.NoError(t, err)
 	tasks = tasksFor(tasks, name)
@@ -116,6 +117,7 @@ func TestAgentClientResolvesCleanupObligation(t *testing.T) {
 	// Another node reporting the same assignment is refused, and a project
 	// that does not exist is reported as such.
 	other := agent.NewClient(zap.NewNop(), suite.serverURL, "node-b")
+	other.SetToken(testAdminToken)
 	stale := tasks[0].Assignment
 	stale.NodeName = "node-b"
 	assert.ErrorIs(t, other.ReportResourcesRemoved(ctx, name, stale), agent.ErrStaleAssignment)
@@ -134,6 +136,7 @@ func TestTeardownBlockedConditionIsAgentWritable(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, resp.StatusCode)
 
 	client := agent.NewClient(zap.NewNop(), suite.serverURL, "node-a")
+	client.SetToken(testAdminToken)
 	fence := agent.AssignmentFence{UID: uid, NodeRef: "node-a", Generation: gen}
 
 	stale := fence

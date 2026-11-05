@@ -136,3 +136,6 @@ website/out/
 /*.key
 test/overlay/.tmp/
 /cara-agent
+
+# Development break-glass token (make dev-server)
+.dev-break-glass-token

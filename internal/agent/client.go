@@ -91,6 +91,28 @@ func NewClient(logger *zap.Logger, serverURL, nodeName string) *Client {
 	}
 }
 
+// SetToken makes every request to cara-server carry token as its bearer
+// credential (ADR-0031). Call it before the client is used.
+func (c *Client) SetToken(token string) {
+	base := c.httpClient.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	c.httpClient.Transport = bearerTransport{token: token, base: base}
+}
+
+// bearerTransport adds a bearer token to every request it sends.
+type bearerTransport struct {
+	token string
+	base  http.RoundTripper
+}
+
+func (t bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(r)
+}
+
 // SetOverlayIP records the overlay IP assigned to this agent after joining the
 // Headscale overlay network.
 func (c *Client) SetOverlayIP(ip string) {

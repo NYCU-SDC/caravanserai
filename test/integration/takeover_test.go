@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -18,8 +19,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-const testOperatorToken = "test-operator-token"
 
 func postTakeover(t *testing.T, name, token string, body map[string]any) *http.Response {
 	t.Helper()
@@ -71,14 +70,16 @@ func createAssignedProject(t *testing.T, name string, marked bool) v1.Project {
 	return getProject(t, name)
 }
 
-// TestOperatorTakeoverRequiresToken: without the credential nothing changes.
-func TestOperatorTakeoverRequiresToken(t *testing.T) {
+// TestOperatorTakeoverRequiresAdmin: an unknown token and a Node's token both
+// leave the Project where it was.
+func TestOperatorTakeoverRequiresAdmin(t *testing.T) {
 	const name = "e2e-takeover-token"
 	p := createAssignedProject(t, name, true)
+	nodeToken := issueToken(t, v1.APITokenKindNode, "node-a")
 
-	for _, token := range []string{"", "wrong"} {
-		resp := postTakeover(t, name, token, takeoverBody(p, "token-"+token))
-		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	for token, want := range map[string]int{"wrong": http.StatusUnauthorized, nodeToken: http.StatusForbidden} {
+		resp := postTakeover(t, name, token, takeoverBody(p, "token-"+strconv.Itoa(want)))
+		assert.Equal(t, want, resp.StatusCode)
 		drainBody(resp)
 	}
 	assert.Equal(t, "node-a", getProject(t, name).Status.NodeRef)
@@ -94,7 +95,7 @@ func TestOperatorTakeoverRefusedStates(t *testing.T) {
 
 	const healthy = "e2e-takeover-unmarked"
 	p := createAssignedProject(t, healthy, false)
-	resp := postTakeover(t, healthy, testOperatorToken, takeoverBody(p, "unmarked-"+p.ObjectMeta.UID))
+	resp := postTakeover(t, healthy, testAdminToken, takeoverBody(p, "unmarked-"+p.ObjectMeta.UID))
 	assert.Equal(t, http.StatusConflict, resp.StatusCode, "a Project not marked TakeoverRequired must stay put")
 	drainBody(resp)
 	assert.Equal(t, "node-a", getProject(t, healthy).Status.NodeRef)
@@ -103,7 +104,7 @@ func TestOperatorTakeoverRefusedStates(t *testing.T) {
 	p = createAssignedProject(t, stale, true)
 	body := takeoverBody(p, "stale-"+p.ObjectMeta.UID)
 	body["assignmentGeneration"] = p.Status.AssignmentGeneration + 1
-	resp = postTakeover(t, stale, testOperatorToken, body)
+	resp = postTakeover(t, stale, testAdminToken, body)
 	assert.Equal(t, http.StatusConflict, resp.StatusCode)
 	drainBody(resp)
 	assert.Equal(t, "node-a", getProject(t, stale).Status.NodeRef)
@@ -125,7 +126,7 @@ func TestOperatorTakeoverReleases(t *testing.T) {
 	requestID := "release-" + p.ObjectMeta.UID
 	assignment := v1.AssignmentIdentity{ProjectUID: p.ObjectMeta.UID, NodeName: "node-a", AssignmentGeneration: p.Status.AssignmentGeneration}
 
-	resp := postTakeover(t, name, testOperatorToken, takeoverBody(p, requestID))
+	resp := postTakeover(t, name, testAdminToken, takeoverBody(p, requestID))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	drainBody(resp)
 
@@ -143,7 +144,7 @@ func TestOperatorTakeoverReleases(t *testing.T) {
 	assert.Len(t, got.CleanupTasksFor("node-a"), 1, "the old Node must still be told to clean up")
 
 	// Retrying the same decision is a no-op, even with the fence the client held.
-	resp = postTakeover(t, name, testOperatorToken, takeoverBody(p, requestID))
+	resp = postTakeover(t, name, testAdminToken, takeoverBody(p, requestID))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var replay struct {
 		Record   v1.TakeoverAuditRecord `json:"record"`
@@ -157,7 +158,7 @@ func TestOperatorTakeoverReleases(t *testing.T) {
 
 	// A request ID cannot be reused for a different decision.
 	other := createAssignedProject(t, name+"-other", true)
-	resp = postTakeover(t, other.Name, testOperatorToken, takeoverBody(other, requestID))
+	resp = postTakeover(t, other.Name, testAdminToken, takeoverBody(other, requestID))
 	assert.Equal(t, http.StatusConflict, resp.StatusCode)
 	drainBody(resp)
 	assert.Equal(t, "node-a", getProject(t, other.Name).Status.NodeRef)
@@ -185,7 +186,7 @@ func TestOperatorTakeoverReleases(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, records, 1, "the retry must not add a record, and deletion must not remove it")
 	assert.Equal(t, assignment, records[0].Assignment)
-	assert.Contains(t, records[0].Caller, "operator-token@")
+	assert.Equal(t, "user:break-glass", records[0].Caller)
 }
 
 // TestOperatorTakeoverUnblocksWorkloadStoppedRelease is the state found on real
@@ -206,7 +207,7 @@ func TestOperatorTakeoverUnblocksWorkloadStoppedRelease(t *testing.T) {
 	require.True(t, released)
 	require.ErrorIs(t, stores.SetProjectScheduled(ctx, name, "node-b"), store.ErrConflictState)
 
-	resp := postTakeover(t, name, testOperatorToken, map[string]any{
+	resp := postTakeover(t, name, testAdminToken, map[string]any{
 		"uid": ref.UID, "nodeRef": ref.NodeRef, "assignmentGeneration": ref.Generation, "requestID": "pending-" + ref.UID,
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)

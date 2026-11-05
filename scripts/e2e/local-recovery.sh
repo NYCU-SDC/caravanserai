@@ -50,6 +50,7 @@ done
 shared_root="${E2E_SHARED_ROOT:-/var/tmp}"
 [[ -d "$shared_root" && -w "$shared_root" ]] || fail "E2E_SHARED_ROOT is not a writable directory: $shared_root"
 test_root="$(mktemp -d "$shared_root/cara-recovery-e2e.XXXXXX")"
+. "$(dirname "${BASH_SOURCE[0]}")/lib/auth.sh"
 suffix="${PPID}-$$"
 postgres_name="cara86-postgres-${suffix}"
 dind_name="cara86-dind-${suffix}"
@@ -227,6 +228,7 @@ server_url="http://127.0.0.1:$server_port"
 		HOST=127.0.0.1 \
 		PORT="$server_port" \
 		TERMINATING_TIMEOUT=15s \
+		BREAK_GLASS_TOKEN_FILE="$e2e_admin_token_file" \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &
@@ -238,10 +240,13 @@ data_root: "$data_root"
 EOF
 
 start_agent() {
+	local token_file
+	token_file="$(node_token_file node-a)"
 	(
 		cd "$test_root/agent-run"
 		env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
 			SERVER_URL="$server_url" \
+			AGENT_TOKEN_FILE="$token_file" \
 			NODE_NAME=node-a \
 			HEARTBEAT_INTERVAL=1s \
 			DOCKER_HOST="$dind_host" \
