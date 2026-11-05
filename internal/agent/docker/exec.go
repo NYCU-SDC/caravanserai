@@ -172,20 +172,41 @@ func (r *DockerRuntime) networkHasContainer(ctx context.Context, networkName, co
 // when the Agent is not root. The container carries no Project label, so no
 // Project reconcile or sweep ever treats it as a workload.
 func (r *DockerRuntime) RunToCompletion(ctx context.Context, image, user string, binds, cmd []string) (ExecResult, error) {
-	if len(cmd) == 0 {
-		return ExecResult{}, errors.New("docker: helper container needs a command")
-	}
 	suffix := make([]byte, 4)
 	if _, err := rand.Read(suffix); err != nil {
 		return ExecResult{}, fmt.Errorf("docker: helper name: %w", err)
 	}
-	name := "cara-helper-" + hex.EncodeToString(suffix)
+	return r.RunOneShot(ctx, OneShotSpec{Name: "cara-helper-" + hex.EncodeToString(suffix), Image: image, User: user, Binds: binds, Cmd: cmd})
+}
+
+// OneShotSpec describes a throwaway container.
+type OneShotSpec struct {
+	Name  string
+	Image string
+	User  string
+	Binds []string
+	Cmd   []string
+	// Network is the network it joins; empty means none.
+	Network string
+}
+
+// RunOneShot is RunToCompletion for a caller that needs a network or a name of
+// its own.
+func (r *DockerRuntime) RunOneShot(ctx context.Context, spec OneShotSpec) (ExecResult, error) {
+	image, cmd := spec.Image, spec.Cmd
+	if len(cmd) == 0 {
+		return ExecResult{}, errors.New("docker: helper container needs a command")
+	}
+	networkMode := container.NetworkMode("none")
+	if spec.Network != "" {
+		networkMode = container.NetworkMode(spec.Network)
+	}
 
 	created, err := r.createPulling(ctx, image, func() (container.CreateResponse, error) {
 		return r.client.ContainerCreate(ctx,
-			&container.Config{Image: image, User: user, Entrypoint: cmd[:1], Cmd: cmd[1:], Labels: map[string]string{labelHelper: "true"}},
-			&container.HostConfig{Binds: slices.Clone(binds), NetworkMode: "none"},
-			nil, nil, name)
+			&container.Config{Image: image, User: spec.User, Entrypoint: cmd[:1], Cmd: cmd[1:], Labels: map[string]string{labelHelper: "true"}},
+			&container.HostConfig{Binds: slices.Clone(spec.Binds), NetworkMode: networkMode},
+			nil, nil, spec.Name)
 	})
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("docker: create helper from %s: %w", image, err)

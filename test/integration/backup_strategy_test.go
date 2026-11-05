@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/server/adapter"
+	"NYCU-SDC/caravanserai/internal/server/controller"
 	"NYCU-SDC/caravanserai/internal/store"
 
 	"github.com/stretchr/testify/assert"
@@ -331,4 +333,46 @@ func TestBackupCompletion(t *testing.T) {
 	completions := getProject(t, name).Status.Backup.Completions
 	require.Len(t, completions, v1.MaxBackupCompletions)
 	assert.Nil(t, getProject(t, name).Status.Backup.Completion(first))
+}
+
+// A PostgresDifferential Project moves off a lost Node once the server has
+// accepted a backup of it, and not before: until then the only copy may be on
+// that Node.
+func TestGraceExpiredReleaseOfPostgresDifferential(t *testing.T) {
+	const name = "e2e-pgdiff-grace"
+	created := createForCleanup(t, postgresDifferentialProject(name, nil))
+	uid := created.ObjectMeta.UID
+	ctx := context.Background()
+	on := adapter.NewProjectStoreAdapter(suite.store).WithGraceExpiredRelease(true)
+	release := func() bool {
+		t.Helper()
+		p := getProject(t, name)
+		released, err := on.ReleaseAssignment(ctx, &controller.ProjectSnapshot{
+			Name: p.Name, UID: p.ObjectMeta.UID, Phase: p.Status.Phase, NodeRef: p.Status.NodeRef, AssignmentGeneration: p.Status.AssignmentGeneration,
+		})
+		require.NoError(t, err)
+		return released
+	}
+	require.NoError(t, suite.store.UpdateProjectStatusWithRetry(ctx, name, func(st *v1.ProjectStatus) error {
+		st.Phase, st.NodeRef, st.AssignmentGeneration = v1.ProjectPhaseRunning, "node-a", 1
+		st.AssignmentHistory = v1.AssignmentHistoryKnown
+		return nil
+	}))
+
+	assert.False(t, release(), "no accepted backup")
+	assert.Equal(t, "node-a", getProject(t, name).Status.NodeRef)
+
+	gen := int64(1)
+	resp := doRequest(t, http.MethodPut, "/api/v1/projects/"+name+"/backup/completions/20261017T030000Z-0000000a", mustMarshal(t, map[string]any{
+		"uid": uid, "nodeRef": "node-a", "assignmentGeneration": gen,
+		"items": []v1.BackupCompletionItem{{Volume: "pgdata", Stanza: v1.StanzaName(uid, "pgdata"), Label: "20261017-030000F", Type: "full"}},
+	}))
+	drainBody(resp)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	require.True(t, release())
+	got := getProject(t, name)
+	assert.Equal(t, v1.ProjectPhasePending, got.Status.Phase)
+	require.Len(t, got.Status.Recovery.CleanupObligations, 1)
+	assert.True(t, got.Status.Recovery.CleanupObligations[0].ManagedDataOwed, "the old Node still holds its PGDATA")
 }

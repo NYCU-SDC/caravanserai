@@ -272,10 +272,12 @@ func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controll
 		authorization := v1.ReleaseByWorkloadStopped
 		reason := "Node went NotReady and confirmed the workload stopped; project released for rescheduling"
 		released = status.Recovery.WorkloadStoppedFor(assignment)
-		// With Managed data and no committed backup, the only copy may be on the
-		// lost Node, and another Node could not start anyway. Only a person can
-		// decide to give that up.
-		if !released && a.graceExpiredRelease && (!hasManaged || status.Recovery.CommittedBackupID() != "") {
+		// With Managed data and no backup the server accepted, the only copy may
+		// be on the lost Node, and another Node could not start anyway. Only a
+		// person can decide to give that up. PostgresDifferential backups are
+		// accepted as completions rather than as a committed backup.
+		hasBackup := status.Recovery.CommittedBackupID() != "" || status.Backup.LastCompletion() != nil
+		if !released && a.graceExpiredRelease && (!hasManaged || hasBackup) {
 			released = true
 			authorization = v1.ReleaseByGraceExpired
 			reason = "Node stayed NotReady past its grace period; project released for rescheduling"

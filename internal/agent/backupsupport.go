@@ -50,6 +50,11 @@ func (c conditionReporter) ClearBackupFailing(ctx context.Context, project *v1.P
 	return c.client.ClearProjectCondition(ctx, project.Name, fenceForProject(project), v1.ConditionTypeBackupFailing)
 }
 
+func (c conditionReporter) SetDataRestored(ctx context.Context, project *v1.Project, message string) error {
+	return c.client.PatchProjectCondition(ctx, project.Name, fenceForProject(project),
+		v1.ConditionTypeDataRestored, v1.ConditionTrue, v1.ReasonRestoredFromBackup, message)
+}
+
 // backupCommitter adapts Client to backup.BackupCommitter.
 type backupCommitter struct {
 	client *Client
@@ -167,6 +172,20 @@ func NewBackupSupport(
 		NodeName:    cfg.NodeName,
 		ObjectStore: true,
 	}, nil
+}
+
+// postgresRestores returns the background restores of this Node, or nil when it
+// has no object store or a runtime that cannot run them.
+func (b *BackupSupport) postgresRestores(client *Client, runtime docker.Runtime, logger *zap.Logger) *pgRestores {
+	b.pgRestoresOnce.Do(func() {
+		rt, ok := runtime.(pgRestoreRuntime)
+		if !ok || b.RepoHost == nil || !b.ObjectStore {
+			return
+		}
+		b.pgRestore = newPGRestores(rt, b.RepoHost, b.Restorer, NewOwnershipResolver(client, b.NodeName, logger), b.DataRoot,
+			conditionReporter{client: client}.SetDataRestored, logger)
+	})
+	return b.pgRestore
 }
 
 // pgRuntimeWithLogs is what PostgreSQL backups need from the runtime: running

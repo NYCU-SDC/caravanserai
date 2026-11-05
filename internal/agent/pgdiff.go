@@ -177,6 +177,11 @@ func finishPostgresDifferential(ctx context.Context, client *Client, repo pgRepo
 	return nil
 }
 
+// pgArchiveTimeout bounds how long committed writes can wait for their WAL
+// segment to fill before it is archived, and so what a restore can lose. A quiet
+// database switches no segments, so it costs nothing while nothing is written.
+const pgArchiveTimeout = "1min"
+
 // archiveCommand is how PostgreSQL hands a WAL segment to pgBackRest.
 func archiveCommand(stanza string) string {
 	return "pgbackrest --stanza=" + stanza + " archive-push %p"
@@ -194,6 +199,18 @@ func enableArchiving(ctx context.Context, rt pgRuntime, container, stanza string
 	command, err := psql(ctx, rt, container, "SHOW archive_command")
 	if err != nil {
 		return err
+	}
+	timeout, err := psql(ctx, rt, container, "SHOW archive_timeout")
+	if err != nil {
+		return err
+	}
+	if timeout != pgArchiveTimeout {
+		if _, err := psql(ctx, rt, container, "ALTER SYSTEM SET archive_timeout = '"+pgArchiveTimeout+"'"); err != nil {
+			return err
+		}
+		if _, err := psql(ctx, rt, container, "SELECT pg_reload_conf()"); err != nil {
+			return err
+		}
 	}
 	if mode == "on" && command == archiveCommand(stanza) {
 		return nil

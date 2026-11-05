@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -87,6 +88,9 @@ type BackupSupport struct {
 	// placement authorizes each Project on. Run sets it from RunConfig; nil
 	// when the Node has no object store.
 	RepoHost pgRepository
+	// pgRestoresOnce builds pgRestore once RepoHost is known.
+	pgRestoresOnce sync.Once
+	pgRestore      *pgRestores
 	// DataRoot is where Managed volume data and restore markers live.
 	DataRoot string
 	// NodeName is this agent's Node name, recorded in and checked against the
@@ -582,7 +586,7 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 	// is the last moment the volumes can be populated without a service seeing
 	// an empty directory.
 	if backups != nil {
-		err := ensureVolumeData(ctx, backups.Restorer, backups.Coordinator, backups.ObjectStore, backups.DataRoot, backups.NodeName, p, logger)
+		err := ensureVolumeData(ctx, backups.Restorer, backups.Coordinator, backups.ObjectStore, backups.DataRoot, backups.NodeName, p, backups.postgresRestores(client, runtime, logger), logger)
 		switch {
 		case err == nil:
 		case errors.Is(err, errDeferred):

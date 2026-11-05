@@ -88,12 +88,13 @@ type pgFakeRuntime struct {
 	events        []string
 	clientVersion string
 	// hangVersion makes `pgbackrest version` run until its caller gives up.
-	hangVersion bool
-	archiveMode string
-	archiveCmd  string
-	pendingMode string
-	pendingCmd  string
-	checkFails  bool
+	hangVersion    bool
+	archiveTimeout string
+	archiveMode    string
+	archiveCmd     string
+	pendingMode    string
+	pendingCmd     string
+	checkFails     bool
 }
 
 func newPgFakeRuntime() *pgFakeRuntime {
@@ -156,6 +157,13 @@ func (r *pgFakeRuntime) Exec(ctx context.Context, container, _ string, cmd []str
 		return docker.ExecResult{Stdout: r.archiveMode + "\n"}, nil
 	case line == "psql SHOW archive_command":
 		return docker.ExecResult{Stdout: r.archiveCmd + "\n"}, nil
+	case line == "psql SHOW archive_timeout":
+		return docker.ExecResult{Stdout: r.archiveTimeout + "\n"}, nil
+	case strings.HasPrefix(line, "psql ALTER SYSTEM SET archive_timeout"):
+		r.archiveTimeout = pgArchiveTimeout
+		return docker.ExecResult{}, nil
+	case line == "psql SELECT pg_reload_conf()":
+		return docker.ExecResult{}, nil
 	case strings.HasPrefix(line, "psql ALTER SYSTEM SET archive_mode"):
 		r.pendingMode = "on"
 		return docker.ExecResult{}, nil
@@ -232,6 +240,7 @@ func TestPostgresPlacementKeepsArchivingThatIsAlreadyOn(t *testing.T) {
 	gs, client := newGateServer(t, pgProject())
 	rt := newPgFakeRuntime()
 	rt.archiveMode, rt.archiveCmd = "on", archiveCommand(v1.StanzaName(p.UID, "pgdata"))
+	rt.archiveTimeout = pgArchiveTimeout
 
 	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, &fakeRepo{version: pgVersion}), p, zap.NewNop())
 
@@ -239,6 +248,21 @@ func TestPostgresPlacementKeepsArchivingThatIsAlreadyOn(t *testing.T) {
 	assert.Equal(t, -1, indexOf(rt.seen(), "psql ALTER"))
 	require.Len(t, gs.updates, 1)
 	assert.Equal(t, v1.ProjectPhaseRunning, gs.updates[0].Phase)
+}
+
+// archive_timeout takes a reload, so a database archiving already keeps running.
+func TestPostgresPlacementSetsArchiveTimeoutWithoutARestart(t *testing.T) {
+	p := pgProject()
+	_, client := newGateServer(t, pgProject())
+	rt := newPgFakeRuntime()
+	rt.archiveMode, rt.archiveCmd = "on", archiveCommand(v1.StanzaName(p.UID, "pgdata"))
+
+	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, &fakeRepo{version: pgVersion}), p, zap.NewNop())
+
+	assert.Equal(t, -1, indexOf(rt.seen(), "restart"))
+	assert.NotEqual(t, -1, indexOf(rt.seen(), "psql ALTER SYSTEM SET archive_timeout"))
+	assert.NotEqual(t, -1, indexOf(rt.seen(), "psql SELECT pg_reload_conf()"))
+	assert.Equal(t, pgArchiveTimeout, rt.archiveTimeout)
 }
 
 // Each reason placement cannot finish holds the Project in Scheduled with a

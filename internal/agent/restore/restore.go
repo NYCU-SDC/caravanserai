@@ -273,6 +273,46 @@ func (r *Restorer) RestoreGeneration(ctx context.Context, project *v1.Project, b
 	return nil
 }
 
+// PrepareStaging returns an empty staging directory for a restore that fills it
+// by other means than RestoreGeneration. As there, staging is removed only by a
+// restore that succeeds: until then it records that this disk cannot be trusted.
+func (r *Restorer) PrepareStaging(project *v1.Project) (string, error) {
+	if err := r.checkDiskSpace(); err != nil {
+		return "", err
+	}
+	staging, err := StagingDir(r.cfg.DataRoot, project.Namespace, project.Name)
+	if err != nil {
+		return "", err
+	}
+	if err := os.RemoveAll(staging); err != nil {
+		return "", fmt.Errorf("restore: clear staging %q: %w", staging, err)
+	}
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		return "", fmt.Errorf("restore: create staging %q: %w", staging, err)
+	}
+	return staging, nil
+}
+
+// InstallStaged swaps directories prepared under PrepareStaging into place,
+// keyed by volume, records that they came from backupID, and removes staging.
+func (r *Restorer) InstallStaged(project *v1.Project, backupID string, staged map[string]string) error {
+	log := r.logger.With(zap.String("project", project.Namespace+"/"+project.Name), zap.String("backupID", backupID))
+	if err := r.swapAll(project.Namespace, project.Name, staged, log); err != nil {
+		return err
+	}
+	if err := WriteMarker(r.cfg.DataRoot, ProvenanceFor(project, r.cfg.NodeName, backupID), r.now()); err != nil {
+		return err
+	}
+	staging, err := StagingDir(r.cfg.DataRoot, project.Namespace, project.Name)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(staging); err != nil {
+		log.Warn("Failed to remove staging directory", zap.String("path", staging), zap.Error(err))
+	}
+	return nil
+}
+
 // InitializeEmpty creates empty host directories for a Project's Managed
 // volumes and records the placement, for the case where no generation exists
 // yet and the spec allows starting fresh.

@@ -78,7 +78,7 @@ func TestEnsureVolumeDataNoRestorerIsNotAnError(t *testing.T) {
 	// An agent with no object store still runs Managed volumes; they simply
 	// live and die on local disk.
 	err := ensureVolumeData(context.Background(), nil, backup.NewCoordinator(), true, t.TempDir(), testNode,
-		testProject(managedVolume("db-data")), zap.NewNop())
+		testProject(managedVolume("db-data")), nil, zap.NewNop())
 	assert.NoError(t, err)
 }
 
@@ -87,7 +87,7 @@ func TestEnsureVolumeDataIgnoresProjectsWithoutManagedVolumes(t *testing.T) {
 
 	p := testProject(v1.VolumeDef{Name: "cache", Type: v1.VolumeTypeEphemeral})
 	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
-		p, zap.NewNop()))
+		p, nil, zap.NewNop()))
 
 	// No marker either: a Project with nothing to restore should leave no
 	// trace on disk.
@@ -116,7 +116,7 @@ func TestEnsureVolumeDataSkipsWhenProvenanceMatches(t *testing.T) {
 	require.NoError(t, restore.WriteMarker(dataRoot, currentProvenance(p, "20260801T000000Z"), nowUTC()))
 
 	assert.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
-		p, zap.NewNop()))
+		p, nil, zap.NewNop()))
 }
 
 func TestEnsureVolumeDataBlocksDataWithNoProvenance(t *testing.T) {
@@ -129,7 +129,7 @@ func TestEnsureVolumeDataBlocksDataWithNoProvenance(t *testing.T) {
 	live := writeLive(t, dataRoot, p, "db-data", "someone else's")
 
 	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
-		p, zap.NewNop())
+		p, nil, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
 	require.ErrorAs(t, err, &blocked)
@@ -156,7 +156,7 @@ func TestEnsureVolumeDataBlocksAnotherAssignmentsData(t *testing.T) {
 	require.NoError(t, restore.WriteMarker(dataRoot, older, nowUTC()))
 
 	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
-		p, zap.NewNop())
+		p, nil, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
 	require.ErrorAs(t, err, &blocked)
@@ -174,7 +174,7 @@ func TestEnsureVolumeDataInitialisesEmptyOnlyOnTheFirstPlacement(t *testing.T) {
 	p.Status.AssignmentGeneration = 1 // an Agent only ever sees history Known
 
 	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
-		p, zap.NewNop()))
+		p, nil, zap.NewNop()))
 
 	live := filepath.Join(dataRoot, "volumes", p.Namespace, p.Name, "db-data", "data")
 	info, err := os.Stat(live)
@@ -208,7 +208,7 @@ func TestEnsureVolumeDataBlocksWhenAPlacedProjectHasNoBackup(t *testing.T) {
 			p.Status.AssignmentHistory = history
 
 			err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
-				p, zap.NewNop())
+				p, nil, zap.NewNop())
 
 			var blocked *restore.PlacementBlockedError
 			require.ErrorAs(t, err, &blocked)
@@ -234,7 +234,7 @@ func TestEnsureVolumeDataRestoresTheCommittedGeneration(t *testing.T) {
 	p.Status.AssignmentHistory = v1.AssignmentHistoryKnown
 	p.Status.Recovery = &v1.ProjectRecoveryStatus{CommittedBackup: &v1.CommittedBackup{BackupID: "20261031T000000Z-aaaaaaaa"}}
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode, p, zap.NewNop())
+	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode, p, nil, zap.NewNop())
 
 	require.ErrorIs(t, err, restore.ErrGenerationMissing)
 	assert.ErrorContains(t, err, "20261031T000000Z-aaaaaaaa")
@@ -249,7 +249,7 @@ func TestPlacementBlockDetailsNameNoHostPaths(t *testing.T) {
 	writeLive(t, dataRoot, p, "db-data", "unproven")
 
 	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
-		p, zap.NewNop())
+		p, nil, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
 	require.ErrorAs(t, err, &blocked)
@@ -268,7 +268,7 @@ func TestEnsureVolumeDataDefersWhenProjectIsBusy(t *testing.T) {
 	defer release()
 
 	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
-		p, zap.NewNop())
+		p, nil, zap.NewNop())
 	assert.ErrorIs(t, err, errDeferred, "a lost race is a retry, not a failure")
 }
 
@@ -284,7 +284,7 @@ func TestEnsureVolumeDataReleasesClaimOnReturn(t *testing.T) {
 		p.Status.AssignmentGeneration = 1 // an Agent only ever sees history Known
 
 		require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
-			p, zap.NewNop()))
+			p, nil, zap.NewNop()))
 
 		assert.False(t, coordinator.IsBusy(key))
 	})
@@ -294,7 +294,7 @@ func TestEnsureVolumeDataReleasesClaimOnReturn(t *testing.T) {
 		p := testProject(managedVolume("db-data"))
 
 		require.Error(t, ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
-			p, zap.NewNop()))
+			p, nil, zap.NewNop()))
 
 		assert.False(t, coordinator.IsBusy(key))
 	})
@@ -352,7 +352,7 @@ func TestEnsureVolumeDataCorruptMarkerBlocksEvenInShadowMode(t *testing.T) {
 
 	for _, strict := range []bool{false, true} {
 		err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
-			p, zap.NewNop())
+			p, nil, zap.NewNop())
 
 		var blocked *restore.PlacementBlockedError
 		require.ErrorAs(t, err, &blocked, "strict=%v", strict)
@@ -372,7 +372,7 @@ func TestEnsureVolumeDataBlocksWhenOneVolumeIsMissing(t *testing.T) {
 	require.NoError(t, restore.WriteMarker(dataRoot, currentProvenance(p, "20260801T000000Z"), nowUTC()))
 
 	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode,
-		p, zap.NewNop())
+		p, nil, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
 	require.ErrorAs(t, err, &blocked)
@@ -401,7 +401,7 @@ func TestEnsureVolumeDataBlocksPostgresDifferentialRestore(t *testing.T) {
 	restorer, coordinator, dataRoot := newSupport(t, refusingStore{t})
 	p := postgresDifferentialProject(v1.AssignmentHistoryKnown)
 
-	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode, p, zap.NewNop())
+	err := ensureVolumeData(context.Background(), restorer, coordinator, true, dataRoot, testNode, p, nil, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
 	require.ErrorAs(t, err, &blocked)
@@ -416,7 +416,7 @@ func TestEnsureVolumeDataBlocksPostgresDifferentialWithoutObjectStore(t *testing
 	restorer := restore.NewRestorer(nil, restore.Config{DataRoot: dataRoot, NodeName: testNode}, zap.NewNop())
 	p := postgresDifferentialProject(v1.AssignmentHistoryKnown)
 
-	err := ensureVolumeData(context.Background(), restorer, backup.NewCoordinator(), false, dataRoot, testNode, p, zap.NewNop())
+	err := ensureVolumeData(context.Background(), restorer, backup.NewCoordinator(), false, dataRoot, testNode, p, nil, zap.NewNop())
 
 	var blocked *restore.PlacementBlockedError
 	require.ErrorAs(t, err, &blocked)
@@ -438,7 +438,7 @@ func TestEnsureVolumeDataPostgresDifferentialFirstPlacementWithoutObjectStore(t 
 	p := postgresDifferentialProject(v1.AssignmentHistoryKnown)
 	p.Status.AssignmentGeneration = 1 // the first assignment this Project ever had
 
-	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, false, dataRoot, testNode, p, zap.NewNop()))
+	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, false, dataRoot, testNode, p, nil, zap.NewNop()))
 
 	marker, err := restore.ReadMarker(dataRoot, p.Namespace, p.Name)
 	require.NoError(t, err)
@@ -449,7 +449,7 @@ func TestEnsureVolumeDataPostgresDifferentialFirstPlacementWithoutObjectStore(t 
 	path, err := caravolume.HostPath(dataRoot, p.Namespace, p.Name, "pgdata")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(path, "PG_VERSION"), []byte("16\n"), 0o600))
-	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, false, dataRoot, testNode, p, zap.NewNop()))
+	require.NoError(t, ensureVolumeData(context.Background(), restorer, coordinator, false, dataRoot, testNode, p, nil, zap.NewNop()))
 }
 
 func TestEnsureVolumeDataOfflineWithoutObjectStoreIsUndecided(t *testing.T) {
@@ -460,7 +460,7 @@ func TestEnsureVolumeDataOfflineWithoutObjectStoreIsUndecided(t *testing.T) {
 	restorer := restore.NewRestorer(nil, restore.Config{DataRoot: dataRoot, NodeName: testNode}, zap.NewNop())
 	p := testProject(managedVolume("data"))
 
-	require.NoError(t, ensureVolumeData(context.Background(), restorer, backup.NewCoordinator(), false, dataRoot, testNode, p, zap.NewNop()))
+	require.NoError(t, ensureVolumeData(context.Background(), restorer, backup.NewCoordinator(), false, dataRoot, testNode, p, nil, zap.NewNop()))
 
 	marker, err := restore.ReadMarker(dataRoot, p.Namespace, p.Name)
 	require.NoError(t, err)
