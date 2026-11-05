@@ -33,8 +33,11 @@ func newTokenCreateCmd() *cobra.Command {
 		Long: `create issues a token for a Node's Agent or for a person and prints it.
 It is shown only this once; cara-server keeps only its hash.
 
-A Node token goes in the file the agent's AGENT_TOKEN_FILE names. A user token
-goes in ` + TokenEnv + `. Every user is an admin for now.`,
+A user token goes in ` + TokenEnv + `. Every user is an admin for now.
+
+To enrol an Agent, prefer "caractl node token create": the agent trades that
+one-time join token for its own Node token. A Node token issued here goes in the
+file the agent's AGENT_TOKEN_FILE names.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true

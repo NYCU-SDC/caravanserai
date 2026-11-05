@@ -27,6 +27,10 @@ var ErrOperatorUnauthorized = errors.New("operator credential required")
 // request.
 var ErrForbidden = errors.New("forbidden")
 
+// ErrInvalidJoinToken is returned when a Node join presents no join token, or
+// one that is unknown, used, revoked or expired.
+var ErrInvalidJoinToken = errors.New("a valid, unused join token is required")
+
 // RequireAdmin returns nil when the request's caller is an admin, and the error
 // to write otherwise.
 func RequireAdmin(ctx context.Context) error {
@@ -52,6 +56,8 @@ func RequireAdmin(ctx context.Context) error {
 //   - ErrServiceNotConfigured    → 503 Service Unavailable
 //   - ErrOperatorUnauthorized    → 401 Unauthorized
 //   - ErrForbidden               → 403 Forbidden
+//   - store.ErrWrongNode         → 403 Forbidden
+//   - ErrInvalidJoinToken        → 401 Unauthorized
 //
 // Unrecognised errors return an empty Problem{}, which lets summer's built-in
 // fallback logic handle them (typically producing a 500 Internal Server Error).
@@ -69,7 +75,7 @@ func NewProblemMapping() func(error) problem.Problem {
 				Detail: err.Error(),
 			}
 
-		case errors.Is(err, ErrOperatorUnauthorized):
+		case errors.Is(err, ErrOperatorUnauthorized), errors.Is(err, ErrInvalidJoinToken):
 			return problem.Problem{
 				Title:  "Unauthorized",
 				Status: 401,
@@ -77,7 +83,7 @@ func NewProblemMapping() func(error) problem.Problem {
 				Detail: err.Error(),
 			}
 
-		case errors.Is(err, ErrForbidden):
+		case errors.Is(err, ErrForbidden), errors.Is(err, store.ErrWrongNode):
 			return problem.Problem{
 				Title:  "Forbidden",
 				Status: 403,

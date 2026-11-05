@@ -241,12 +241,12 @@ EOF
 
 start_agent() {
 	local token_file
-	token_file="$(node_token_file node-a)"
+	token_file="$(join_token_file node-a)"
 	(
 		cd "$test_root/agent-run"
 		env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
 			SERVER_URL="$server_url" \
-			AGENT_TOKEN_FILE="$token_file" \
+			JOIN_TOKEN_FILE="$token_file" \
 			NODE_NAME=node-a \
 			HEARTBEAT_INTERVAL=1s \
 			DOCKER_HOST="$dind_host" \
@@ -659,6 +659,8 @@ container_running "$lost_container" || fail "I: setup expected $lost_container t
 log "I: restarting the agent"
 start_agent
 wait_until 60 "I: node-a Ready again" node_ready
+grep -q 'Using the Node token kept from enrolment' "$test_root/agent.log" ||
+	fail "I: the restarted agent did not use the Node token it kept from enrolment"
 wait_until 60 "I: TerminationBlocked cleared" not_termination_blocked
 wait_until 90 "I: $lost finalized" lost_gone
 wait_until 30 "I: $lost_container removed" lost_container_absent

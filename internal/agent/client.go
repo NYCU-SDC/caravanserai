@@ -13,8 +13,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -98,19 +101,72 @@ func (c *Client) SetToken(token string) {
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	c.httpClient.Transport = bearerTransport{token: token, base: base}
+	c.httpClient.Transport = &bearerTransport{token: token, base: base, logger: c.logger}
 }
 
-// bearerTransport adds a bearer token to every request it sends.
+// bearerTransport adds a bearer token to every request it sends, and says once
+// when cara-server starts refusing it.
 type bearerTransport struct {
-	token string
-	base  http.RoundTripper
+	token  string
+	base   http.RoundTripper
+	logger *zap.Logger
+	// refused is set while cara-server answers 401, so the cause is logged
+	// once rather than on every request.
+	refused atomic.Bool
 }
 
-func (t bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+func (t *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	r.Header.Set("Authorization", "Bearer "+t.token)
-	return t.base.RoundTrip(r)
+	resp, err := t.base.RoundTrip(r)
+	if err != nil {
+		return resp, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		if !t.refused.Swap(true) && t.logger != nil {
+			t.logger.Error("cara-server refused this Node's token: it was revoked or is unknown. " +
+				"Issue a new join token (caractl node token create), put it in JOIN_TOKEN_FILE and restart the agent")
+		}
+	} else if t.refused.Swap(false) && t.logger != nil {
+		t.logger.Info("cara-server accepts this Node's token again")
+	}
+	return resp, nil
+}
+
+// ErrJoinRefused means cara-server refused a join token: it is unknown, used,
+// revoked, expired, or for another Node. Retrying the same token cannot help.
+var ErrJoinRefused = errors.New("cara-server refused the join token")
+
+// Join trades joinToken for a Node token for this client's Node (CARA-138) and
+// returns the Node token. Call it before SetToken. A refusal wraps
+// ErrJoinRefused; any other error may succeed on retry.
+func (c *Client) Join(ctx context.Context, joinToken string) (string, error) {
+	url := c.serverURL + "/api/v1/nodes/" + c.nodeName + "/join"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("build join request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+joinToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("join request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	switch {
+	case resp.StatusCode == http.StatusCreated:
+		var joined v1.NodeJoined
+		if err := json.Unmarshal(body, &joined); err != nil || joined.Token == "" {
+			return "", fmt.Errorf("join: unreadable response: %v", err)
+		}
+		return joined.Token, nil
+	case resp.StatusCode >= 400 && resp.StatusCode < 500:
+		return "", fmt.Errorf("%w: %s: %s", ErrJoinRefused, resp.Status, strings.TrimSpace(string(body)))
+	default:
+		return "", fmt.Errorf("join: unexpected status %s", resp.Status)
+	}
 }
 
 // SetOverlayIP records the overlay IP assigned to this agent after joining the

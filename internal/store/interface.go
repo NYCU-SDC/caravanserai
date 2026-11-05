@@ -30,6 +30,10 @@ var ErrNotFound = errors.New("resource not found")
 // already in use.
 var ErrAlreadyExists = errors.New("resource already exists")
 
+// ErrWrongNode is returned when a Node-bound token is presented for a different
+// Node than the one it was issued for.
+var ErrWrongNode = errors.New("the token was issued for another Node")
+
 // ErrConflictState is returned when an operation is not allowed because the
 // resource is in a state that conflicts with the request (e.g. updating a
 // Project spec while it is Running).
@@ -122,6 +126,22 @@ type APITokenStore interface {
 	// RevokeAPIToken stops the token with this ID from authenticating.
 	// Revoking a revoked token is a no-op; an unknown ID returns ErrNotFound.
 	RevokeAPIToken(ctx context.Context, id int64) error
+
+	// CreateNodeJoinToken records a one-time token, by its hash, that enrols
+	// an Agent as nodeName until expiresAt (CARA-138).
+	CreateNodeJoinToken(ctx context.Context, nodeName, tokenHash, createdBy string, expiresAt time.Time) (v1.NodeJoinToken, error)
+
+	// RedeemNodeJoinToken trades the join token with joinHash for a Node token
+	// stored by nodeTokenHash, in one transaction, so a join token is redeemed
+	// at most once. It returns ErrNotFound when the join token is unknown,
+	// used, revoked or expired at now, and ErrWrongNode, without using the
+	// token, when it was issued for a Node other than nodeName.
+	RedeemNodeJoinToken(ctx context.Context, joinHash, nodeName, nodeTokenHash string, now time.Time) (v1.APIToken, error)
+
+	// RevokeNodeTokens revokes every Node token of nodeName and every join
+	// token for it that is still unused, and reports how many of each it
+	// revoked. Revoking a Node with none is not an error.
+	RevokeNodeTokens(ctx context.Context, nodeName string) (nodeTokens, joinTokens int, err error)
 }
 
 // ============================================================

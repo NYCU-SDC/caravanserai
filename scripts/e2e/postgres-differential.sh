@@ -224,7 +224,7 @@ completions_at_least() { [[ "$(completions "$1")" -ge "$2" ]] 2>/dev/null; }
 # start_agent with-s3|without-s3 starts node-a's agent.
 start_agent() {
 	local mode=$1 s3=() token_file
-	token_file="$(node_token_file node-a)"
+	token_file="$(join_token_file node-a)"
 	if [[ "$mode" == with-s3 ]]; then
 		s3=(S3_ENDPOINT="$minio_endpoint" S3_CA_FILE="$certs/ca.crt" S3_BUCKET="$bucket"
 			S3_ACCESS_KEY=caraadmin S3_SECRET_KEY=caraadmin123)
@@ -233,7 +233,7 @@ start_agent() {
 		cd "$test_root/agent-run"
 		env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
 			SERVER_URL="$server_url" \
-			AGENT_TOKEN_FILE="$token_file" \
+			JOIN_TOKEN_FILE="$token_file" \
 			NODE_NAME=node-a \
 			HEARTBEAT_INTERVAL=1s \
 			DOCKER_HOST="$dind_host" \

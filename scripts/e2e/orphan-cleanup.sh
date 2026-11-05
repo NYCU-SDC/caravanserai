@@ -166,6 +166,7 @@ dind pull nginx:alpine >/dev/null
 log "building cara-server and cara-agent"
 go build -o "$test_root/bin/cara-server" ./cmd/cara-server
 go build -o "$test_root/bin/cara-agent" ./cmd/cara-agent
+go build -o "$test_root/bin/caractl" ./cmd/caractl
 
 server_port="$(choose_port)"
 server_url="http://127.0.0.1:$server_port"
@@ -185,12 +186,12 @@ cat >"$test_root/agent-run/config.yaml" <<EOF
 data_root: "$data_root"
 EOF
 
-agent_token_file="$(node_token_file node-a)"
+agent_token_file="$(join_token_file node-a)"
 (
 	cd "$test_root/agent-run"
 	env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
 		SERVER_URL="$server_url" \
-		AGENT_TOKEN_FILE="$agent_token_file" \
+		JOIN_TOKEN_FILE="$agent_token_file" \
 		NODE_NAME=node-a \
 		HEARTBEAT_INTERVAL=1s \
 		DOCKER_HOST="$dind_host" \
@@ -315,3 +316,11 @@ dind network inspect "$foreign_network" >/dev/null || fail "foreign network was 
 container_running "$guard_container" || fail "Failed project assigned to node-a was touched"
 
 log "PASS: target stopped then deleted; Failed/foreign containers, foreign volume/network, and Managed data survived"
+
+# CARA-138: revoking the Node stops its Agent's token at once, and the Agent says
+# why rather than only failing.
+CARA_TOKEN="$e2e_admin_token" "$test_root/bin/caractl" --server "$server_url" node revoke node-a ||
+	fail "caractl node revoke failed"
+agent_refused() { grep -q "refused this Node's token" "$test_root/agent.log"; }
+wait_until 30 "the agent to report its token refused" agent_refused
+log "PASS: after caractl node revoke, the agent's requests are refused and it logs why"

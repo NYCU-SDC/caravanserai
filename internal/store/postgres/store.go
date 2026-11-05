@@ -2322,3 +2322,91 @@ func (s *Store) RevokeAPIToken(ctx context.Context, id int64) error {
 	}
 	return nil
 }
+
+const nodeJoinTokenColumns = `id, node_name, created_by, created_at, expires_at, used_at, revoked_at`
+
+func scanNodeJoinToken(row pgx.Row) (v1.NodeJoinToken, error) {
+	var t v1.NodeJoinToken
+	err := row.Scan(&t.ID, &t.NodeName, &t.CreatedBy, &t.CreatedAt, &t.ExpiresAt, &t.UsedAt, &t.RevokedAt)
+	return t, err
+}
+
+// CreateNodeJoinToken implements store.APITokenStore.
+func (s *Store) CreateNodeJoinToken(ctx context.Context, nodeName, tokenHash, createdBy string, expiresAt time.Time) (v1.NodeJoinToken, error) {
+	t, err := scanNodeJoinToken(s.pool.QueryRow(ctx, `
+		INSERT INTO node_join_tokens (node_name, token_hash, created_by, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING `+nodeJoinTokenColumns, nodeName, tokenHash, createdBy, time.Now().UTC(), expiresAt.UTC()))
+	if err != nil {
+		return v1.NodeJoinToken{}, fmt.Errorf("postgres: create join token for node %q: %w", nodeName, err)
+	}
+	return t, nil
+}
+
+// RedeemNodeJoinToken implements store.APITokenStore.
+func (s *Store) RedeemNodeJoinToken(ctx context.Context, joinHash, nodeName, nodeTokenHash string, now time.Time) (v1.APIToken, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: begin redeem join token: %w", err)
+	}
+	// A no-op once Commit has succeeded.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// FOR UPDATE makes two concurrent redemptions of one token serialise, and
+	// the second then sees used_at set.
+	join, err := scanNodeJoinToken(tx.QueryRow(ctx, `
+		SELECT `+nodeJoinTokenColumns+` FROM node_join_tokens
+		WHERE token_hash = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > $2
+		FOR UPDATE`, joinHash, now.UTC()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v1.APIToken{}, store.ErrNotFound
+	}
+	if err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: look up join token: %w", err)
+	}
+	if join.NodeName != nodeName {
+		return v1.APIToken{}, fmt.Errorf("%w: join token %d is for node %q, not %q", store.ErrWrongNode, join.ID, join.NodeName, nodeName)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE node_join_tokens SET used_at = $2 WHERE id = $1`, join.ID, now.UTC()); err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: mark join token %d used: %w", join.ID, err)
+	}
+	issued, err := scanAPIToken(tx.QueryRow(ctx, `
+		INSERT INTO api_tokens (kind, name, token_hash, created_by, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING `+apiTokenColumns,
+		v1.APITokenKindNode, nodeName, nodeTokenHash, fmt.Sprintf("join-token:%d", join.ID), now.UTC()))
+	if err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: issue node token for %q: %w", nodeName, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: commit redeem join token: %w", err)
+	}
+	return issued, nil
+}
+
+// RevokeNodeTokens implements store.APITokenStore.
+func (s *Store) RevokeNodeTokens(ctx context.Context, nodeName string) (int, int, error) {
+	now := time.Now().UTC()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("postgres: begin revoke node tokens: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	nodes, err := tx.Exec(ctx, `
+		UPDATE api_tokens SET revoked_at = $3
+		WHERE kind = $1 AND name = $2 AND revoked_at IS NULL`, v1.APITokenKindNode, nodeName, now)
+	if err != nil {
+		return 0, 0, fmt.Errorf("postgres: revoke node tokens of %q: %w", nodeName, err)
+	}
+	joins, err := tx.Exec(ctx, `
+		UPDATE node_join_tokens SET revoked_at = $2
+		WHERE node_name = $1 AND used_at IS NULL AND revoked_at IS NULL`, nodeName, now)
+	if err != nil {
+		return 0, 0, fmt.Errorf("postgres: revoke join tokens of %q: %w", nodeName, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, fmt.Errorf("postgres: commit revoke node tokens: %w", err)
+	}
+	return int(nodes.RowsAffected()), int(joins.RowsAffected()), nil
+}
