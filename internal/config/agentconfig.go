@@ -35,6 +35,10 @@ type AgentConfig struct {
 	OtelCollectorUrl  string        `yaml:"otel_collector_url"  envconfig:"OTEL_COLLECTOR_URL"`
 	NodeName          string        `yaml:"node_name"           envconfig:"NODE_NAME"`
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"  envconfig:"HEARTBEAT_INTERVAL"`
+	// TokenFile names a file holding the Node token the agent presents to
+	// cara-server on every request (ADR-0031). The server answers 401 without
+	// one.
+	TokenFile string `yaml:"token_file" envconfig:"AGENT_TOKEN_FILE"`
 	// DockerHost is the Docker daemon endpoint used by the agent to manage
 	// containers.  Defaults to the Unix socket path on Linux/macOS.
 	// Can be overridden with a tcp:// URL for remote Docker daemons.
@@ -259,6 +263,7 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 	envConfig := &AgentConfig{
 		Debug:            os.Getenv("DEBUG") == "true",
 		ServerURL:        os.Getenv("SERVER_URL"),
+		TokenFile:        os.Getenv("AGENT_TOKEN_FILE"),
 		OtelCollectorUrl: os.Getenv("OTEL_COLLECTOR_URL"),
 		NodeName:         os.Getenv("NODE_NAME"),
 		DockerHost:       os.Getenv("DOCKER_HOST"),
@@ -295,6 +300,7 @@ func AgentFromFlags(cfg *AgentConfig) (*AgentConfig, error) {
 	flagConfig := &AgentConfig{}
 	flag.BoolVar(&flagConfig.Debug, "debug", false, "enable debug mode")
 	flag.StringVar(&flagConfig.ServerURL, "server-url", "", "cara-server URL")
+	flag.StringVar(&flagConfig.TokenFile, "token-file", "", "file holding the Node token presented to cara-server")
 	flag.StringVar(&flagConfig.OtelCollectorUrl, "otel_collector_url", "", "OpenTelemetry collector URL")
 	flag.StringVar(&flagConfig.NodeName, "node-name", "", "node name to register with the control plane (default: hostname)")
 	flag.DurationVar(&flagConfig.HeartbeatInterval, "heartbeat-interval", 0, "interval between heartbeats (default: 30s)")

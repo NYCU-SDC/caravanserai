@@ -39,6 +39,7 @@ done
 shared_root="${E2E_SHARED_ROOT:-/var/tmp}"
 [[ -d "$shared_root" && -w "$shared_root" ]] || fail "E2E_SHARED_ROOT is not a writable directory: $shared_root"
 test_root="$(mktemp -d "$shared_root/cara-failover-e2e.XXXXXX")"
+. "$(dirname "${BASH_SOURCE[0]}")/lib/auth.sh"
 suffix="${PPID}-$$"
 postgres_name="cara87-postgres-${suffix}"
 minio_name="cara87-minio-${suffix}"
@@ -255,11 +256,10 @@ go build -o "$test_root/bin/caractl" ./cmd/caractl
 go build -o "$test_root/bin/cara-agent" ./cmd/cara-agent
 
 server_port="$(choose_port)"
-operator_token="e2e-operator-token"
 server_url="http://127.0.0.1:$server_port"
 (
 	cd "$test_root/server-run"
-	env HOST=127.0.0.1 PORT="$server_port" OPERATOR_TOKEN="$operator_token" GRACE_EXPIRED_RELEASE=true \
+	env HOST=127.0.0.1 PORT="$server_port" BREAK_GLASS_TOKEN_FILE="$e2e_admin_token_file" GRACE_EXPIRED_RELEASE=true \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &
@@ -268,6 +268,7 @@ wait_until 60 "cara-server readiness" server_ready
 
 start_agent() {
 	agent_node=$1; agent_root=$2; agent_docker=$3; agent_log=$4; agent_dir=$5
+	agent_token_file="$(node_token_file "$agent_node")"
 	cat >"$agent_dir/config.yaml" <<EOF
 data_root: "$agent_root"
 EOF
@@ -275,6 +276,7 @@ EOF
 		cd "$agent_dir"
 		env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
 			SERVER_URL="$server_url" \
+			AGENT_TOKEN_FILE="$agent_token_file" \
 			NODE_NAME="$agent_node" \
 			HEARTBEAT_INTERVAL=1s \
 			DOCKER_HOST="$agent_docker" \
@@ -482,7 +484,7 @@ takeover_supported=1
 
 authorize_takeover() {
 	for project in "$unbacked_project"; do
-		CARA_OPERATOR_TOKEN="$operator_token" "$test_root/bin/caractl" --server "http://127.0.0.1:$server_port" \
+		CARA_TOKEN="$e2e_admin_token" "$test_root/bin/caractl" --server "http://127.0.0.1:$server_port" \
 			takeover "$project" --yes --note "managed-failover e2e" ||
 			fail "$project: operator takeover was refused"
 	done

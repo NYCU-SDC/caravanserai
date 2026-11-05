@@ -78,7 +78,11 @@ docker run -d \
 
 ### 3. Start the control-plane server
 
+Every API request needs a bearer token. The break-glass admin token, read from a file, is how the first tokens are issued:
+
 ```bash
+(umask 077 && openssl rand -base64 32 > break-glass-token)
+BREAK_GLASS_TOKEN_FILE=break-glass-token \
 DATABASE_URL="postgresql://postgres:password@localhost:5432/caravanserai?sslmode=disable" \
   ./bin/cara-server
 # Listening on 0.0.0.0:8080
@@ -86,9 +90,15 @@ DATABASE_URL="postgresql://postgres:password@localhost:5432/caravanserai?sslmode
 
 ### 4. Start the agent (on the same or a different machine)
 
+Issue the agent a Node token, then start it with that token:
+
 ```bash
+export CARA_TOKEN="$(cat break-glass-token)"
+(umask 077 && ./bin/caractrl token create node my-node > my-node.token)
+
 SERVER_URL=http://localhost:8080 \
 NODE_NAME=my-node \
+AGENT_TOKEN_FILE=my-node.token \
   ./bin/cara-agent
 # Agent registers itself, begins heartbeating and polling for work
 ```
@@ -221,6 +231,7 @@ The file is the one named by `--config` or `CARA_CONFIG`, and a named file that 
 | `host` | `HOST` | `0.0.0.0` | Listen address |
 | `port` | `PORT` | `8080` | Listen port |
 | `database_url` | `DATABASE_URL` | _(required)_ | PostgreSQL DSN |
+| `break_glass_token_file` | `BREAK_GLASS_TOKEN_FILE` | _(none)_ | File holding the break-glass admin token (`user:break-glass`). Issue the first tokens with it, and keep it for when nothing else works. A named file that is unreadable or empty stops startup |
 | `otel_collector_url` | `OTEL_COLLECTOR_URL` | _(optional)_ | OTLP gRPC endpoint |
 | `headscale_api_url` | `HEADSCALE_API_URL` | _(optional)_ | Headscale management API URL. Enables the `/api/v1/overlay` endpoints when set together with the API key |
 | `headscale_api_key` | `HEADSCALE_API_KEY` | _(optional)_ | Headscale management API key (secret, never logged) |
@@ -235,6 +246,7 @@ The file is the one named by `--config` or `CARA_CONFIG`, and a named file that 
 |-----|---------|---------|-------------|
 | `debug` | `DEBUG` | `false` | Enable debug logging |
 | `server_url` | `SERVER_URL` | `http://localhost:8080` | cara-server address |
+| `token_file` | `AGENT_TOKEN_FILE` | _(none)_ | File holding the Node token (`caractl token create node <name>`). Without it cara-server refuses the agent |
 | `node_name` | `NODE_NAME` | OS hostname | Name to register with |
 | `heartbeat_interval` | `HEARTBEAT_INTERVAL` | `30s` | Heartbeat frequency |
 | `docker_host` | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon endpoint |
@@ -252,6 +264,7 @@ These flags are global, so they work on either side of the subcommand:
 |------|-------|---------|---------|-------------|
 | `--server` | | `CARA_SERVER` | `http://localhost:8080` | cara-server URL |
 | `--output` | `-o` | | `table` | Output format: `table` \| `json` \| `yaml` |
+| | | `CARA_TOKEN` | _(none)_ | Bearer token sent on every request. There is no flag, to keep it out of process listings |
 
 `--server` resolves in this order: the explicit flag, then `$CARA_SERVER`, then
 the localhost default. So on the server box it needs no configuration; from a
@@ -289,7 +302,17 @@ Remove it again with `make uninstall-cli`.
 
 ## API Reference
 
-All endpoints are under `/api/v1/`.
+All endpoints are under `/api/v1/`. Every endpoint except `GET /api/healthz` needs `Authorization: Bearer <token>` and answers 401 without a valid one (ADR-0031). A token identifies a Node (`node:<name>`) or a user (`user:<name>`); every user is an admin for now.
+
+### Tokens
+
+Admin only. Surfaced as `caractl token …`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/tokens` | Issue a token (body: `{kind: node\|user, name}`). The response is the only time the token is shown; the server keeps its SHA-256 hash |
+| `GET` | `/api/v1/tokens` | List tokens, without the tokens themselves |
+| `DELETE` | `/api/v1/tokens/{id}` | Revoke a token; its next request gets 401 |
 
 ### Nodes
 
@@ -317,8 +340,8 @@ All endpoints are under `/api/v1/`.
 | `PUT` | `/api/v1/projects/{name}/recovery/managed-data-quarantined` | Record that local Managed data left the active path (the obligation's agent only) |
 | `PUT` | `/api/v1/projects/{name}/recovery/committed-backup` | Make a backup generation the restore source (currently assigned agent only; requires the assignment fence) |
 | `PUT` | `/api/v1/projects/{name}/recovery/resources-removed` | Resolve a cleanup obligation after removing its runtime resources (the obligation's agent only; requires the assignment fence) |
-| `POST` | `/api/v1/projects/{name}/recovery/takeover` | Override the release gate for a Node that will not report back (temporary `OPERATOR_TOKEN` bearer until ADR-0018 is decided; disabled when unset; `caractl takeover`) |
-| `GET` | `/api/v1/projects/{name}/recovery/takeover-audit` | List recorded takeovers of the Project (same temporary token; `caractl takeover-audit`) |
+| `POST` | `/api/v1/projects/{name}/recovery/takeover` | Override the release gate for a Node that will not report back (admin only; `caractl takeover`) |
+| `GET` | `/api/v1/projects/{name}/recovery/takeover-audit` | List recorded takeovers of the Project (admin only; `caractl takeover-audit`) |
 
 ### Overlay
 

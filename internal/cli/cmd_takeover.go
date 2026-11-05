@@ -10,15 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 
 	"github.com/spf13/cobra"
 )
-
-const operatorTokenEnv = "CARA_OPERATOR_TOKEN"
 
 // takeoverFence finds the assignment a takeover of project is about: the one it
 // holds, or the released one whose obligation is blocking it.
@@ -53,7 +50,7 @@ This is not proof the old node stopped. If that node is still running, the
 workload runs on both nodes until it reconnects and cleans up, and writes made
 since the last backup are not carried over.
 
-Reads the operator token from ` + operatorTokenEnv + `.`,
+Needs an admin token in ` + TokenEnv + `.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
@@ -88,7 +85,7 @@ Reads the operator token from ` + operatorTokenEnv + `.`,
 				}
 				requestID = hex.EncodeToString(b)
 			}
-			record, err := client.takeover(cmd.Context(), name, fence, requestID, note, os.Getenv(operatorTokenEnv))
+			record, err := client.takeover(cmd.Context(), name, fence, requestID, note)
 			if err != nil {
 				return fmt.Errorf("take over project %q: %w", name, err)
 			}
@@ -108,12 +105,12 @@ func NewTakeoverAuditCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "takeover-audit <project>",
 		Short: "List recorded operator takeovers of a project",
-		Long:  "takeover-audit lists a project's takeovers, including after it is deleted.\n\nReads the operator token from " + operatorTokenEnv + ".",
+		Long:  "takeover-audit lists a project's takeovers, including after it is deleted.\n\nNeeds an admin token in " + TokenEnv + ".",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
 			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
-			records, err := NewClient(serverURL).takeoverAudit(cmd.Context(), args[0], os.Getenv(operatorTokenEnv))
+			records, err := NewClient(serverURL).takeoverAudit(cmd.Context(), args[0])
 			if err != nil {
 				return fmt.Errorf("list takeovers of %q: %w", args[0], err)
 			}
@@ -124,7 +121,7 @@ func NewTakeoverAuditCmd() *cobra.Command {
 	}
 }
 
-func (c *Client) takeover(ctx context.Context, name string, fence v1.AssignmentIdentity, requestID, note, token string) (v1.TakeoverAuditRecord, error) {
+func (c *Client) takeover(ctx context.Context, name string, fence v1.AssignmentIdentity, requestID, note string) (v1.TakeoverAuditRecord, error) {
 	body, err := json.Marshal(map[string]any{
 		"uid":                  fence.ProjectUID,
 		"nodeRef":              fence.NodeName,
@@ -141,7 +138,6 @@ func (c *Client) takeover(ctx context.Context, name string, fence v1.AssignmentI
 		return v1.TakeoverAuditRecord{}, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -161,13 +157,12 @@ func (c *Client) takeover(ctx context.Context, name string, fence v1.AssignmentI
 	return out.Record, nil
 }
 
-func (c *Client) takeoverAudit(ctx context.Context, name, token string) ([]v1.TakeoverAuditRecord, error) {
+func (c *Client) takeoverAudit(ctx context.Context, name string) ([]v1.TakeoverAuditRecord, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		c.BaseURL+"/api/v1/projects/"+name+"/recovery/takeover-audit", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
