@@ -170,7 +170,7 @@ spec:
 
 ### Backup strategy per Managed volume
 
-`spec.backup` backs up every Managed volume offline by default: the Project's services are stopped and each volume is archived. `spec.backup.items` can select `PostgresDifferential` for a PostgreSQL data volume instead (pgBackRest full and differential backups, PostgreSQL keeps running). See [`examples/volume/postgres-differential.yaml`](examples/volume/postgres-differential.yaml).
+`spec.backup` backs up every Managed volume offline by default: the Project's services are stopped and each volume is archived. The newest 7 generations of a Project are kept, along with the one the server committed; a generation from an earlier Project of the same name is left alone. `spec.backup.items` can select `PostgresDifferential` for a PostgreSQL data volume instead (pgBackRest full and differential backups, PostgreSQL keeps running). See [`examples/volume/postgres-differential.yaml`](examples/volume/postgres-differential.yaml).
 
 | Field | Meaning |
 |---|---|

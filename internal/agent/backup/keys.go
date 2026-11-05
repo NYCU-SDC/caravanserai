@@ -15,6 +15,9 @@ import (
 //	    └── manifest.json
 const keyPrefix = "cara/v1/projects"
 
+// manifestFileName is the object a generation is complete only once it holds.
+const manifestFileName = "manifest.json"
+
 // ProjectPrefix returns the root key under which every generation of a
 // Project's backups lives.
 func ProjectPrefix(namespace, project string) (string, error) {
@@ -46,7 +49,7 @@ func ManifestKey(namespace, project, backupID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return prefix + "/manifest.json", nil
+	return prefix + "/" + manifestFileName, nil
 }
 
 // ArchiveKey returns the key of one volume's archive within a generation.

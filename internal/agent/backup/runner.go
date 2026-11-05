@@ -198,6 +198,8 @@ func NewRunner(
 //  5. On every exit path — success, failure, timeout, cancellation — restart
 //     the containers if this node still owns the Project, refresh routes,
 //     clear the Maintenance condition, and release the claim.
+//  6. After a commit, and before releasing the claim, delete generations beyond
+//     RetainGenerations.
 //
 // Returning ErrNoManagedVolumes means the Project was left untouched.
 func (r *Runner) Run(ctx context.Context, project *v1.Project) (err error) {
@@ -232,6 +234,14 @@ func (r *Runner) Run(ctx context.Context, project *v1.Project) (err error) {
 		return err
 	}
 	log = log.With(zap.String("backupID", backupID))
+
+	// Registered first among the deferred steps so it runs after the containers
+	// are back: deleting old backups must not lengthen the downtime.
+	defer func() {
+		if err == nil {
+			r.pruneGenerations(context.WithoutCancel(ctx), key, project, backupID, log)
+		}
+	}()
 
 	uid, nodeRef, generation := project.ObjectMeta.UID, project.Status.NodeRef, project.Status.AssignmentGeneration
 	if err := r.conditions.SetMaintenance(ctx, key, uid, nodeRef, generation, "BackingUp"); err != nil {
@@ -396,6 +406,7 @@ func (r *Runner) writeManifest(
 		r.cfg.NodeName, r.cfg.CaraVersion,
 		project.ResourceVersion, r.now(), entries,
 	)
+	manifest.ProjectUID = project.ObjectMeta.UID
 	manifestBytes, err := manifest.Marshal()
 	if err != nil {
 		return err
