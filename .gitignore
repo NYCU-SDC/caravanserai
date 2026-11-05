@@ -139,3 +139,6 @@ test/overlay/.tmp/
 
 # Development break-glass token (make dev-server)
 .dev-break-glass-token
+
+# test/vm/run.sh default record directory
+.vmtest/
