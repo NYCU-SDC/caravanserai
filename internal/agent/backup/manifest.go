@@ -70,6 +70,10 @@ type Manifest struct {
 	BackupID  string `json:"backupID"`
 	Namespace string `json:"namespace"`
 	Project   string `json:"project"`
+	// ProjectUID names the lifetime that wrote this generation. Keys are by
+	// name, which an earlier lifetime may have used, so this is what proves a
+	// generation is this Project's to prune.
+	ProjectUID string `json:"projectUID,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	// SourceNode is the node that produced this generation, for operator
