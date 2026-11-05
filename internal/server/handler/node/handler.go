@@ -21,7 +21,9 @@ import (
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/server/agentdialer"
+	"NYCU-SDC/caravanserai/internal/server/auth"
 	"NYCU-SDC/caravanserai/internal/server/controller"
+	"NYCU-SDC/caravanserai/internal/server/handler"
 	"NYCU-SDC/caravanserai/internal/store"
 
 	handlerutil "github.com/NYCU-SDC/summer/pkg/handler"
@@ -141,6 +143,16 @@ func (h *Handler) createNode(w http.ResponseWriter, r *http.Request) {
 	if err := v1.ValidateNamespace(node.Namespace); err != nil {
 		h.problemWriter.WriteError(traceCtx, w,
 			handlerutil.NewValidationError("metadata.namespace", node.Namespace, err.Error()), logger)
+		return
+	}
+
+	// An Agent registers only the Node its token was issued for (CARA-138);
+	// an admin may register any Node by hand.
+	if caller, ok := auth.FromContext(traceCtx); ok && caller.Kind == v1.APITokenKindNode && caller.Name != node.Name {
+		logger.Warn("Refused a Node registration under another Node's name",
+			zap.String("caller", caller.String()), zap.String("name", node.Name))
+		h.problemWriter.WriteError(traceCtx, w,
+			fmt.Errorf("%w: %s may register only node %q", handler.ErrForbidden, caller, caller.Name), logger)
 		return
 	}
 

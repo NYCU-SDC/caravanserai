@@ -268,7 +268,7 @@ wait_until 60 "cara-server readiness" server_ready
 
 start_agent() {
 	agent_node=$1; agent_root=$2; agent_docker=$3; agent_log=$4; agent_dir=$5
-	agent_token_file="$(node_token_file "$agent_node")"
+	agent_token_file="$(join_token_file "$agent_node")"
 	cat >"$agent_dir/config.yaml" <<EOF
 data_root: "$agent_root"
 EOF
@@ -276,7 +276,7 @@ EOF
 		cd "$agent_dir"
 		env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
 			SERVER_URL="$server_url" \
-			AGENT_TOKEN_FILE="$agent_token_file" \
+			JOIN_TOKEN_FILE="$agent_token_file" \
 			NODE_NAME="$agent_node" \
 			HEARTBEAT_INTERVAL=1s \
 			DOCKER_HOST="$agent_docker" \

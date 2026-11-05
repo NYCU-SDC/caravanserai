@@ -6,7 +6,7 @@ central control plane — without requiring Kubernetes.
 
 ```
                       ┌─────────────────┐
-  caractrl ──────────▶│   cara-server   │◀── Scheduler / Controller Manager
+  caractl ──────────▶│   cara-server   │◀── Scheduler / Controller Manager
                       │  (control plane) │
                       └────────┬────────┘
                                │ HTTP API
@@ -26,7 +26,7 @@ central control plane — without requiring Kubernetes.
 |--------|------|
 | `cara-server` | Control-plane API server + Controller Manager |
 | `cara-agent` | Per-node agent — reconciles containers via Docker |
-| `caractrl` | CLI for managing Nodes and Projects |
+| `caractl` | CLI for managing Nodes and Projects |
 
 ## Concepts
 
@@ -61,7 +61,7 @@ Pending ──(scheduler)──▶ Scheduled ──(agent)──▶ Running
 
 ```bash
 make build
-# Outputs: bin/cara-server  bin/cara-agent  bin/caractrl
+# Outputs: bin/cara-server  bin/cara-agent  bin/caractl
 ```
 
 ### 2. Start PostgreSQL
@@ -90,26 +90,31 @@ DATABASE_URL="postgresql://postgres:password@localhost:5432/caravanserai?sslmode
 
 ### 4. Start the agent (on the same or a different machine)
 
-Issue the agent a Node token, then start it with that token:
+Issue a one-time join token for the Node, then start the agent with it:
 
 ```bash
 export CARA_TOKEN="$(cat break-glass-token)"
-(umask 077 && ./bin/caractrl token create node my-node > my-node.token)
+(umask 077 && ./bin/caractl node token create my-node > my-node.join-token)
 
 SERVER_URL=http://localhost:8080 \
 NODE_NAME=my-node \
-AGENT_TOKEN_FILE=my-node.token \
+JOIN_TOKEN_FILE=my-node.join-token \
   ./bin/cara-agent
-# Agent registers itself, begins heartbeating and polling for work
+# Agent trades the join token for its Node token, registers itself, and begins
+# heartbeating and polling for work
 ```
+
+The agent keeps its Node token in `<data_root>/identity/` and needs no join token on later starts. A join token works once, for the Node it names, for an hour unless `--ttl` says otherwise.
+
+`caractl node revoke my-node` stops the Node's token at once; the agent logs that it was refused. To bring the Node back, issue a new join token, put it in the same file and restart the agent.
 
 ### 5. Deploy a Project
 
 ```bash
-./bin/caractrl apply -f examples/nginx-project.yaml
+./bin/caractl apply -f examples/nginx-project.yaml
 # project/nginx-demo created
 
-./bin/caractrl get projects
+./bin/caractl get projects
 # NAME         PHASE     NODE      CONDITIONS          AGE
 # nginx-demo   Running   my-node   ContainersRunning   5s
 ```
@@ -118,13 +123,13 @@ AGENT_TOKEN_FILE=my-node.token \
 
 ```bash
 # List all nodes
-./bin/caractrl get nodes
+./bin/caractl get nodes
 
 # Get a single project (JSON)
-./bin/caractrl --output json get projects nginx-demo
+./bin/caractl --output json get projects nginx-demo
 
 # Delete the project (agent tears down all containers)
-./bin/caractrl delete project nginx-demo
+./bin/caractl delete project nginx-demo
 ```
 
 ---
@@ -251,18 +256,19 @@ The file is the one named by `--config` or `CARA_CONFIG`, and a named file that 
 |-----|---------|---------|-------------|
 | `debug` | `DEBUG` | `false` | Enable debug logging |
 | `server_url` | `SERVER_URL` | `http://localhost:8080` | cara-server address |
-| `token_file` | `AGENT_TOKEN_FILE` | _(none)_ | File holding the Node token (`caractl token create node <name>`). Without it cara-server refuses the agent |
+| `join_token_file` | `JOIN_TOKEN_FILE` | _(none)_ | File holding a one-time join token (`caractl node token create <name>`). On first start the agent trades it for a Node token and keeps that in `<data_root>/identity/`; later starts use the kept token. A different join token in the file enrols the Node again |
+| `token_file` | `AGENT_TOKEN_FILE` | _(none)_ | File holding a Node token issued by hand (`caractl token create node <name>`). Takes precedence over the join token and the kept token. With neither, the agent does not start |
 | `node_name` | `NODE_NAME` | OS hostname | Name to register with |
 | `heartbeat_interval` | `HEARTBEAT_INTERVAL` | `30s` | Heartbeat frequency |
 | `docker_host` | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon endpoint |
 
-### caractrl flags
+### caractl flags
 
 These flags are global, so they work on either side of the subcommand:
 
 ```bash
-./bin/caractrl [--server <url>] [--output <format>] <command>
-./bin/caractrl <command> [--server <url>] [--output <format>]
+./bin/caractl [--server <url>] [--output <format>] <command>
+./bin/caractl <command> [--server <url>] [--output <format>]
 ```
 
 | Flag | Short | Env var | Default | Description |
@@ -318,12 +324,16 @@ Admin only. Surfaced as `caractl token …`.
 | `POST` | `/api/v1/tokens` | Issue a token (body: `{kind: node\|user, name}`). The response is the only time the token is shown; the server keeps its SHA-256 hash |
 | `GET` | `/api/v1/tokens` | List tokens, without the tokens themselves |
 | `DELETE` | `/api/v1/tokens/{id}` | Revoke a token; its next request gets 401 |
+| `POST` | `/api/v1/nodes/{name}/join-tokens` | Issue a one-time join token for the Node (body: `{ttl}`, a Go duration, default `1h`, at most `168h`). Shown once. `caractl node token create <name> [--ttl]` |
+| `DELETE` | `/api/v1/nodes/{name}/tokens` | Revoke the Node's tokens and its unused join tokens. `caractl node revoke <name>` |
+
+The agent calls `POST /api/v1/nodes/{name}/join` with the join token as its bearer token and gets its Node token back. It is the only route that takes a join token, and a join token works nowhere else. An unknown, used, revoked or expired join token gets 401; one issued for another Node gets 403 and is not used up.
 
 ### Nodes
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/v1/nodes` | Register a node |
+| `POST` | `/api/v1/nodes` | Register a node. A Node token may register only its own name (403 otherwise) |
 | `PUT` | `/api/v1/nodes/{name}` | Update a node's spec and labels. The `cara.io/tier` label must be `primary` or `backup` (an unlabeled node is treated as `backup`); `POST` validates it too. Set it with `caractl node set-tier <name> primary\|backup`. |
 | `GET` | `/api/v1/nodes` | List all nodes |
 | `GET` | `/api/v1/nodes/{name}` | Get a single node |

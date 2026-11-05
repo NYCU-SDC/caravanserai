@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -16,6 +18,7 @@ import (
 	forwardhandler "NYCU-SDC/caravanserai/internal/agent/apiserver/handler/forward"
 	logshandler "NYCU-SDC/caravanserai/internal/agent/apiserver/handler/logs"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/identity"
 	"NYCU-SDC/caravanserai/internal/agent/pgbackrest"
 	"NYCU-SDC/caravanserai/internal/agent/proxy"
 	"NYCU-SDC/caravanserai/internal/appinit"
@@ -83,19 +86,19 @@ func main() {
 	defer stop()
 
 	agentClient := agent.NewClient(logger, cfg.ServerURL, cfg.NodeName)
-	if cfg.TokenFile == "" {
-		logger.Warn("No token file configured (AGENT_TOKEN_FILE): cara-server will refuse this agent's requests")
-	} else {
-		raw, err := os.ReadFile(cfg.TokenFile)
-		if err != nil {
-			logger.Fatal("Cannot read the Node token", zap.String("path", cfg.TokenFile), zap.Error(err))
-		}
-		token := strings.TrimSpace(string(raw))
-		if token == "" {
-			logger.Fatal("The Node token file is empty", zap.String("path", cfg.TokenFile))
-		}
-		agentClient.SetToken(token)
+	// The Node token comes from AGENT_TOKEN_FILE, from an earlier enrolment, or
+	// from trading JOIN_TOKEN_FILE for one (CARA-138). Without one, every
+	// request would be refused, so the agent does not start.
+	nodeToken, err := identity.Resolve(ctx, identity.Config{
+		TokenFile:     cfg.TokenFile,
+		JoinTokenFile: cfg.JoinTokenFile,
+		Dir:           filepath.Join(cfg.DataRoot, "identity"),
+		IsRefusal:     func(err error) bool { return errors.Is(err, agent.ErrJoinRefused) },
+	}, agentClient, logger)
+	if err != nil {
+		logger.Fatal("Cannot obtain this Node's token", zap.Error(err))
 	}
+	agentClient.SetToken(nodeToken)
 
 	// ── Headscale overlay join ────────────────────────────────────────────
 	// Overlay networking is opt-in in 1.0 (CARA-55): the agent joins the

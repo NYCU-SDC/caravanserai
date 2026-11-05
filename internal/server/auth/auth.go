@@ -135,11 +135,26 @@ var publicPaths = map[string]bool{
 	"/api/healthz": true,
 }
 
+// isNodeJoin reports whether r is POST /api/v1/nodes/{name}/join. A joining
+// Agent has only a join token, which is not an API token: the join handler
+// checks it, and the request carries no principal.
+func isNodeJoin(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	rest, ok := strings.CutPrefix(r.URL.Path, "/api/v1/nodes/")
+	if !ok {
+		return false
+	}
+	name, ok := strings.CutSuffix(rest, "/join")
+	return ok && name != "" && !strings.Contains(name, "/")
+}
+
 // Middleware attaches the caller's principal to every request and answers 401
 // when there is none.
 func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if publicPaths[r.URL.Path] {
+		if publicPaths[r.URL.Path] || isNodeJoin(r) {
 			next.ServeHTTP(w, r)
 			return
 		}

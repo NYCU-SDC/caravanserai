@@ -134,3 +134,39 @@ func TestPrincipalIsAdmin(t *testing.T) {
 	assert.False(t, Principal{Kind: v1.APITokenKindNode, Name: "node-a"}.IsAdmin())
 	assert.Equal(t, "node:node-a", Principal{Kind: v1.APITokenKindNode, Name: "node-a"}.String())
 }
+
+// The join route is the one place a request without an API token gets through:
+// the join token is checked by its handler. Nothing near it may slip through.
+func TestMiddlewareLetsOnlyTheJoinRouteThrough(t *testing.T) {
+	reached := false
+	h := NewAuthenticator(zap.NewNop(), fakeTokens{}, "").Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		_, ok := FromContext(r.Context())
+		assert.False(t, ok, "a join request carries no principal")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	cases := []struct {
+		method, path string
+		through      bool
+	}{
+		{http.MethodPost, "/api/v1/nodes/node-a/join", true},
+		{http.MethodGet, "/api/v1/nodes/node-a/join", false},
+		{http.MethodPost, "/api/v1/nodes//join", false},
+		{http.MethodPost, "/api/v1/nodes/a/b/join", false},
+		{http.MethodPost, "/api/v1/nodes/node-a/join-tokens", false},
+		{http.MethodPost, "/api/v1/nodes/node-a/joined", false},
+		{http.MethodPost, "/api/v1/nodes", false},
+	}
+	for _, tc := range cases {
+		reached = false
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.Header.Set("Authorization", "Bearer cara_join")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		assert.Equal(t, tc.through, reached, "%s %s", tc.method, tc.path)
+		if !tc.through {
+			assert.Equal(t, http.StatusUnauthorized, rec.Code, "%s %s", tc.method, tc.path)
+		}
+	}
+}
