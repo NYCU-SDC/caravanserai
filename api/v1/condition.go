@@ -55,6 +55,9 @@
 //	  ConditionTypeTeardownBlocked — set by the agent while it cannot finish
 //	  removing a Terminating Project's resources, and cleared once it has.
 //
+//	  ConditionTypeDataRestored — set by the agent when a restore from the
+//	  object store finishes, naming the last transaction it recovered.
+//
 //	  ConditionTypeBackupFailing — set by the agent when a scheduled backup
 //	  fails, and cleared by the next one that succeeds.
 //
@@ -198,6 +201,12 @@ const (
 	// that holds then.
 	ConditionTypeBackupFailing ConditionType = "BackupFailing"
 
+	// ConditionTypeDataRestored records that this Project's data came from a
+	// backup rather than from a Node that held it, and how recent it is. Replay
+	// stops at the last WAL segment that reached the repository, so the message
+	// is the only place that says how much was recovered.
+	ConditionTypeDataRestored ConditionType = "DataRestored"
+
 	// ConditionTypeDiskPressure indicates whether the node's disk usage is
 	// approaching capacity. Set by the NodeConditionController based on
 	// the Agent's reported Capacity and Allocatable values.
@@ -221,6 +230,9 @@ const (
 
 // ReasonBackupAttemptFailed is the reason of BackupFailing.
 const ReasonBackupAttemptFailed = "BackupAttemptFailed"
+
+// ReasonRestoredFromBackup is the reason of DataRestored.
+const ReasonRestoredFromBackup = "RestoredFromBackup"
 
 // MaintenanceStaleAfter is how long a Maintenance condition stays meaningful.
 // An agent that dies mid-backup leaves the condition behind with nothing to

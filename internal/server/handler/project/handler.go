@@ -1038,6 +1038,7 @@ var agentWritableConditions = map[v1.ConditionType]bool{
 	v1.ConditionTypeRecoveryBlocked: true,
 	v1.ConditionTypeTeardownBlocked: true,
 	v1.ConditionTypeBackupFailing:   true,
+	v1.ConditionTypeDataRestored:    true,
 }
 
 // conditionPatchRequest is the body sent to

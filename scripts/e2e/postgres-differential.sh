@@ -26,9 +26,12 @@ set -Eeuo pipefail
 #   C. verification restore: the differential restores into a throwaway
 #      container, with archiving off, holding every row; the stanza's backups
 #      and timeline are unchanged by it
-#   D. a new assignment of the Project, with no local data, is refused with
+#   D. a new assignment of the Project, with no local data, restores in the
+#      background from the newest accepted backup and every WAL segment archived
+#      after it: rows written after that backup are there, PostgreSQL is on a new
+#      timeline and accepts writes, and the next backup is full
+#   E. the same with no object store configured on the agent is refused with
 #      StrategyRestoreUnavailable; no container, no PGDATA
-#   E. the same with no object store configured on the agent
 #   F. with no object store, a new PostgresDifferential Project is held with
 #      BackupRepositoryUnavailable and nothing is started
 #
@@ -452,12 +455,38 @@ PY
 log "C: PASS — the differential holds all 2000 rows; the stanza is unchanged"
 
 # ── D. Reassignment without local data, object store configured ───────────────
-log "D: reassigning $pg with its local data gone (object store configured)"
+# Written with the agent stopped, so no backup can hold them: only WAL replay can
+# bring these back. The database keeps running and archiving through the repo
+# host, and archive_timeout is what gets a segment this small archived.
 stop_agent
+db_sql "INSERT INTO notes SELECT generate_series(2001, 2005)" >/dev/null
+wrote_at="$(db_sql "SELECT now()")"
+archived_since() {
+	[[ "$(db_sql "SELECT COALESCE(last_archived_time > '$wrote_at', false) FROM pg_stat_archiver")" == "t" ]]
+}
+wait_until 120 "the segment with the last rows archived by archive_timeout" archived_since
+[[ "$(db_sql "SHOW archive_timeout")" == "1min" ]] || fail "$pg: archive_timeout is not set"
+db_stopped_rows="$(db_sql "SELECT count(*) FROM notes")"
+
+log "D: reassigning $pg with its local data gone (object store configured)"
 reassign_without_data "$pg"
+completions_before="$(completions "$pg")"
 start_agent with-s3
-assert_refused "$pg"
-log "D: PASS — refused with StrategyRestoreUnavailable; no container, no empty database"
+wait_until 240 "$pg Running again" running_or_fail "$pg"
+wait_until 60 "$pg's PostgreSQL to accept connections" pg_accepts "$pg"
+[[ "$(project_field "$pg" 'cond("RecoveryBlocked").get("status", "")')" != "True" ]] || fail "$pg: still blocked while Running"
+[[ "$(project_field "$pg" 'cond("DataRestored").get("status", "")')" == "True" ]] || fail "$pg: no DataRestored condition"
+restored_rows="$(db_sql "SELECT count(*) FROM notes")"
+[[ "$restored_rows" == "$db_stopped_rows" ]] || fail "$pg: restored $restored_rows rows, not $db_stopped_rows"
+[[ "$(db_sql "SELECT pg_is_in_recovery()")" == "f" ]] || fail "$pg: still in recovery"
+timeline="$(db_sql "SELECT timeline_id FROM pg_control_checkpoint()")"
+(( timeline > 1 )) || fail "$pg: no new timeline, on $timeline"
+db_sql "INSERT INTO notes SELECT generate_series(3001, 3010)" >/dev/null
+wait_until 180 "a backup after the restore" completions_at_least "$pg" $((completions_before + 1))
+[[ "$(completion_field "$pg" "$completions_before" 'c["items"][0]["type"]')" == "full" ]] ||
+	fail "$pg: the first backup after the restore is not full"
+dind exec -u postgres "$pg-db" pgbackrest --stanza="$stanza" check >/dev/null || fail "$pg: archiving does not work after the restore"
+log "D: PASS — restored $restored_rows rows to timeline $timeline, including those after the last backup; the next backup is full"
 
 # ── E. The same with no object store ────────────────────────────────────────────
 log "E: reassigning $pg again, agent restarted without an object store"

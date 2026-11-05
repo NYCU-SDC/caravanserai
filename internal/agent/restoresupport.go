@@ -36,6 +36,7 @@ func ensureVolumeData(
 	dataRoot string,
 	nodeName string,
 	p *v1.Project,
+	pgRestore *pgRestores,
 	logger *zap.Logger,
 ) error {
 	// Both are checked because reconcileProjects treats a nil Coordinator on
@@ -65,7 +66,13 @@ func ensureVolumeData(
 		// than being failed for losing a race.
 		return errDeferred
 	}
-	defer release()
+	// A background restore takes the claim over and releases it when it ends.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 
 	want := restore.ProvenanceFor(p, nodeName, "")
 	outcome, err := decideRestore(dataRoot, want, p)
@@ -89,11 +96,16 @@ func ensureVolumeData(
 	case restore.DecisionRestore:
 		if postgresDifferential {
 			// The committed backup names offline archives; this Project's
-			// backups are in pgBackRest, which cannot be restored from yet.
-			return &restore.PlacementBlockedError{
-				Reason: restore.BlockStrategyRestoreUnavailable,
-				Detail: "this Project's PostgresDifferential data would have to be restored from the object store, which is not supported yet",
+			// backups are in pgBackRest.
+			if pgRestore == nil {
+				return &restore.PlacementBlockedError{
+					Reason: restore.BlockStrategyRestoreUnavailable,
+					Detail: "this Project's PostgresDifferential data would have to be restored from the object store, which this Node has none configured to reach",
+				}
 			}
+			blocked, took := pgRestore.begin(ctx, p, release)
+			handedOff = took
+			return blocked
 		}
 		return runRestore(ctx, restorer, p, log)
 

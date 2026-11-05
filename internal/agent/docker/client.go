@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	caravolume "NYCU-SDC/caravanserai/internal/agent/volume"
@@ -832,13 +833,22 @@ func (r *DockerRuntime) ensureManagedDir(namespace, projectName, volumeName stri
 	if !info.IsDir() {
 		return fmt.Errorf("managed volume path %q exists but is not a directory", hostPath)
 	}
-	if err := unix.Access(hostPath, unix.W_OK); err != nil {
+	if err := unix.Access(hostPath, unix.W_OK); err != nil && !ownedByAnother(info) {
 		return fmt.Errorf("managed volume dir %q is not writable: %w", hostPath, err)
 	}
 
 	r.logger.Info("Managed volume directory ready",
 		zap.String("volume", volumeName), zap.String("path", hostPath))
 	return nil
+}
+
+// ownedByAnother reports whether a user other than the Agent's owns a directory.
+// A container's user takes its volume over, as PostgreSQL does PGDATA, which
+// shuts out an Agent that is not root. What the check above catches is a
+// directory the Agent cannot use though it is its own.
+func ownedByAnother(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(stat.Uid) != os.Getuid()
 }
 
 // ensureEphemeralVolume creates the Docker named volume for an Ephemeral volume

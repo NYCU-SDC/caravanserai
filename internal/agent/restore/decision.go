@@ -1,6 +1,7 @@
 package restore
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -91,11 +92,19 @@ const (
 	BlockMissingData BlockReason = "MissingData"
 
 	// BlockStrategyRestoreUnavailable means the Project would have to be
-	// restored from the object store, but a volume uses a backup strategy
-	// whose data cannot be restored yet (PostgresDifferential). The offline
+	// restored from the object store, but this Node cannot run the restore of
+	// its strategy (PostgresDifferential), having no object store. The offline
 	// archive path must not stand in for it: those archives are addressed by
 	// namespace and name, and can belong to an earlier same-name Project.
 	BlockStrategyRestoreUnavailable BlockReason = "StrategyRestoreUnavailable"
+
+	// BlockRestoreInProgress means the data is being restored in the background.
+	// The Project starts once it is in place.
+	BlockRestoreInProgress BlockReason = "RestoreInProgress"
+
+	// BlockRestoreFailed means restoring failed and will be tried again. Nothing
+	// was started, and the data that was there is unchanged.
+	BlockRestoreFailed BlockReason = "RestoreFailed"
 )
 
 // PlacementState is what the agent found on disk for one Project.
@@ -326,6 +335,13 @@ func SurveyVolumes(dataRoot, namespace, project string, volumes []v1.VolumeDef) 
 		if err != nil {
 			if os.IsNotExist(err) {
 				survey.Empty = append(survey.Empty, vol.Name)
+				continue
+			}
+			// An Agent that is not root cannot list a directory a container's
+			// user has taken over, as PostgreSQL does PGDATA. The Agent created
+			// it open to itself, so being shut out means something moved in.
+			if errors.Is(err, os.ErrPermission) {
+				survey.WithData = append(survey.WithData, vol.Name)
 				continue
 			}
 			return VolumeSurvey{}, fmt.Errorf("restore: inspect volume dir %q: %w", path, err)
