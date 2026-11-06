@@ -68,6 +68,7 @@ Available: `vm`, `srv`, `api`, `ctl`, `wait_for`, `expect`, `observe`, `power_of
 |---|---|
 | `join-tokens` | the 2026-11-06 CARA-138 trial |
 | `packages` | new with CARA-143; run it after `join-tokens` when both are given |
+| `node-authz` | new with CARA-140; run it first or alone (it reads the agents' kept Node tokens) |
 
 Porting the offline-retention and pgdiff-restore trials (2026-11-05) is follow-up work.
 
