@@ -12,8 +12,10 @@
 # agent, started again, must clean up through its cleanup obligation, which is
 # the one path where a Node reads a Project assigned elsewhere.
 #
-# Run it first or alone: it reads each agent's kept Node token, which
-# join-tokens scenario I replaces on node-b with AGENT_TOKEN_FILE.
+# It sends requests with each agent's kept Node token from
+# /var/lib/cara/identity. join-tokens leaves both valid (scenario I adds a
+# second token on node-b; scenario G re-enrols node-a after revoking it), so
+# the two can run in either order.
 
 P=authz-demo
 SECRET=authz-secret
