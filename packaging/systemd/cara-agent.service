@@ -1,0 +1,18 @@
+# Installed by the cara-agent package (CARA-143). Settings go in
+# /etc/cara/agent.env; local changes to this unit go in a drop-in
+# (systemctl edit cara-agent), which an upgrade does not overwrite.
+[Unit]
+Description=Caravanserai Node agent
+Documentation=https://github.com/NYCU-SDC/caravanserai
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+EnvironmentFile=/etc/cara/agent.env
+ExecStart=/usr/bin/cara-agent
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,18 @@
+# nfpm config for the caractl package (CARA-143). Built by
+# scripts/release/package.sh, which sets CARA_VERSION and CARA_ARCH and runs nfpm
+# in a staging directory holding packaging/ and the binaries under bin/.
+name: caractl
+arch: ${CARA_ARCH}
+platform: linux
+version: ${CARA_VERSION}
+version_schema: none
+section: admin
+priority: optional
+maintainer: NYCU-SDC <https://github.com/NYCU-SDC/caravanserai>
+homepage: https://github.com/NYCU-SDC/caravanserai
+description: |-
+  Command-line client for the Caravanserai control plane.
+contents:
+  - src: bin/caractl
+    dst: /usr/bin/caractl
+    file_info: {mode: 0755}
