@@ -17,9 +17,9 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "caractrl",
-	Short: "caractrl — CLI for the Caravanserai control plane",
-	Long: `caractrl is the command-line interface for Caravanserai.
+	Use:   "caractl",
+	Short: "caractl — CLI for the Caravanserai control plane",
+	Long: `caractl is the command-line interface for Caravanserai.
 It communicates with cara-server to manage Nodes, Projects, and cluster state.`,
 }
 
@@ -27,7 +27,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print version information",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("caractrl %s (commit %s, built %s)\n", Version, CommitHash, BuildTime)
+		fmt.Fprintf(cmd.OutOrStdout(), "caractl %s (commit %s, built %s)\n", Version, CommitHash, BuildTime)
 	},
 }
 
@@ -60,11 +60,16 @@ func init() {
 	rootCmd.AddCommand(cli.NewOverlayCmd())
 	rootCmd.AddCommand(cli.NewTokenCmd())
 	rootCmd.AddCommand(cli.NewRolloutCmd())
+	rootCmd.AddCommand(cli.NewWaitCmd())
+	rootCmd.AddCommand(cli.NewExplainCmd())
+
+	// Last, so it covers every parent command added above.
+	cli.RejectUnknownSubcommands(rootCmd)
 }
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-		os.Exit(1)
+		os.Exit(cli.ExitCode(err))
 	}
 }

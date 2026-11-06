@@ -21,7 +21,7 @@ import (
 //
 // Usage:
 //
-//	caractrl port-forward <project>/<service> [LOCAL_PORT:]REMOTE_PORT [--node <agentAddr>]
+//	caractl port-forward <project>/<service> [LOCAL_PORT:]REMOTE_PORT [--node <agentAddr>]
 func NewPortForwardCmd() *cobra.Command {
 	var nodeAddr string
 
@@ -33,16 +33,16 @@ WebSocket tunnel. This works similarly to kubectl port-forward.
 
 Examples:
   # Forward local port 5432 to the "db" service's port 5432 in project "my-app"
-  caractrl port-forward my-app/db 5432
+  caractl port-forward my-app/db 5432
 
   # Forward local port 15432 to remote port 5432
-  caractrl port-forward my-app/db 15432:5432
+  caractl port-forward my-app/db 15432:5432
 
   # Specify Agent by node name (resolved via server API)
-  caractrl port-forward my-app/db 5432 --node main
+  caractl port-forward my-app/db 5432 --node main
 
   # Specify Agent address explicitly
-  caractrl port-forward my-app/db 5432 --node 192.168.1.100:9090`,
+  caractl port-forward my-app/db 5432 --node 192.168.1.100:9090`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
