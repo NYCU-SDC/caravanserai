@@ -358,7 +358,7 @@ func (r *DockerRuntime) removeProjectResources(ctx context.Context, namespace, p
 
 	plan := planVolumeRemoval(r.dataRoot, namespace, projectName, spec.Volumes)
 	for _, path := range plan.retainedManagedPaths {
-		// Managed data is retained on delete — a `caractrl delete` typo must not
+		// Managed data is retained on delete — a `caractl delete` typo must not
 		// destroy a database. Log the host path so an operator can reclaim it.
 		log.Info("Retaining managed volume data on host", zap.String("path", path))
 	}
