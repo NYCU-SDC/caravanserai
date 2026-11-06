@@ -11,8 +11,8 @@ import (
 //
 // Usage:
 //
-//	caractrl delete node <name>
-//	caractrl delete project <name>
+//	caractl delete node <name>
+//	caractl delete project <name>
 func NewDeleteCmd() *cobra.Command {
 	deleteCmd := &cobra.Command{
 		Use:   "delete <resource> <name>",

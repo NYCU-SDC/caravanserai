@@ -315,6 +315,8 @@ These flags are global, so they work on either side of the subcommand:
 | `--output` | `-o` | | `table` | Output format: `table` \| `json` \| `yaml` |
 | | | `CARA_TOKEN` | _(none)_ | Bearer token sent on every request. There is no flag, to keep it out of process listings |
 
+If an LLM agent or a script drives caractl, read [cmd/caractl/README.md](cmd/caractl/README.md): exit codes, `caractl wait`, `caractl explain`, and the JSON each command prints.
+
 `--server` resolves in this order: the explicit flag, then `$CARA_SERVER`, then
 the localhost default. So on the server box it needs no configuration; from a
 remote machine, set `CARA_SERVER` once instead of repeating `--server` on every

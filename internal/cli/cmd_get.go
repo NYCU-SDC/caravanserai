@@ -12,10 +12,10 @@ import (
 //
 // Usage:
 //
-//	caractrl get nodes
-//	caractrl get nodes <name>
-//	caractrl get projects [--phase <phase>]
-//	caractrl get projects <name>
+//	caractl get nodes
+//	caractl get nodes <name>
+//	caractl get projects [--phase <phase>]
+//	caractl get projects <name>
 func NewGetCmd() *cobra.Command {
 	getCmd := &cobra.Command{
 		Use:   "get <resource> [name]",

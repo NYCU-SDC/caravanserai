@@ -62,9 +62,16 @@ func newTokenListCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
 			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
+			outputFmt, _ := cmd.Root().PersistentFlags().GetString("output")
 			tokens, err := NewClient(serverURL).listTokens(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("list tokens: %w", err)
+			}
+			switch outputFmt {
+			case "json":
+				return printJSON(cmd.OutOrStdout(), tokens)
+			case "yaml":
+				return printYAML(cmd.OutOrStdout(), tokens)
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "ID\tPRINCIPAL\tCREATED BY\tCREATED\tREVOKED")

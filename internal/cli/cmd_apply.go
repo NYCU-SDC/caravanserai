@@ -18,8 +18,8 @@ import (
 //
 // Usage:
 //
-//	caractrl apply -f manifest.yaml
-//	caractrl apply -f -             # read from stdin
+//	caractl apply -f manifest.yaml
+//	caractl apply -f -             # read from stdin
 func NewApplyCmd() *cobra.Command {
 	var (
 		filename string
@@ -36,10 +36,10 @@ The kind field in the manifest determines which API endpoint is called.
 Supported kinds: Node, Project, Secret
 
 Examples:
-  caractrl apply -f node.yaml
-  caractrl apply -f project.yaml
-  cat project.yaml | caractrl apply -f -
-  caractrl apply -f project.yaml --wait --timeout 5m`,
+  caractl apply -f node.yaml
+  caractl apply -f project.yaml
+  cat project.yaml | caractl apply -f -
+  caractl apply -f project.yaml --wait --timeout 5m`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
 			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
@@ -80,7 +80,7 @@ Examples:
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 			defer cancel()
-			return waitForProject(ctx, client, project.Name, cmd.ErrOrStderr(), projectWaitInterval)
+			return waitForProject(ctx, client, project.Name, cmd.ErrOrStderr(), waitInterval)
 		},
 	}
 
@@ -90,48 +90,6 @@ Examples:
 	_ = applyCmd.MarkFlagRequired("filename")
 
 	return applyCmd
-}
-
-// projectWaitInterval is how often --wait reads the Project.
-const projectWaitInterval = 2 * time.Second
-
-// waitForProject polls until the Project is Running, and prints each new phase
-// or blocking reason so a wait that will not end explains itself. It returns an
-// error if the Project reaches Failed or ctx ends first.
-func waitForProject(ctx context.Context, client *Client, name string, progress io.Writer, interval time.Duration) error {
-	last := ""
-	for {
-		project, err := client.GetProject(ctx, name)
-		if err != nil {
-			// The deadline can land during the read as easily as between reads,
-			// and the reason the Project was waiting is what the caller needs.
-			if ctx.Err() != nil && last != "" {
-				return fmt.Errorf("timed out waiting for project %q: %s", name, last)
-			}
-			return fmt.Errorf("wait for project %q: %w", name, err)
-		}
-		state := string(project.Status.Phase)
-		for _, c := range project.Status.Conditions {
-			if c.Type != v1.ConditionTypePhase && c.Status == v1.ConditionTrue && c.Message != "" {
-				state += fmt.Sprintf("; %s: %s", c.Type, c.Message)
-			}
-		}
-		if state != last {
-			fmt.Fprintf(progress, "project/%s %s\n", name, state)
-			last = state
-		}
-		switch project.Status.Phase {
-		case v1.ProjectPhaseRunning:
-			return nil
-		case v1.ProjectPhaseFailed:
-			return fmt.Errorf("project %q is Failed: %s", name, state)
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for project %q: %s", name, last)
-		case <-time.After(interval):
-		}
-	}
 }
 
 // readManifest reads the manifest bytes from a file path or stdin ("-").

@@ -2,8 +2,8 @@
 //
 // Routes:
 //
-//	caractrl describe node <name>     — detailed Node output
-//	caractrl describe project <name>  — detailed Project output
+//	caractl describe node <name>     — detailed Node output
+//	caractl describe project <name>  — detailed Project output
 package cli
 
 import (
@@ -25,8 +25,8 @@ import (
 //
 // Usage:
 //
-//	caractrl describe node <name>
-//	caractrl describe project <name>
+//	caractl describe node <name>
+//	caractl describe project <name>
 func NewDescribeCmd() *cobra.Command {
 	describeCmd := &cobra.Command{
 		Use:   "describe <resource-type> <name>",
