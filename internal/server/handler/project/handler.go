@@ -32,6 +32,7 @@ import (
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/server/authz"
 	"NYCU-SDC/caravanserai/internal/store"
 
 	handlerutil "github.com/NYCU-SDC/summer/pkg/handler"
@@ -909,7 +910,22 @@ func (h *Handler) resolveFence(
 			fmt.Errorf("%w: project %q: request is missing an assignment fence", store.ErrStaleAssignment, name), logger)
 		return store.AssignmentRef{}, false
 	}
+	if !h.fenceOwnedByCaller(ctx, w, logger, nodeRef) {
+		return store.AssignmentRef{}, false
+	}
 	return store.AssignmentRef{UID: uid, NodeRef: nodeRef, Generation: *generation}, true
+}
+
+// fenceOwnedByCaller refuses a Node that presents another Node's fence
+// (CARA-140). Every fenced write passes through it, via resolveFence or
+// decodeEvidenceFence; the flag is false when the problem is written.
+func (h *Handler) fenceOwnedByCaller(ctx context.Context, w http.ResponseWriter, logger *zap.Logger, nodeRef string) bool {
+	if err := authz.RequireFenceOwner(ctx, nodeRef); err != nil {
+		logger.Warn("Refused a fenced write", zap.Error(err))
+		h.problemWriter.WriteError(ctx, w, err, logger)
+		return false
+	}
+	return true
 }
 
 // patchStatus handles PATCH /api/v1/projects/{name}/status.
@@ -1241,6 +1257,9 @@ func (h *Handler) putStanza(w http.ResponseWriter, r *http.Request) {
 			fmt.Errorf("%w: project %q: a stanza requires a complete assignment fence", store.ErrStaleAssignment, name), logger)
 		return
 	}
+	if !h.fenceOwnedByCaller(traceCtx, w, logger, req.NodeRef) {
+		return
+	}
 
 	project, err := h.store.GetProject(traceCtx, name)
 	if err != nil {
@@ -1290,6 +1309,9 @@ func (h *Handler) putBackupCompletion(w http.ResponseWriter, r *http.Request) {
 	if req.UID == "" || req.NodeRef == "" || req.AssignmentGeneration == nil {
 		h.problemWriter.WriteError(traceCtx, w,
 			fmt.Errorf("%w: project %q: a backup completion requires a complete assignment fence", store.ErrStaleAssignment, name), logger)
+		return
+	}
+	if !h.fenceOwnedByCaller(traceCtx, w, logger, req.NodeRef) {
 		return
 	}
 	if !backupIDPattern.MatchString(backupID) {
@@ -1365,6 +1387,9 @@ func (h *Handler) decodeEvidenceFence(ctx context.Context, w http.ResponseWriter
 	if req.UID == "" || req.NodeRef == "" || req.AssignmentGeneration == nil {
 		h.problemWriter.WriteError(ctx, w,
 			fmt.Errorf("%w: project %q: evidence requires a complete assignment fence", store.ErrStaleAssignment, name), logger)
+		return store.AssignmentRef{}, false
+	}
+	if !h.fenceOwnedByCaller(ctx, w, logger, req.NodeRef) {
 		return store.AssignmentRef{}, false
 	}
 	return store.AssignmentRef{UID: req.UID, NodeRef: req.NodeRef, Generation: *req.AssignmentGeneration}, true

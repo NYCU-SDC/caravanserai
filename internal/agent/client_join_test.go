@@ -80,4 +80,25 @@ func TestClient_LogsARefusedTokenOnce(t *testing.T) {
 	assert.Equal(t, 1, logs.FilterMessageSnippet("accepts this Node's token again").Len())
 }
 
+// Every 403 is logged with the request it refused, and the call still fails
+// the ordinary way so its caller keeps treating it as transient (CARA-140).
+func TestClient_LogsEachForbiddenRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	core, logs := observer.New(zap.InfoLevel)
+	c := NewClient(zap.New(core), server.URL, "node-1")
+	c.SetToken("cara_node")
+	for range 2 {
+		_, err := c.GetSecret(context.Background(), "s")
+		assert.Error(t, err)
+	}
+	forbidden := logs.FilterMessageSnippet("forbade a request")
+	assert.Equal(t, 2, forbidden.Len())
+	assert.Equal(t, "/api/v1/secrets/s", forbidden.All()[0].ContextMap()["path"])
+	assert.Equal(t, 0, logs.FilterMessageSnippet("refused this Node's token").Len(), "a 403 is not a revoked token")
+}
+
 func errorsIsJoinRefused(err error) bool { return errors.Is(err, ErrJoinRefused) }

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/server/auth"
 	"NYCU-SDC/caravanserai/internal/server/handler"
 	"NYCU-SDC/caravanserai/internal/store"
 
@@ -387,4 +388,58 @@ func TestDeleteImmediateRacesFirstAssignment(t *testing.T) {
 			t.Fatalf("deleteCalls = %d, uidStatusCalls = %d; the new lifetime was touched", s.deleteCalls, s.uidStatusCalls)
 		}
 	})
+}
+
+// A Node may present only its own fence (CARA-140). The refusal comes before
+// any store write; an admin is not restricted.
+func TestFenceNamingAnotherNodeIsForbidden(t *testing.T) {
+	asNode := func(r *http.Request, node string) *http.Request {
+		return r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{Kind: v1.APITokenKindNode, Name: node}))
+	}
+	body := `{"phase":"Running","uid":"uid-1","nodeRef":"node-a","assignmentGeneration":5}`
+
+	for _, tc := range []struct {
+		caller string
+		want   int
+	}{{"node-b", http.StatusForbidden}, {"node-a", http.StatusNoContent}} {
+		s := &fenceFakeStore{}
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/demo/status", strings.NewReader(body))
+		req.SetPathValue("name", "demo")
+		rec := httptest.NewRecorder()
+		newFenceHandler(s).patchStatus(rec, asNode(req, tc.caller))
+		if rec.Code != tc.want {
+			t.Fatalf("status write as %s = %d, want %d; body %s", tc.caller, rec.Code, tc.want, rec.Body.String())
+		}
+		if tc.want == http.StatusForbidden && s.fencedStatusCalls != 0 {
+			t.Fatalf("store written despite the refusal")
+		}
+	}
+
+	// Every other fenced path: the fake store panics if reached.
+	evidence := `{"uid":"uid-1","nodeRef":"node-a","assignmentGeneration":5}`
+	paths := []struct {
+		path string
+		body string
+		call func(*Handler, http.ResponseWriter, *http.Request)
+	}{
+		{"/recovery/resources-removed", evidence, (*Handler).putResourcesRemoved},
+		{"/recovery/workload-stopped", evidence, (*Handler).putWorkloadStopped},
+		{"/recovery/managed-data-quarantined", evidence, (*Handler).putManagedDataQuarantined},
+		{"/recovery/committed-backup", `{"uid":"uid-1","nodeRef":"node-a","assignmentGeneration":5,"backupID":"20261106T000000Z-0a1b2c3d"}`, (*Handler).putCommittedBackup},
+		{"/backup/stanzas", `{"uid":"uid-1","nodeRef":"node-a","assignmentGeneration":5,"volume":"db"}`, (*Handler).putStanza},
+		{"/backup/completions/20261106T000000Z-0a1b2c3d", `{"uid":"uid-1","nodeRef":"node-a","assignmentGeneration":5,"items":[]}`, (*Handler).putBackupCompletion},
+		{"/conditions/Maintenance", `{"status":"True","uid":"uid-1","nodeRef":"node-a","assignmentGeneration":5}`, (*Handler).patchCondition},
+		{"/conditions/Maintenance?uid=uid-1&nodeRef=node-a&assignmentGeneration=5", "", (*Handler).deleteCondition},
+	}
+	for _, p := range paths {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/projects/demo"+p.path, strings.NewReader(p.body))
+		req.SetPathValue("name", "demo")
+		req.SetPathValue("type", "Maintenance")
+		req.SetPathValue("backupID", "20261106T000000Z-0a1b2c3d")
+		rec := httptest.NewRecorder()
+		p.call(newFenceHandler(&fenceFakeStore{}), rec, asNode(req, "node-b"))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s as node-b = %d, want 403; body %s", p.path, rec.Code, rec.Body.String())
+		}
+	}
 }

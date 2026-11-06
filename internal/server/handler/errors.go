@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"NYCU-SDC/caravanserai/internal/server/auth"
+	"NYCU-SDC/caravanserai/internal/server/authz"
 	"NYCU-SDC/caravanserai/internal/store"
 
 	"github.com/NYCU-SDC/summer/pkg/problem"
@@ -24,8 +25,9 @@ var ErrServiceNotConfigured = errors.New("service not configured")
 var ErrOperatorUnauthorized = errors.New("operator credential required")
 
 // ErrForbidden is returned when the authenticated caller may not make the
-// request.
-var ErrForbidden = errors.New("forbidden")
+// request. It is authz.ErrForbidden, so a refusal from either package maps to
+// 403.
+var ErrForbidden = authz.ErrForbidden
 
 // ErrInvalidJoinToken is returned when a Node join presents no join token, or
 // one that is unknown, used, revoked or expired.

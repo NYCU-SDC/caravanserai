@@ -22,6 +22,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/server/agentdialer"
 	"NYCU-SDC/caravanserai/internal/server/apiserver"
 	"NYCU-SDC/caravanserai/internal/server/auth"
+	"NYCU-SDC/caravanserai/internal/server/authz"
 	"NYCU-SDC/caravanserai/internal/server/handler"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
 	projecthandler "NYCU-SDC/caravanserai/internal/server/handler/project"
@@ -119,6 +120,7 @@ func run(m *testing.M) int {
 	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
 	apiSrv.Register(tokenhandler.NewHandler(logger, pgStore, problemWriter))
 	apiSrv.RequireAuthentication(auth.NewAuthenticator(logger, pgStore, testAdminToken))
+	apiSrv.RequireAuthorization(authz.New(logger, pgStore))
 
 	ts := httptest.NewServer(apiSrv.Handler())
 	defer ts.Close()
