@@ -142,3 +142,6 @@ test/overlay/.tmp/
 
 # test/vm/run.sh default record directory
 .vmtest/
+
+# make package output (CARA-143)
+/dist/

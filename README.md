@@ -55,7 +55,45 @@ Pending ──(scheduler)──▶ Scheduled ──(agent)──▶ Running
 - Docker (daemon accessible at `unix:///var/run/docker.sock` or via `DOCKER_HOST`)
 - PostgreSQL (for `cara-server`)
 
+## Installing from a release
+
+Each release on the [Releases page](https://github.com/NYCU-SDC/caravanserai/releases) carries Debian/Ubuntu packages for amd64 and arm64. Each package installs a binary in `/usr/bin`, a systemd unit and a settings file in `/etc/cara`, and leaves its service disabled until that file is filled in. `caractl` also comes as a `.tar.gz` for Linux and macOS. `SHA256SUMS` lists the checksums.
+
+On the control-plane machine, with PostgreSQL 16 already running:
+
+```bash
+sudo apt install ./cara-server_<version>_amd64.deb ./caractl_<version>_amd64.deb
+sudoedit /etc/cara/server.env          # set DATABASE_URL
+sudo systemctl enable --now cara-server
+export CARA_TOKEN="$(sudo cat /etc/cara/break-glass-token)"   # generated on install
+caractl node token create my-node      # prints a one-time join token
+```
+
+On each Node, with Docker installed:
+
+```bash
+sudo apt install ./cara-agent_<version>_amd64.deb
+sudoedit /etc/cara/agent.env           # set SERVER_URL, NODE_NAME, AGENT_ADVERTISE_IP
+sudo sh -c 'umask 077; cat > /etc/cara/join-token'   # paste the join token, then Ctrl-D
+sudo systemctl enable --now cara-agent
+```
+
+What the packages do to a running system:
+
+| Action | Service | Settings and data |
+|---|---|---|
+| install | installed, disabled, stopped | `/etc/cara/*.env` from the template; cara-server also generates `/etc/cara/break-glass-token` (0600) if none exists |
+| upgrade or reinstall | restarted if it was running | edited `.env` files and the break-glass token are kept |
+| `apt remove` | stopped and disabled | `.env` files, tokens, and `/var/lib/cara` (the agent's identity and data) are kept; installing again and `systemctl enable --now` brings the Node back with its kept identity |
+| `apt purge` | | the `.env` files are removed as well; tokens and `/var/lib/cara` are still kept |
+
+A crashed service is restarted by systemd after 5 s (`Restart=on-failure`). A clean stop through `systemctl stop` is not restarted.
+
+Releases are cut by pushing a `v*` tag (`v0.1.0`, or `v0.1.0-rc.1` for a prerelease). The [Release workflow](.github/workflows/release.yml) builds the packages with `scripts/release/package.sh`, installs them on its runner, and publishes them. `make package` builds the same packages locally into `dist/`.
+
 ## Quick Start
+
+The steps below run cara from source, for development. To install it on servers, see [Installing from a release](#installing-from-a-release).
 
 ### 1. Build all binaries
 

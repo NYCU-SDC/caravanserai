@@ -3,6 +3,8 @@ BLUE = \033[0;34m
 RED = \033[0;31m
 NC = \033[0m
 
+include version.mk
+
 all: build
 
 prepare:
@@ -18,6 +20,18 @@ build:
 	@$(MAKE) -C cmd/cara-agent build
 	@$(MAKE) -C cmd/caractl build
 	@echo -e "==> $(BLUE)All binaries built successfully$(NC)"
+
+# package builds the release packages for one architecture into dist/ with
+# scripts/release/package.sh, the script the release workflow and test/vm use.
+#   make package               the host's architecture
+#   make package ARCH=amd64
+ARCH ?= $(shell go env GOARCH)
+
+package:
+	@echo -e ":: $(GREEN)Packaging cara $(CARA_VERSION) for linux/$(ARCH)...$(NC)"
+	@scripts/release/package.sh $(ARCH) dist \
+		&& echo -e "==> $(BLUE)Packages are in dist/$(NC)" \
+		|| (echo -e "==> $(RED)Packaging failed$(NC)" && exit 1)
 
 run-server:
 	@$(MAKE) -C cmd/cara-server run
@@ -205,7 +219,7 @@ install-hooks:
 		&& echo -e "==> $(BLUE)Git hooks installed (using .githooks/)$(NC)" \
 		|| (echo -e "==> $(RED)Failed to configure git hooks$(NC)" && exit 1)
 
-.PHONY: all prepare build run-server run-agent run-cli test test-integration test-orphan-e2e test-recovery-e2e test-managed-failover-e2e test-pgdiff-e2e schemas
+.PHONY: all prepare build package run-server run-agent run-cli test test-integration test-orphan-e2e test-recovery-e2e test-managed-failover-e2e test-pgdiff-e2e schemas
 .PHONY: dev-up dev-down dev-reset dev-server dev-logs install-hooks
 .PHONY: walg-backup walg-restore walg-verify
 .PHONY: build-cara-postgres-image test-cara-postgres-image

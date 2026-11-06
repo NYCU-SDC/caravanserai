@@ -12,9 +12,9 @@ test/vm/run.sh --commit <sha> --out ../test-records/$(date -u +%F)-<short-sha> j
 
 `run.sh`, in order:
 
-1. builds the commit from a detached worktree, so the working tree never leaks in. Without `--commit` it uses HEAD, and refuses if there are uncommitted changes.
+1. builds the commit's release packages from a detached worktree with `scripts/release/package.sh`, the script a release uses, so the working tree never leaks in. Without `--commit` it uses HEAD, and refuses if there are uncommitted changes.
 2. creates `vt-server`, `vt-node-a` and `vt-node-b`.
-3. deploys cara-server (PostgreSQL, break-glass token) and two agents under systemd, and enrols the agents with join tokens. With `needs: s3` it also deploys MinIO over TLS. With `needs: pgdiff` it builds `cara-postgres:16` from the commit into a registry on the server.
+3. installs the packages the way an operator would: `cara-server` and `caractl` on the server (with PostgreSQL in Docker), `cara-agent` on the two Nodes, settings appended to the env files the packages install. Then it enrols the agents with join tokens. With `needs: s3` it also deploys MinIO over TLS. With `needs: pgdiff` it builds `cara-postgres:16` from the commit into a registry on the server.
 4. runs the scenarios in the order given.
 5. collects the server's and agents' journals.
 6. writes `README.md` and `results.jsonl` into `--out`, which defaults to `.vmtest/<date>-<sha>/`.
@@ -62,11 +62,12 @@ Server-only logic, API fields, CLI output and docs do not need it.
 
 Choose cases from the failure-mode table in the ticket, not from the code. For each state the change touches (a file, a row, a setting, a process), ask what happens when it is missing, empty, half written, left by an older version, changed concurrently, wrongly owned, or deleted by an operator.
 
-Available: `vm`, `srv`, `api`, `ctl`, `wait_for`, `expect`, `observe`, `power_off`, `field`, `cond`, `heartbeat_after`, `vm_for_node`, `vm_now`, `agent_log_since`, `agent_log_count`, `enrol_agent`, `put_join_token`, `install_binary` (see `lib/`).
+Available: `vm`, `srv`, `api`, `ctl`, `wait_for`, `expect`, `observe`, `power_off`, `field`, `cond`, `heartbeat_after`, `vm_for_node`, `vm_now`, `agent_log_since`, `agent_log_count`, `enrol_agent`, `put_join_token`, `install_package`, `install_state`, `install_binary` (see `lib/`). Inside a scenario `$bin` is the build directory: the packages as `$bin/<package>.deb`, the bare binaries in `$bin/bin/`.
 
 | Scenario | Ported from |
 |---|---|
 | `join-tokens` | the 2026-11-06 CARA-138 trial |
+| `packages` | new with CARA-143; run it after `join-tokens` when both are given |
 
 Porting the offline-retention and pgdiff-restore trials (2026-11-05) is follow-up work.
 
