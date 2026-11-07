@@ -8,6 +8,7 @@
 //	GET    /api/v1/projects/{name}           — get a single Project
 //	DELETE /api/v1/projects/{name}           — delete a Project (supports ?force=true for immediate hard-delete)
 //	PATCH  /api/v1/projects/{name}/status    — Agent reports observed phase (Running / Failed / Terminated)
+//	PUT    /api/v1/projects/{name}/status/spec-applied  — assigned Agent reports whether a spec revision runs
 //	PATCH  /api/v1/projects/{name}/conditions/{type}  — Agent sets one condition without touching phase
 //	DELETE /api/v1/projects/{name}/conditions/{type}  — Agent clears one condition
 //	PUT    /api/v1/projects/{name}/recovery/workload-stopped   — assigned Agent records that every container is stopped
@@ -92,6 +93,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("GET /api/v1/projects/{name}", mid.HandlerFunc(h.getProject))
 	mux.HandleFunc("DELETE /api/v1/projects/{name}", mid.HandlerFunc(h.deleteProject))
 	mux.HandleFunc("PATCH /api/v1/projects/{name}/status", mid.HandlerFunc(h.patchStatus))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/status/spec-applied", mid.HandlerFunc(h.putSpecApplied))
 	mux.HandleFunc("PATCH /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.patchCondition))
 	mux.HandleFunc("DELETE /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.deleteCondition))
 	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/workload-stopped", mid.HandlerFunc(h.putWorkloadStopped))
@@ -559,14 +561,24 @@ func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Checked here for a clear field-level answer; the store repeats the check
-	// inside its update, which is what holds against a concurrent update.
-	if current, err := h.store.GetProject(traceCtx, name); err == nil && !v1.SameBackupItems(current.Spec, project.Spec) {
-		h.problemWriter.WriteError(traceCtx, w,
-			handlerutil.NewValidationError("spec.backup.items", nil,
-				"spec.backup.items cannot change after the Project is created; in-place changes of backup strategy or retainFull are not supported"),
-			logger)
-		return
+	// Checked here for a clear field-level answer; the store repeats both
+	// checks on the row it writes, which is what holds against a concurrent
+	// update or an assignment landing in between.
+	if current, err := h.store.GetProject(traceCtx, name); err == nil {
+		if !v1.SameBackupItems(current.Spec, project.Spec) {
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError("spec.backup.items", nil,
+					"spec.backup.items cannot change after the Project is created; in-place changes of backup strategy or retainFull are not supported"),
+				logger)
+			return
+		}
+		if current.Status.NodeRef != "" {
+			if refusal := v1.CheckAssignedSpecChange(current.Spec, project.Spec); refusal != nil {
+				h.problemWriter.WriteError(traceCtx, w,
+					handlerutil.NewValidationError(refusal.Field, nil, refusal.Message), logger)
+				return
+			}
+		}
 	}
 
 	// TODO: add metadata.resourceVersion / optimistic concurrency in a future PR.
@@ -1040,6 +1052,62 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 		zap.String("phase", string(req.Phase)),
 	)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// specAppliedRequest is the body of PUT /api/v1/projects/{name}/status/spec-applied.
+type specAppliedRequest struct {
+	UID                  string `json:"uid"`
+	NodeRef              string `json:"nodeRef"`
+	AssignmentGeneration *int64 `json:"assignmentGeneration"`
+	// SpecRevision is the metadata.specRevision the report is about.
+	SpecRevision int64 `json:"specRevision"`
+	// Applied is true once every service runs SpecRevision. False reports an
+	// update that failed before anything was stopped, with Reason saying why.
+	Applied bool   `json:"applied"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// putSpecApplied handles PUT /api/v1/projects/{name}/status/spec-applied.
+//
+// The assigned Agent reports whether its containers run a spec revision.
+// SpecApplied is not in agentWritableConditions: the server owns how a
+// report turns into status.observedSpecRevision and the condition, and
+// refuses a revision the spec has not reached.
+func (h *Handler) putSpecApplied(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putSpecApplied")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	var req specAppliedRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return
+	}
+	if req.SpecRevision < 1 {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("specRevision", req.SpecRevision, "specRevision must be at least 1"), logger)
+		return
+	}
+	if !req.Applied && req.Reason == "" {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("reason", nil, "reason is required when applied is false"), logger)
+		return
+	}
+	ref, ok := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
+	if !ok {
+		return
+	}
+	err := h.store.RecordSpecApplied(traceCtx, name, ref, store.SpecAppliedReport{
+		Revision: req.SpecRevision,
+		Applied:  req.Applied,
+		Reason:   req.Reason,
+		Message:  req.Message,
+		At:       time.Now().UTC(),
+	})
+	h.writeEvidenceResult(traceCtx, w, logger, name, "SpecApplied", err)
 }
 
 // agentWritableConditions are the condition types an agent may write.

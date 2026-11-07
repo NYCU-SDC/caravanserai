@@ -95,6 +95,19 @@ type AssignmentRef struct {
 	Generation int64
 }
 
+// SpecAppliedReport is what an Agent reports about one spec revision.
+type SpecAppliedReport struct {
+	// Revision is the metadata.specRevision the report is about.
+	Revision int64
+	// Applied is true when every service runs Revision. False means the
+	// update failed before anything was stopped; Reason and Message say why.
+	Applied bool
+	Reason  string
+	Message string
+	// At is when the Agent observed it.
+	At time.Time
+}
+
 // Store is the top-level persistence interface.  A single concrete type
 // (e.g. sqlite.Store) implements all methods; tests may implement a subset
 // via a narrow sub-interface or a hand-rolled stub.
@@ -445,12 +458,27 @@ type ProjectStore interface {
 	// when the Project is not Running.
 	RecordBackupCompletion(ctx context.Context, name string, ref AssignmentRef, completion v1.BackupCompletion) error
 
-	// UpdateProjectSpec writes only the user-mutable fields of a Project
-	// (spec, labels, annotations). Status is preserved. The update is only
-	// allowed when the project's current phase is Pending or Failed; returns
-	// ErrConflictState if the project is in any other phase, and ErrNotFound
-	// if it does not exist.
+	// UpdateProjectSpec writes the user-mutable fields of a Project (spec,
+	// labels, annotations). When the spec's content changed it increments
+	// metadata.specRevision and sets SpecApplied False in the same write; the
+	// rest of the status is preserved, except that the retry budget starts
+	// over. The update is only allowed when the project's current phase is
+	// Pending or Failed. Returns ErrConflictState for another phase, for a
+	// change of backup items, and, while the Project is assigned to a Node,
+	// for a change v1.CheckAssignedSpecChange refuses; ErrNotFound if it does
+	// not exist. On success project.SpecRevision and ResourceVersion hold the
+	// stored values.
 	UpdateProjectSpec(ctx context.Context, project *v1.Project) error
+
+	// RecordSpecApplied is the assigned Agent's report on a spec revision,
+	// through the same fence as ReportProjectStatusFenced. An applied report
+	// raises status.observedSpecRevision (it never goes back); a report about
+	// the latest revision also sets SpecApplied, True when applied and False
+	// with the report's reason otherwise. Returns ErrConflictState for a
+	// revision newer than metadata.specRevision or a Project that is not
+	// Scheduled, Running or Failed, and ErrStaleAssignment for a fence that is
+	// not current.
+	RecordSpecApplied(ctx context.Context, name string, ref AssignmentRef, report SpecAppliedReport) error
 
 	// ListProjectsByNodeRef returns all Projects assigned to the given node
 	// whose phase is one of the supplied phases.  Used by

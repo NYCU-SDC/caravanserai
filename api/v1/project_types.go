@@ -588,6 +588,11 @@ type ProjectStatus struct {
 	// Conditions is a list of granular observable states.
 	Conditions []Condition `json:"conditions,omitempty" yaml:"conditions,omitempty"`
 
+	// ObservedSpecRevision is the latest metadata.specRevision the assigned
+	// Agent has reported running in full. It never exceeds specRevision and
+	// never goes back. While it is behind, the SpecApplied condition says why.
+	ObservedSpecRevision int64 `json:"observedSpecRevision,omitempty" yaml:"observedSpecRevision,omitempty"`
+
 	// Recovery is the durable state of cross-Node recovery: retry bookkeeping
 	// and the evidence that lets an assignment be released or a record be
 	// deleted. It lives here rather than in Condition messages because it must
