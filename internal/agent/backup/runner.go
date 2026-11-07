@@ -404,7 +404,7 @@ func (r *Runner) writeManifest(
 	manifest := BuildManifest(
 		backupID, key.Namespace, key.Name,
 		r.cfg.NodeName, r.cfg.CaraVersion,
-		project.ResourceVersion, r.now(), entries,
+		project.SpecRevision, r.now(), entries,
 	)
 	manifest.ProjectUID = project.ObjectMeta.UID
 	manifestBytes, err := manifest.Marshal()

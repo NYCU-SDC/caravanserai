@@ -122,10 +122,8 @@ func TestAssignedSpecChangesAreRefused(t *testing.T) {
 		require.Equal(t, http.StatusOK, code)
 	})
 
-	// Failed keeps its nodeRef and is the one assigned phase that accepts an
-	// update before stage 2 opens Scheduled and Running.
 	require.NoError(t, projects.SetProjectScheduled(ctx, name, "node-a"))
-	require.NoError(t, projects.SetProjectPhase(ctx, name, v1.ProjectPhaseFailed, "Test", ""))
+	require.NoError(t, projects.SetProjectPhase(ctx, name, v1.ProjectPhaseRunning, "Test", ""))
 	before := getProject(t, name)
 	require.Equal(t, "node-a", before.Status.NodeRef)
 
@@ -167,7 +165,13 @@ func TestAssignedSpecChangesAreRefused(t *testing.T) {
 		assert.Equal(t, before.UID, p.UID)
 		assert.Equal(t, before.Status.NodeRef, p.Status.NodeRef)
 		assert.Equal(t, before.Status.AssignmentGeneration, p.Status.AssignmentGeneration)
-		assert.Equal(t, v1.ProjectPhaseFailed, p.Status.Phase)
+		assert.Equal(t, v1.ProjectPhaseRunning, p.Status.Phase)
+	})
+
+	t.Run("Failed with its nodeRef is still assigned", func(t *testing.T) {
+		require.NoError(t, projects.SetProjectPhase(ctx, name, v1.ProjectPhaseFailed, "Test", ""))
+		code, _ := putSpec(t, name, resize, v1.ObjectMeta{})
+		assert.Equal(t, http.StatusBadRequest, code)
 	})
 }
 
@@ -213,9 +217,6 @@ func TestSpecAppliedReports(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, report("node-a", gen, 1, false, ""), "a failure needs a reason")
 	})
 
-	// Reach revision 3 the way stage 1 allows: Failed keeps the assignment
-	// and accepts updates.
-	require.NoError(t, adapter.NewProjectStoreAdapter(suite.store).SetProjectPhase(context.Background(), name, v1.ProjectPhaseFailed, "Test", ""))
 	for _, image := range []string{"nginx:1.28", "nginx:1.29"} {
 		code, _ := putSpec(t, name, v1.ProjectSpec{Services: []v1.ServiceDef{{Name: "web", Image: image}}}, v1.ObjectMeta{})
 		require.Equal(t, http.StatusOK, code)

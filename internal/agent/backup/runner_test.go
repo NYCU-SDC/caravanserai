@@ -245,7 +245,7 @@ func newHarness(t *testing.T, volumeNames ...string) *harness {
 
 	dataRoot := t.TempDir()
 	project := &v1.Project{
-		ObjectMeta: v1.ObjectMeta{Name: "blog", Namespace: "default", ResourceVersion: 7},
+		ObjectMeta: v1.ObjectMeta{Name: "blog", Namespace: "default", ResourceVersion: 9, SpecRevision: 7},
 		Spec: v1.ProjectSpec{
 			Services: []v1.ServiceDef{{Name: "web", Image: "nginx:alpine"}},
 			Backup:   &v1.ProjectBackupConfig{Interval: "168h"},
@@ -414,7 +414,7 @@ func TestRunWritesConsistentManifest(t *testing.T) {
 
 	assert.Equal(t, committed[0], manifest.BackupID, "the commit and manifest must agree on the generation")
 	assert.Equal(t, "node-a", manifest.SourceNode)
-	assert.Equal(t, int64(7), manifest.ProjectResourceVersion)
+	assert.Equal(t, int64(7), manifest.ProjectSpecRevision)
 	assert.Equal(t, "tar-offline", manifest.BackupMethod)
 	require.Len(t, manifest.Volumes, 2)
 

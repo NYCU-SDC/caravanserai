@@ -1651,7 +1651,7 @@ func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) erro
 		return err
 	}
 	if !slices.Contains(specUpdatablePhases, current.Status.Phase) {
-		return fmt.Errorf("%w: project %q is not in Pending or Failed phase", store.ErrConflictState, project.Name)
+		return fmt.Errorf("%w: project %q is %s; its spec can no longer change", store.ErrConflictState, project.Name, current.Status.Phase)
 	}
 	if !v1.SameBackupItems(current.Spec, project.Spec) {
 		return fmt.Errorf("%w: project %q: spec.backup.items cannot change after the Project is created",
@@ -1763,10 +1763,11 @@ func (s *Store) RecordSpecApplied(ctx context.Context, name string, ref store.As
 }
 
 // specUpdatablePhases are the phases in which UpdateProjectSpec accepts a
-// spec. Scheduled and Running join once the Agent recreates outdated
-// containers (CARA-134 stage 2); accepting them before would answer an update
-// with success while the containers keep running the old spec.
-var specUpdatablePhases = []v1.ProjectPhase{v1.ProjectPhasePending, v1.ProjectPhaseFailed}
+// spec. A Scheduled or Running Project's Agent recreates the containers the
+// update outdated (ADR-0026); Terminating and Terminated are on their way out.
+var specUpdatablePhases = []v1.ProjectPhase{
+	v1.ProjectPhasePending, v1.ProjectPhaseScheduled, v1.ProjectPhaseRunning, v1.ProjectPhaseFailed,
+}
 
 // ============================================================
 // SecretStore

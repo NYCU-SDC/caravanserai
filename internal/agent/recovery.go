@@ -116,6 +116,9 @@ type recoveryTracker struct {
 	// because it measures something else: not recovery attempts, but how
 	// long judgement has been deferred.
 	transientSince map[recoveryKey]time.Time
+
+	// specUpdates records failed spec update attempts (spec_update.go).
+	specUpdates map[recoveryKey]*specUpdateFailure
 }
 
 func newRecoveryTracker() *recoveryTracker {
@@ -123,6 +126,7 @@ func newRecoveryTracker() *recoveryTracker {
 		clock:          realClock{},
 		entries:        make(map[recoveryKey]*recoveryEntry),
 		transientSince: make(map[recoveryKey]time.Time),
+		specUpdates:    make(map[recoveryKey]*specUpdateFailure),
 	}
 }
 
@@ -249,6 +253,11 @@ func (t *recoveryTracker) retain(keys map[recoveryKey]struct{}) {
 	for k := range t.transientSince {
 		if _, ok := keys[k]; !ok {
 			delete(t.transientSince, k)
+		}
+	}
+	for k := range t.specUpdates {
+		if _, ok := keys[k]; !ok {
+			delete(t.specUpdates, k)
 		}
 	}
 }
