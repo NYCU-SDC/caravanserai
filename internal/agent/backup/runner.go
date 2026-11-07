@@ -19,7 +19,7 @@ import (
 
 // ContainerController stops and starts a Project's containers without
 // destroying them. Backup needs the volumes quiesced but the containers
-// intact, which neither ReconcileProject nor RemoveProject provides.
+// intact, which neither reconciling nor tearing a Project down provides.
 type ContainerController interface {
 	StopProject(ctx context.Context, project *v1.Project) error
 	StartProject(ctx context.Context, project *v1.Project) error
@@ -28,15 +28,18 @@ type ContainerController interface {
 // OwnershipResolver reports whether this node should still be running a
 // Project. It is consulted after a backup finishes, because the answer may
 // have changed while the containers were stopped — see
-// ShouldRestartContainers.
+// ShouldRestartContainers. uid and generation name the assignment the backup
+// started under; the answer is about that assignment, not about the Project's
+// name or Node.
 type OwnershipResolver interface {
-	Resolve(ctx context.Context, key ResourceKey) Ownership
+	Resolve(ctx context.Context, key ResourceKey, uid string, generation int64) Ownership
 }
 
 // ConditionReporter records the Maintenance condition on the server. It
-// exists for observability and as an input to the future recovery
-// controller; it is never what protects correctness, so every method's
-// failure is logged and ignored rather than aborting a backup.
+// exists for observability and as an input to the future recovery controller;
+// it is never what protects correctness. Failing to set it does stop a backup,
+// but only because it shows the commit could not succeed either. Failing to
+// clear it is logged and ignored.
 // The uid/nodeRef/generation triple is the assignment fence the server
 // validates the Maintenance write against (CARA-83). It is passed as primitives
 // rather than a shared type so this package stays free of any dependency on the
@@ -44,6 +47,13 @@ type OwnershipResolver interface {
 type ConditionReporter interface {
 	SetMaintenance(ctx context.Context, key ResourceKey, uid, nodeRef string, generation int64, reason string) error
 	ClearMaintenance(ctx context.Context, key ResourceKey, uid, nodeRef string, generation int64) error
+}
+
+// BackupCommitter asks the server to make a finished generation the Project's
+// restore source (ADR-0024 C1). Unlike ConditionReporter, its failure fails the
+// backup: an uncommitted generation is not a restore point.
+type BackupCommitter interface {
+	CommitBackup(ctx context.Context, key ResourceKey, uid, nodeRef string, generation int64, backupID string) error
 }
 
 // RouteRefresher re-points the ingress proxy at a Project's containers after
@@ -125,7 +135,7 @@ type Config struct {
 
 // Runner performs one Project-level backup generation. It owns the ordering
 // guarantees CARA-59 depends on — stop before archive, verify before
-// manifest, manifest before latest.json, restart on every exit path — while
+// manifest, manifest before commit, restart on every exit path — while
 // delegating every side effect to a narrow interface so the whole flow is
 // testable without Docker or a live object store.
 type Runner struct {
@@ -134,6 +144,7 @@ type Runner struct {
 	store       objectstore.ObjectStore
 	ownership   OwnershipResolver
 	conditions  ConditionReporter
+	committer   BackupCommitter
 	routes      RouteRefresher
 	cfg         Config
 	logger      *zap.Logger
@@ -153,6 +164,7 @@ func NewRunner(
 	store objectstore.ObjectStore,
 	ownership OwnershipResolver,
 	conditions ConditionReporter,
+	committer BackupCommitter,
 	routes RouteRefresher,
 	cfg Config,
 	logger *zap.Logger,
@@ -166,6 +178,7 @@ func NewRunner(
 		store:       store,
 		ownership:   ownership,
 		conditions:  conditions,
+		committer:   committer,
 		routes:      routes,
 		cfg:         cfg,
 		logger:      logger,
@@ -180,15 +193,18 @@ func NewRunner(
 //
 //  1. Claim the Project so nothing else touches it and the poll loop skips
 //     it — this is what keeps the phase at Running throughout.
-//  2. Check preconditions before stopping anything, so a misconfiguration
-//     costs no downtime.
+//  2. Check preconditions before stopping anything, so a misconfiguration or
+//     an unreachable server costs no downtime.
 //  3. Stop containers, archive every Managed volume, upload and verify each.
-//  4. Write manifest.json only once every archive verified, then latest.json
-//     only once the manifest is written. A crash at any point leaves
-//     latest.json pointing at the previous complete generation.
+//  4. Write manifest.json only once every archive verified, then commit the
+//     generation to the server only once the manifest is written. A crash or a
+//     refused commit leaves the previous committed generation as the restore
+//     source.
 //  5. On every exit path — success, failure, timeout, cancellation — restart
 //     the containers if this node still owns the Project, refresh routes,
 //     clear the Maintenance condition, and release the claim.
+//  6. After a commit, and before releasing the claim, delete generations beyond
+//     RetainGenerations.
 //
 // Returning ErrNoManagedVolumes means the Project was left untouched.
 func (r *Runner) Run(ctx context.Context, project *v1.Project) error {
@@ -263,15 +279,24 @@ func (r *Runner) run(ctx context.Context, project *v1.Project, ev *evictionRun) 
 	}
 	log = log.With(zap.String("backupID", backupID))
 
+	// Registered first among the deferred steps so it runs after the containers
+	// are back: deleting old backups must not lengthen the downtime.
+	defer func() {
+		if err == nil {
+			r.pruneGenerations(context.WithoutCancel(ctx), key, project, backupID, log)
+		}
+	}()
+
 	uid, nodeRef, generation := project.ObjectMeta.UID, project.Status.NodeRef, project.Status.AssignmentGeneration
 	maintenanceReason := "BackingUp"
 	if ev != nil {
 		maintenanceReason = "BackingUpForMove"
 	}
 	if err := r.conditions.SetMaintenance(ctx, key, uid, nodeRef, generation, maintenanceReason); err != nil {
-		// Correctness is already protected by the claim above; losing the
-		// condition only costs visibility.
-		log.Warn("Failed to set Maintenance condition", zap.Error(err))
+		// A server this Agent cannot reach, or that no longer recognises this
+		// assignment, will not accept the commit. Stopping the containers now
+		// would cost downtime for a generation that can never be restored.
+		return fmt.Errorf("backup: set Maintenance condition: %w", err)
 	}
 	defer func() {
 		if clearErr := r.conditions.ClearMaintenance(context.WithoutCancel(ctx), key, uid, nodeRef, generation); clearErr != nil {
@@ -319,8 +344,13 @@ func (r *Runner) run(ctx context.Context, project *v1.Project, ev *evictionRun) 
 
 	// Every archive is uploaded and verified; only now may the generation be
 	// declared complete.
-	if err = r.commitGeneration(uploadCtx, key, backupID, project, entries, log); err != nil {
+	if err = r.writeManifest(uploadCtx, key, backupID, project, entries, log); err != nil {
 		return err
+	}
+	if err = r.committer.CommitBackup(uploadCtx, key, uid, nodeRef, generation, backupID); err != nil {
+		// The generation is intact in the store but is not a restore point. It
+		// is what an Agent whose assignment was released ends up with.
+		return fmt.Errorf("backup: commit generation: %w", err)
 	}
 
 	log.Info("Backup complete", zap.Int("volumes", len(entries)))
@@ -332,7 +362,7 @@ func (r *Runner) run(ctx context.Context, project *v1.Project, ev *evictionRun) 
 
 // captureVolumes archives, uploads and verifies every Managed volume,
 // returning the manifest entries describing them. An error here means the
-// generation is abandoned and no manifest or latest.json is written.
+// generation is abandoned: no manifest is written and nothing is committed.
 func (r *Runner) captureVolumes(
 	ctx context.Context,
 	project *v1.Project,
@@ -381,8 +411,8 @@ func (r *Runner) captureVolumes(
 }
 
 // uploadAndVerify uploads one archive and confirms the store received it
-// intact. Verifying before the manifest is written is what stops latest.json
-// ever pointing at a truncated archive.
+// intact. Verifying before the manifest is written is what stops a commit ever
+// naming a truncated archive.
 func (r *Runner) uploadAndVerify(ctx context.Context, archivePath, key string, result ArchiveResult) error {
 	f, err := os.Open(archivePath)
 	if err != nil {
@@ -408,10 +438,8 @@ func (r *Runner) uploadAndVerify(ctx context.Context, archivePath, key string, r
 	return nil
 }
 
-// commitGeneration writes the manifest and then latest.json, in that order.
-// latest.json is the only mutable object in the layout, and it is written
-// last so an interrupted run always leaves the previous generation current.
-func (r *Runner) commitGeneration(
+// writeManifest writes the generation's manifest.
+func (r *Runner) writeManifest(
 	ctx context.Context,
 	key ResourceKey,
 	backupID string,
@@ -429,6 +457,7 @@ func (r *Runner) commitGeneration(
 		r.cfg.NodeName, r.cfg.CaraVersion,
 		project.ResourceVersion, r.now(), entries,
 	)
+	manifest.ProjectUID = project.ObjectMeta.UID
 	manifestBytes, err := manifest.Marshal()
 	if err != nil {
 		return err
@@ -437,22 +466,7 @@ func (r *Runner) commitGeneration(
 		return fmt.Errorf("backup: write manifest: %w", err)
 	}
 
-	latestKey, err := LatestKey(key.Namespace, key.Name)
-	if err != nil {
-		return err
-	}
-	latestBytes, err := NewLatest(backupID, manifestKey, r.now()).Marshal()
-	if err != nil {
-		return err
-	}
-	if err := r.putJSON(ctx, latestKey, latestBytes); err != nil {
-		// The generation is intact in the store but unreferenced. Failing
-		// loudly is right: a silent success here would let the operator
-		// believe a restore point exists that CARA-60 cannot find.
-		return fmt.Errorf("backup: update latest pointer: %w", err)
-	}
-
-	log.Debug("Generation committed", zap.String("manifestKey", manifestKey))
+	log.Debug("Manifest written", zap.String("manifestKey", manifestKey))
 	return nil
 }
 
@@ -483,7 +497,7 @@ func (r *Runner) restoreService(ctx context.Context, project *v1.Project, key Re
 		return
 	}
 
-	ownership := r.ownership.Resolve(cleanupCtx, key)
+	ownership := r.ownership.Resolve(cleanupCtx, key, project.ObjectMeta.UID, project.Status.AssignmentGeneration)
 	if !ShouldRestartContainers(reason, ownership) {
 		log.Info("Leaving containers stopped after backup",
 			zap.String("reason", reason.String()),
@@ -544,12 +558,15 @@ func classifyExit(ctx context.Context, err error) ExitReason {
 	}
 }
 
-// managedVolumes returns only the Managed volumes in spec; Ephemeral volumes
-// are never backed up.
+// managedVolumes returns the Managed volumes this runner backs up: those using
+// the Offline strategy. Ephemeral volumes are never backed up, and a
+// PostgresDifferential volume is never stopped and archived as a directory —
+// that would produce a second, offline backup history for a database whose
+// backups belong to pgBackRest.
 func managedVolumes(spec v1.ProjectSpec) []v1.VolumeDef {
 	var out []v1.VolumeDef
 	for _, v := range spec.Volumes {
-		if v.Type == v1.VolumeTypeManaged {
+		if v.Type == v1.VolumeTypeManaged && spec.BackupStrategyFor(v.Name) == v1.BackupStrategyOffline {
 			out = append(out, v)
 		}
 	}

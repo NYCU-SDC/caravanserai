@@ -9,9 +9,6 @@ set -Eeuo pipefail
 # the two uniquely named outer containers created below, with their anonymous
 # volumes.
 #
-# The server and agent run with UID_ENFORCEMENT=true, so recovery is exercised
-# under the strict UID and assignment-generation fence it depends on.
-#
 # Managed volume data lives in a directory the agent (on the host) and the
 # DinD daemon must both see at the same path. It defaults to /var/tmp: a
 # directory under /tmp bind-mounted into DinD was observed to be invisible
@@ -31,6 +28,17 @@ set -Eeuo pipefail
 #                               reconciled, and the container survives (CARA-93)
 #   G. a container for a service the spec no longer declares → still blocks the
 #                               new assignment, which no per-service check can see (CARA-93)
+#   H. deleting a Project      → every generation of its lifetime removed, nothing else;
+#                               an earlier Node's open obligation holds it Terminated
+#                               with ResourcesRemoved already recorded, until that Node
+#                               reports (CARA-80)
+#   I. deleting while the node is lost → kept Terminating with TerminationBlocked,
+#                               never finalized; the node returns → cleared, torn
+#                               down and finalized (CARA-80). The server runs with
+#                               TERMINATING_TIMEOUT=15s so this takes minutes, not ten
+#   J. deleting a released Project while Pending → Terminating with no assignment,
+#                               finalized by the server once every earlier Node
+#                               confirmed its cleanup (CARA-80)
 
 log() { printf '[recovery-e2e] %s\n' "$*"; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -42,6 +50,7 @@ done
 shared_root="${E2E_SHARED_ROOT:-/var/tmp}"
 [[ -d "$shared_root" && -w "$shared_root" ]] || fail "E2E_SHARED_ROOT is not a writable directory: $shared_root"
 test_root="$(mktemp -d "$shared_root/cara-recovery-e2e.XXXXXX")"
+. "$(dirname "${BASH_SOURCE[0]}")/lib/auth.sh"
 suffix="${PPID}-$$"
 postgres_name="cara86-postgres-${suffix}"
 dind_name="cara86-dind-${suffix}"
@@ -218,7 +227,8 @@ server_url="http://127.0.0.1:$server_port"
 	env \
 		HOST=127.0.0.1 \
 		PORT="$server_port" \
-		UID_ENFORCEMENT=true \
+		TERMINATING_TIMEOUT=15s \
+		BREAK_GLASS_TOKEN_FILE="$e2e_admin_token_file" \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &
@@ -229,20 +239,32 @@ cat >"$test_root/agent-run/config.yaml" <<EOF
 data_root: "$data_root"
 EOF
 
-(
-	cd "$test_root/agent-run"
-	env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
-		SERVER_URL="$server_url" \
-		NODE_NAME=node-a \
-		HEARTBEAT_INTERVAL=1s \
-		DOCKER_HOST="$dind_host" \
-		AGENT_LISTEN_PORT=0 \
-		PROXY_LISTEN_ADDR=127.0.0.1:0 \
-		AGENT_ADVERTISE_IP=127.0.0.1 \
-		UID_ENFORCEMENT=true \
-		"$test_root/bin/cara-agent"
-) >"$test_root/agent.log" 2>&1 &
-agent_pid=$!
+start_agent() {
+	local token_file
+	token_file="$(join_token_file node-a)"
+	(
+		cd "$test_root/agent-run"
+		env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
+			SERVER_URL="$server_url" \
+			JOIN_TOKEN_FILE="$token_file" \
+			NODE_NAME=node-a \
+			HEARTBEAT_INTERVAL=1s \
+			DOCKER_HOST="$dind_host" \
+			AGENT_LISTEN_PORT=0 \
+			PROXY_LISTEN_ADDR=127.0.0.1:0 \
+			AGENT_ADVERTISE_IP=127.0.0.1 \
+			"$test_root/bin/cara-agent"
+	) >>"$test_root/agent.log" 2>&1 &
+	agent_pid=$!
+}
+
+stop_agent() {
+	kill "$agent_pid" >/dev/null 2>&1 || true
+	wait "$agent_pid" >/dev/null 2>&1 || true
+	agent_pid=""
+}
+
+start_agent
 wait_until 60 "node-a readiness" node_ready
 
 # ── Target Project ───────────────────────────────────────────────────────────
@@ -489,4 +511,238 @@ if dind inspect "$dropped-web" >/dev/null 2>&1; then
 fi
 log "G: PASS — a container for a dropped service still blocks the new assignment"
 
-log "PASS: stop and remove recovered; missing data blocked visibly and recovered on restore; crash loop exhausted; stale containers blocked on the Running and Scheduled paths, including one whose service the spec no longer declares"
+# ── H. Deleting a Project takes its whole lifetime, and nothing else ─────────
+#
+# recover-target still has generation 1's container running beside the
+# generation-2 assignment E and F left it with. Deleting the Project must take
+# every generation of its lifetime — the network and the Ephemeral volume
+# too — keep the Managed data, and leave alone a container that carries the
+# same Project name under another lifetime's UID: that one is not this
+# deletion's to remove.
+
+foreign_container="$project-sidecar"
+scratch_volume="cara-$project-scratch"
+
+log "H: planting a container under $project's name for another lifetime"
+dind run -d --name "$foreign_container" \
+	--label "cara.project=$project" --label cara.namespace=default \
+	--label cara.service=sidecar --label cara.uid=uid-of-another-lifetime \
+	--label cara.generation=1 \
+	nginx:alpine >/dev/null
+foreign_id="$(container_id "$foreign_container")"
+[[ -n "$foreign_id" ]] || fail "H: could not create the other lifetime's container"
+
+container_running "$container" || fail "H: setup expected generation $label_generation's container to be running"
+dind volume inspect "$scratch_volume" >/dev/null || fail "H: setup expected the Ephemeral volume $scratch_volume"
+
+ghost_uid="$(project_field "$project" 'p["metadata"]["uid"]')"
+[[ -n "$ghost_uid" ]] || fail "H: could not read $project's UID"
+ghost="$(docker exec "$postgres_name" psql -U postgres -d caravanserai -Atc \
+	"UPDATE resources SET status = jsonb_set(status, '{recovery}',
+		COALESCE(status->'recovery', '{}'::jsonb) || jsonb_build_object('cleanupObligations',
+			COALESCE(status->'recovery'->'cleanupObligations', '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
+				'assignment', jsonb_build_object('projectUID', '$ghost_uid', 'nodeName', 'node-ghost', 'assignmentGeneration', 99),
+				'releasedAt', to_jsonb(now()), 'releaseAuthorization', 'WorkloadStopped')))),
+		resource_version = resource_version + 1, updated_at = now()
+	WHERE kind = 'Project' AND name = '$project';")"
+[[ "$ghost" == "UPDATE 1" ]] || fail "H: failed to plant node-ghost's obligation: $ghost"
+held_by_ghost() {
+	phase_is "$project" Terminated &&
+		[[ "$(project_field "$project" 'cond("FinalizationBlocked").get("message", "")')" == *"node node-ghost generation 99"* ]]
+}
+
+log "H: deleting $project"
+delete_status="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$server_url/api/v1/projects/$project")"
+[[ "$delete_status" == "202" ]] || fail "H: delete returned $delete_status, want 202"
+
+# Terminated lasts milliseconds on its own: the record is finalized as soon
+# as the predicate holds, too fast to observe. An earlier Node that still owes
+# its cleanup holds it there, so the order of the reports can be checked at the
+# transition rather than inferred from the final 404. No API adds an
+# obligation, and this rehearsal has one Node, so it is written straight to the
+# store, for a Node that does not exist.
+wait_until 90 "H: $project Terminated and held by node-ghost" held_by_ghost
+
+removal_evidence='p["status"]["phase"] + ("+removed" if any(
+    o.get("resourcesRemoved")
+    and o["assignment"]["nodeName"] == p["status"].get("nodeRef")
+    and o["assignment"].get("assignmentGeneration", 0) == p["status"].get("assignmentGeneration", 0)
+    for o in (p["status"].get("recovery") or {}).get("cleanupObligations") or []) else "")'
+[[ "$(project_field "$project" "$removal_evidence")" == "Terminated+removed" ]] ||
+	fail "H: $project is Terminated without ResourcesRemoved for its own assignment"
+log "H: $project held at Terminated by node-ghost, with ResourcesRemoved already recorded for its assignment"
+
+log "H: node-ghost reports its cleanup done"
+ghost_status="$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
+	"$server_url/api/v1/projects/$project/recovery/resources-removed" -H 'Content-Type: application/json' \
+	-d "{\"uid\":\"$ghost_uid\",\"nodeRef\":\"node-ghost\",\"assignmentGeneration\":99}")"
+[[ "$ghost_status" == 2* ]] || fail "H: node-ghost's ResourcesRemoved report returned $ghost_status"
+
+project_gone() { [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$server_url/api/v1/projects/$project")" == "404" ]]; }
+wait_until 30 "H: $project finalized once node-ghost reported" project_gone
+
+# A failed listing is not an absent resource: the helpers below return non-zero
+# when the daemon cannot be asked, so wait_until keeps waiting and fails.
+lifetime_containers() {
+	listed="$(dind ps -a --filter "label=cara.project=$project" --format '{{.Names}}')" || return 1
+	grep -vxF -- "$foreign_container" <<<"$listed" | grep -c . || true
+}
+no_lifetime_containers() { n="$(lifetime_containers)" || return 1; [[ "$n" == "0" ]]; }
+volume_absent() {
+	listed="$(dind volume ls --format '{{.Name}}')" || return 1
+	! grep -qxF -- "$1" <<<"$listed"
+}
+network_absent() {
+	listed="$(dind network ls --format '{{.Name}}')" || return 1
+	! grep -qxF -- "$1" <<<"$listed"
+}
+
+wait_until 30 "H: every generation's container removed" no_lifetime_containers
+wait_until 30 "H: Ephemeral volume removed" volume_absent "$scratch_volume"
+wait_until 30 "H: network removed" network_absent "cara-$project"
+[[ -f "$managed_dir/marker.txt" ]] || fail "H: Managed data was removed with the Project"
+[[ "$(container_id "$foreign_container")" == "$foreign_id" ]] ||
+	fail "H: the other lifetime's container was removed by this Project's deletion"
+log "H: PASS — every generation removed, network and Ephemeral volume gone, Managed data kept, other lifetime untouched"
+
+# ── I. Deleting a Project while its node is lost ─────────────────────────────
+#
+# Nothing but the node can confirm that its resources are gone, so a deletion
+# that cannot reach the node must keep the record — visibly blocked, not
+# finalized — until the node returns and finishes the teardown.
+
+lost=lost-delete
+lost_container="$lost-web"
+
+termination_blocked() {
+	[[ "$(project_field "$lost" 'cond("TerminationBlocked").get("status", "")')" == "True" ]]
+}
+not_termination_blocked() {
+	[[ -n "$(project_json "$lost")" ]] &&
+		[[ -z "$(project_field "$lost" 'cond("TerminationBlocked").get("status", "")')" ]]
+}
+node_not_ready() {
+	body="$(curl -fsS "$server_url/api/v1/nodes/node-a" 2>/dev/null || true)"
+	[[ "$body" == *'"state":"NotReady"'* ]]
+}
+lost_gone() { [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$server_url/api/v1/projects/$lost")" == "404" ]]; }
+lost_container_absent() {
+	listed="$(dind ps -a --format '{{.Names}}')" || return 1
+	! grep -qxF -- "$lost_container" <<<"$listed"
+}
+
+log "I: creating $lost"
+create_project '{
+	"apiVersion":"caravanserai/v1",
+	"kind":"Project",
+	"metadata":{"name":"'"$lost"'","namespace":"default"},
+	"spec":{"services":[{"name":"web","image":"nginx:alpine"}]}
+}'
+wait_until 90 "I: $lost Running" phase_is "$lost" Running
+wait_until 30 "I: $lost_container running" container_running "$lost_container"
+
+log "I: stopping the agent, then deleting $lost"
+stop_agent
+delete_status="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$server_url/api/v1/projects/$lost")"
+[[ "$delete_status" == "202" ]] || fail "I: delete returned $delete_status, want 202"
+phase_is "$lost" Terminating || fail "I: $lost did not enter Terminating"
+
+# The heartbeat timeout is 90s, then the 15s termination timeout runs.
+wait_until 240 "I: node-a NotReady" node_not_ready
+wait_until 120 "I: $lost marked TerminationBlocked" termination_blocked
+
+log "I: holding past the termination timeout to confirm the record is kept"
+sleep 30
+phase_is "$lost" Terminating || fail "I: $lost left Terminating while its node was lost"
+container_running "$lost_container" || fail "I: setup expected $lost_container to still be running"
+
+log "I: restarting the agent"
+start_agent
+wait_until 60 "I: node-a Ready again" node_ready
+grep -q 'Using the Node token kept from enrolment' "$test_root/agent.log" ||
+	fail "I: the restarted agent did not use the Node token it kept from enrolment"
+wait_until 60 "I: TerminationBlocked cleared" not_termination_blocked
+wait_until 90 "I: $lost finalized" lost_gone
+wait_until 30 "I: $lost_container removed" lost_container_absent
+log "I: PASS — a deletion on a lost node was kept and reported blocked, then finished when the node returned"
+
+# ── J. Deleting a previously assigned Project while it is Pending ────────────
+#
+# A released Project has no current assignment, so no Agent will ever report it
+# Terminated. Its deletion is the server's to finalize, once every Node that ran
+# it has confirmed its cleanup.
+
+unassigned=unassigned-delete
+unassigned_container="$unassigned-web"
+
+log "J: creating $unassigned"
+create_project '{
+	"apiVersion":"caravanserai/v1",
+	"kind":"Project",
+	"metadata":{"name":"'"$unassigned"'","namespace":"default"},
+	"spec":{"services":[{"name":"web","image":"nginx:alpine"}]}
+}'
+wait_until 90 "J: $unassigned Running" phase_is "$unassigned" Running
+wait_until 30 "J: $unassigned_container running" container_running "$unassigned_container"
+
+# Release the assignment the way the Rescheduler or the Failed-project
+# rescheduler does: Pending, no nodeRef, and a cleanup obligation for the
+# assignment it leaves. Neither can do it in this rehearsal — one Node, and no
+# producer of the stop evidence they require yet — so it is written straight to
+# the store. node-a goes into failedNodes so the Scheduler does not place it
+# back on the only Node. A second obligation, for a Node that does not exist,
+# holds the deletion where it can be observed.
+unassigned_uid="$(project_field "$unassigned" 'p["metadata"]["uid"]')"
+unassigned_generation="$(project_field "$unassigned" 'p["status"]["assignmentGeneration"]')"
+[[ -n "$unassigned_uid" && -n "$unassigned_generation" ]] || fail "J: could not read $unassigned's identity"
+release="$(docker exec "$postgres_name" psql -U postgres -d caravanserai -Atc \
+	"UPDATE resources SET phase = 'Pending', status = (status - 'nodeRef')
+		|| jsonb_build_object('phase', 'Pending', 'failedNodes', jsonb_build_array('node-a'), 'recovery',
+			COALESCE(status->'recovery', '{}'::jsonb) || jsonb_build_object('cleanupObligations',
+				COALESCE(status->'recovery'->'cleanupObligations', '[]'::jsonb) || jsonb_build_array(
+					jsonb_build_object(
+						'assignment', jsonb_build_object('projectUID', '$unassigned_uid', 'nodeName', 'node-a',
+							'assignmentGeneration', $unassigned_generation),
+						'releasedAt', to_jsonb(now()), 'releaseAuthorization', 'WorkloadStopped'),
+					jsonb_build_object(
+						'assignment', jsonb_build_object('projectUID', '$unassigned_uid', 'nodeName', 'node-ghost',
+							'assignmentGeneration', 98),
+						'releasedAt', to_jsonb(now()), 'releaseAuthorization', 'WorkloadStopped')))),
+		resource_version = resource_version + 1, updated_at = now()
+	WHERE kind = 'Project' AND name = '$unassigned';")"
+[[ "$release" == "UPDATE 1" ]] || fail "J: failed to release $unassigned: $release"
+
+node_a_cleaned() {
+	[[ "$(project_field "$unassigned" 'any(o.get("resourcesRemoved") for o in p["status"]["recovery"]["cleanupObligations"]
+		if o["assignment"]["nodeName"] == "node-a")')" == "True" ]]
+}
+unassigned_container_absent() {
+	listed="$(dind ps -a --format '{{.Names}}')" || return 1
+	! grep -qxF -- "$unassigned_container" <<<"$listed"
+}
+wait_until 90 "J: node-a cleaned up the released assignment" node_a_cleaned
+wait_until 30 "J: $unassigned_container removed" unassigned_container_absent
+phase_is "$unassigned" Pending || fail "J: $unassigned left Pending before the deletion"
+
+log "J: deleting $unassigned while it is Pending"
+delete_status="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$server_url/api/v1/projects/$unassigned")"
+[[ "$delete_status" == "202" ]] || fail "J: delete returned $delete_status, want 202"
+
+held_unassigned() {
+	phase_is "$unassigned" Terminating &&
+		[[ -z "$(project_field "$unassigned" 'p["status"].get("nodeRef", "")')" ]] &&
+		[[ "$(project_field "$unassigned" 'cond("FinalizationBlocked").get("message", "")')" == *"node node-ghost generation 98"* ]]
+}
+wait_until 60 "J: $unassigned Terminating with no assignment, held by node-ghost" held_unassigned
+log "J: $unassigned held at Terminating with no assignment, waiting only for node-ghost"
+
+ghost_status="$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
+	"$server_url/api/v1/projects/$unassigned/recovery/resources-removed" -H 'Content-Type: application/json' \
+	-d "{\"uid\":\"$unassigned_uid\",\"nodeRef\":\"node-ghost\",\"assignmentGeneration\":98}")"
+[[ "$ghost_status" == 2* ]] || fail "J: node-ghost's ResourcesRemoved report returned $ghost_status"
+
+unassigned_gone() { [[ "$(curl -sS -o /dev/null -w '%{http_code}' "$server_url/api/v1/projects/$unassigned")" == "404" ]]; }
+wait_until 30 "J: $unassigned finalized by the server" unassigned_gone
+log "J: PASS — a released Project deleted while Pending was finalized by the server once every earlier Node confirmed its cleanup"
+
+log "PASS: stop and remove recovered; missing data blocked visibly and recovered on restore; crash loop exhausted; stale containers blocked on the Running and Scheduled paths, including one whose service the spec no longer declares; deletion removed every generation of the lifetime and nothing of another; a deletion on a lost node was kept until the node returned; a released Project deleted while Pending was finalized by the server"

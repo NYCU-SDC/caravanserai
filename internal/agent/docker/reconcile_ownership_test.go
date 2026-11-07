@@ -63,31 +63,24 @@ func TestReconcileRollbackLeavesAnotherAssignmentsContainer(t *testing.T) {
 	assert.Contains(t, f.docker.containers, ContainerName("blog", "worker"))
 }
 
-// Deleting a Project is broader than a rollback: every container labelled for
-// it goes, whichever generation left it. RemoveProject keeps that.
-func TestRemoveProjectStillRemovesEarlierGenerations(t *testing.T) {
+// Deleting a Project is broader than a rollback: every container of its
+// lifetime goes, whichever generation left it — but not a same-name
+// predecessor's, which is another lifetime's to clean up.
+func TestDeletingAProjectRemovesEveryGenerationOfItsLifetime(t *testing.T) {
 	f := newStrictFixture(t)
 	f.container("db", "running")
 	f.staleContainer("worker", "exited", labelGeneration, "6")
+	f.staleContainer("cache", "exited", labelUID, "uid-previous-lifetime")
 
-	require.NoError(t, f.runtime.RemoveProject(t.Context(), f.project.Namespace, f.project.Name, f.project.Spec))
+	lifetime := Assignment{Namespace: f.project.Namespace, Project: f.project.Name, UID: f.project.UID, AllGenerations: true}
+	require.NoError(t, f.runtime.RemoveAssignment(t.Context(), lifetime))
 
 	assert.True(t, removed(f, "blog-db"))
 	assert.True(t, removed(f, "blog-worker"), "a deleted Project takes its earlier generations' containers with it")
-}
-
-// Compatibility mode keeps its contract: a container without UID and
-// generation labels is adopted, as it was before these checks existed.
-func TestReconcileProjectCompatibilityModeAdoptsALegacyContainer(t *testing.T) {
-	f := newRecoverFixture(t, v1.VolumeTypeManaged)
-	f.provisionManaged(t)
-	f.docker.withContainer(ContainerName("blog", "db"), "exited", map[string]string{
-		labelProject: "blog",
-		labelService: "db",
-	})
-
-	require.NoError(t, f.runtime.ReconcileProject(t.Context(), f.project))
-	assert.Contains(t, f.docker.mutations, "ContainerStart:"+fakeID("blog-db"))
+	assert.False(t, removed(f, "blog-cache"), "a deleted Project took a predecessor lifetime's container")
+	left, err := f.runtime.AssignmentRemaining(t.Context(), lifetime)
+	require.NoError(t, err)
+	assert.Empty(t, left)
 }
 
 // ── Containers of services the spec no longer declares ───────────────────────
@@ -125,19 +118,6 @@ func TestStaleContainersFindsAPreviousLifetime(t *testing.T) {
 func TestStaleContainersIsEmptyWhenEveryContainerIsOurs(t *testing.T) {
 	f := newStrictFixture(t)
 	f.container("db", "running")
-
-	stale, err := f.runtime.StaleContainers(t.Context(), f.project)
-
-	require.NoError(t, err)
-	assert.Empty(t, stale)
-}
-
-// Compatibility mode does not compare UID or generation, so an earlier
-// generation's container is not stale there — the same contract the rest of
-// the ownership rule keeps.
-func TestStaleContainersIgnoresGenerationInCompatibilityMode(t *testing.T) {
-	f := newRecoverFixture(t, v1.VolumeTypeManaged)
-	f.staleContainer("worker", "running", labelGeneration, "6")
 
 	stale, err := f.runtime.StaleContainers(t.Context(), f.project)
 

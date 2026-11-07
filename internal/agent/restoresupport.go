@@ -20,17 +20,23 @@ import (
 // unknown or known to be wrong, and running containers against that is worse
 // than not running them at all.
 //
-// A nil restorer means this agent has no object store configured. Managed
-// volumes still work — they persist locally — they are simply never restored.
+// objectStore false means this agent has no object store configured. Managed
+// volumes still work — they persist locally — they are simply never restored,
+// and placement is not decided for them. A PostgresDifferential Project is the
+// exception: it is decided from local provenance on every agent, because
+// starting its PostgreSQL on an empty directory would initialize a new
+// database in place of one it used to have.
 // The dangerous case, a Project that asks to be backed up landing on a node
 // that cannot back it up, is already failed by the backup path.
 func ensureVolumeData(
 	ctx context.Context,
 	restorer *restore.Restorer,
 	coordinator *backup.Coordinator,
+	objectStore bool,
 	dataRoot string,
 	nodeName string,
 	p *v1.Project,
+	pgRestore *pgRestores,
 	logger *zap.Logger,
 ) error {
 	// Both are checked because reconcileProjects treats a nil Coordinator on
@@ -40,6 +46,10 @@ func ensureVolumeData(
 		return nil
 	}
 	if !hasManagedVolume(p.Spec.Volumes) {
+		return nil
+	}
+	postgresDifferential := p.Spec.HasPostgresDifferential()
+	if !objectStore && !postgresDifferential {
 		return nil
 	}
 
@@ -56,7 +66,13 @@ func ensureVolumeData(
 		// than being failed for losing a race.
 		return errDeferred
 	}
-	defer release()
+	// A background restore takes the claim over and releases it when it ends.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 
 	want := restore.ProvenanceFor(p, nodeName, "")
 	outcome, err := decideRestore(dataRoot, want, p)
@@ -78,6 +94,19 @@ func ensureVolumeData(
 		return restorer.InitializeEmpty(p)
 
 	case restore.DecisionRestore:
+		if postgresDifferential {
+			// The committed backup names offline archives; this Project's
+			// backups are in pgBackRest.
+			if pgRestore == nil {
+				return &restore.PlacementBlockedError{
+					Reason: restore.BlockStrategyRestoreUnavailable,
+					Detail: "this Project's PostgresDifferential data would have to be restored from the object store, which this Node has none configured to reach",
+				}
+			}
+			blocked, took := pgRestore.begin(ctx, p, release)
+			handedOff = took
+			return blocked
+		}
 		return runRestore(ctx, restorer, p, log)
 
 	default:
@@ -85,40 +114,32 @@ func ensureVolumeData(
 	}
 }
 
-// runRestore resolves the newest generation and puts it on disk.
+// runRestore puts the generation the server committed on disk. It reads that
+// from the Project rather than from the object store, which any Agent that can
+// reach the bucket could write to (ADR-0024 C1).
 //
 // It is reached only when Decide has established that this node has no local
 // data it may use, so every way of failing to produce a generation here leaves
 // the Project with nothing — and none of them may be answered by creating
 // empty directories and calling that a successful start.
 func runRestore(ctx context.Context, restorer *restore.Restorer, p *v1.Project, log *zap.Logger) error {
-	backupID, err := restorer.ResolveLatest(ctx, p.Namespace, p.Name)
-	switch {
-	case err == nil:
-		log.Info("Restoring volumes from generation", zap.String("backupID", backupID))
-		return restorer.RestoreGeneration(ctx, p, backupID)
-
-	case errors.Is(err, restore.ErrNeverBackedUp):
-		// "No latest.json" used to be read as "this Project has never held
-		// data", and the response was to start empty. That inference only
-		// holds for a Project that has never been placed anywhere, and Decide
-		// has already handled that case by returning DecisionInitializeEmpty
-		// before anything reached the object store.
+	backupID := p.Status.Recovery.CommittedBackupID()
+	if backupID == "" {
+		// This inference only holds in one direction: a Project that has never
+		// been placed anywhere has nothing to lose, and Decide has already
+		// handled that case by returning DecisionInitializeEmpty.
 		//
 		// Arriving here means the opposite: this Project has been placed
-		// before, or a restore was already in flight. A missing pointer is
-		// then a fault — a bucket typo, an object-store outage, a backup that
-		// never actually completed — and starting empty would present it as a
-		// successful deployment, then let the Backup Supervisor archive the
-		// empty result over the generation that held the real data.
+		// before, or a restore was already in flight. Starting empty would
+		// present that as a successful deployment, then let the Backup
+		// Supervisor commit the empty result as the restore source.
 		return &restore.PlacementBlockedError{
 			Reason: restore.BlockNoRestoreSource,
-			Detail: "this Project has been placed before, but the object store holds no complete backup to restore from",
+			Detail: "this Project has been placed before, but the server has no committed backup to restore from",
 		}
-
-	default:
-		return err
 	}
+	log.Info("Restoring volumes from generation", zap.String("backupID", backupID))
+	return restorer.RestoreGeneration(ctx, p, backupID)
 }
 
 // decideRestore gathers the facts the decision rests on and applies the rule.

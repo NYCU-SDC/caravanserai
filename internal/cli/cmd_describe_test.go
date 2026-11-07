@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 
@@ -131,6 +132,7 @@ var describeProjectCoveredFields = newStringSet(
 	"Spec.Volumes",
 	"Spec.Backup.Interval",
 	"Spec.Backup.OnMissing",
+	"Spec.Backup.Items",
 	"Spec.Ingress",
 	"Spec.ExpireAt",
 	// Status
@@ -143,6 +145,19 @@ var describeProjectCoveredFields = newStringSet(
 	"Status.Eviction.TargetTier",
 	"Status.AssignmentGeneration",
 	"Status.AssignmentHistory",
+	"Status.Recovery.CleanupObligations",
+	"Status.Recovery.HealthySinceGeneration",
+	"Status.Recovery.PreferredNode",
+	"Status.Recovery.RescheduleAttempts",
+	"Status.Recovery.WorkloadStopped.Assignment.AssignmentGeneration",
+	"Status.Recovery.WorkloadStopped.Assignment.NodeName",
+	"Status.Recovery.CommittedBackup.Assignment.AssignmentGeneration",
+	"Status.Recovery.CommittedBackup.Assignment.NodeName",
+	"Status.Recovery.CommittedBackup.Assignment.ProjectUID",
+	"Status.Recovery.CommittedBackup.BackupID",
+	"Status.Recovery.WorkloadStopped.Assignment.ProjectUID",
+	"Status.Backup.Stanzas",
+	"Status.Backup.Completions",
 	"Status.Conditions",
 )
 
@@ -234,6 +249,54 @@ func (s stringSet) has(v string) bool {
 	return ok
 }
 
+// The Recovery section appears only once recovery has recorded something, and
+// a healthy window from an older assignment is labelled stale rather than shown
+// as if it described the current one.
+func TestDescribeProjectShowsTheCommittedBackup(t *testing.T) {
+	var out strings.Builder
+	describeProject(&out, &v1.Project{Status: v1.ProjectStatus{
+		Phase: v1.ProjectPhaseRunning,
+		Recovery: &v1.ProjectRecoveryStatus{CommittedBackup: &v1.CommittedBackup{
+			BackupID:    "20261031T000000Z-aaaaaaaa",
+			Assignment:  v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 3},
+			CommittedAt: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC),
+		}},
+	}})
+
+	assert.Contains(t, out.String(), "20261031T000000Z-aaaaaaaa (from node-a, generation 3, committed 2026-10-31T00:00:00Z)")
+}
+
+func TestDescribeProjectRecoverySection(t *testing.T) {
+	var none strings.Builder
+	describeProject(&none, &v1.Project{Status: v1.ProjectStatus{Phase: v1.ProjectPhaseRunning}})
+	assert.NotContains(t, none.String(), "Recovery:")
+
+	healthy := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
+	prev := v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 6}
+	var out strings.Builder
+	describeProject(&out, &v1.Project{Status: v1.ProjectStatus{
+		AssignmentGeneration: 7,
+		Recovery: &v1.ProjectRecoveryStatus{
+			RescheduleAttempts:     2,
+			HealthySince:           &healthy,
+			HealthySinceGeneration: 6,
+			CleanupObligations: []v1.CleanupObligation{
+				{Assignment: prev, ReleasedAt: healthy, ReleaseAuthorization: v1.ReleaseByWorkloadStopped},
+				{Assignment: v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-z", AssignmentGeneration: 5},
+					ReleasedAt: healthy, ReleaseAuthorization: v1.ReleaseByWorkloadStopped,
+					ResourcesRemoved: &v1.ResourcesRemovedEvidence{ObservedAt: healthy}},
+			},
+		},
+	}})
+	text := out.String()
+	assert.Contains(t, text, "Recovery:")
+	assert.Contains(t, text, "(stale: generation 6)")
+	assert.Contains(t, text, "node-a generation 6 (uid uid-1)")
+	assert.Contains(t, text, "by WorkloadStopped")
+	assert.Contains(t, text, "Resources:  pending")
+	assert.Contains(t, text, "Resources:  removed at")
+}
+
 func TestDescribeProjectSize(t *testing.T) {
 	tests := []struct {
 		name string
@@ -251,6 +314,31 @@ func TestDescribeProjectSize(t *testing.T) {
 			assert.Regexp(t, `(?m)^  Size:\s+`+regexp.QuoteMeta(tt.want)+`$`, buf.String())
 		})
 	}
+}
+
+func TestDescribeProjectBackupStrategies(t *testing.T) {
+	retain := 6
+	project := &v1.Project{Spec: v1.ProjectSpec{
+		Volumes: []v1.VolumeDef{
+			{Name: "pgdata", Type: v1.VolumeTypeManaged},
+			{Name: "wal", Type: v1.VolumeTypeManaged},
+			{Name: "uploads", Type: v1.VolumeTypeManaged},
+			{Name: "cache", Type: v1.VolumeTypeEphemeral},
+		},
+		Backup: &v1.ProjectBackupConfig{Interval: "24h", Items: []v1.BackupItem{
+			{Volume: "pgdata", Strategy: v1.BackupStrategyPostgresDifferential, RetainFull: &retain},
+			{Volume: "wal", Strategy: v1.BackupStrategyPostgresDifferential},
+		}},
+	}}
+
+	var buf bytes.Buffer
+	describeProject(&buf, project)
+	out := buf.String()
+
+	assert.Contains(t, out, "      pgdata: PostgresDifferential, retain 6 full\n")
+	assert.Contains(t, out, "      wal: PostgresDifferential, retain 4 full (default)\n")
+	assert.Contains(t, out, "      uploads: Offline (default)\n")
+	assert.NotContains(t, out, "cache:", "Ephemeral volumes have no backup strategy")
 }
 
 func TestDescribeProjectFailedNodes(t *testing.T) {

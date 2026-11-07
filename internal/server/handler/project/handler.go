@@ -10,6 +10,14 @@
 //	PATCH  /api/v1/projects/{name}/status    — Agent reports observed phase (Running / Failed / Terminated)
 //	PATCH  /api/v1/projects/{name}/conditions/{type}  — Agent sets one condition without touching phase
 //	DELETE /api/v1/projects/{name}/conditions/{type}  — Agent clears one condition
+//	PUT    /api/v1/projects/{name}/recovery/workload-stopped   — assigned Agent records that every container is stopped
+//	PUT    /api/v1/projects/{name}/recovery/resources-removed  — cleanup owner records that its resources are removed
+//	PUT    /api/v1/projects/{name}/recovery/committed-backup   — assigned Agent makes a backup the restore source
+//	PUT    /api/v1/projects/{name}/recovery/managed-data-quarantined — cleanup owner records that its local data left the active path
+//	POST   /api/v1/projects/{name}/recovery/takeover           — operator overrides the release gate (operator token)
+//	GET    /api/v1/projects/{name}/recovery/takeover-audit     — recorded takeovers of the Project (operator token)
+//	PUT    /api/v1/projects/{name}/backup/stanzas  — assigned Agent records a pgBackRest stanza before creating it
+//	PUT    /api/v1/projects/{name}/backup/completions/{backupID}  — assigned Agent reports a completed backup
 package project
 
 import (
@@ -18,10 +26,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/server/authz"
 	"NYCU-SDC/caravanserai/internal/store"
 
 	handlerutil "github.com/NYCU-SDC/summer/pkg/handler"
@@ -40,24 +51,36 @@ type Handler struct {
 	tracer        trace.Tracer
 	problemWriter *problem.HttpWriter
 
-	// enforceAssignment is the server side of the UID_ENFORCEMENT rollout
-	// switch (CARA-82, CARA-83). When false (compatibility mode) an Agent report
-	// carrying a complete fence is still validated, but a legacy report missing
-	// UID or generation falls back to the unfenced write path. When true, a
-	// report without a complete fence is rejected as a stale assignment.
-	enforceAssignment bool
+	// postgresImage is the image a PostgresDifferential volume's service must
+	// run (see WithPostgresDifferentialImage).
+	postgresImage string
 }
 
-// NewHandler creates a Project Handler. enforceAssignment turns on strict
-// rejection of Agent writes that do not carry a complete assignment fence; it
-// should be wired from the server's UID_ENFORCEMENT config.
-func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter, enforceAssignment bool) *Handler {
-	return &Handler{
-		logger:            logger,
-		store:             s,
-		tracer:            otel.Tracer("project/handler"),
-		problemWriter:     pw,
-		enforceAssignment: enforceAssignment,
+// NewHandler creates a Project Handler.
+func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter, opts ...Option) *Handler {
+	h := &Handler{
+		logger:        logger,
+		store:         s,
+		tracer:        otel.Tracer("project/handler"),
+		problemWriter: pw,
+		postgresImage: v1.PostgresDifferentialImage,
+	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// Option configures a Handler.
+type Option func(*Handler)
+
+// WithPostgresDifferentialImage replaces the image a PostgresDifferential
+// volume's service must use. An empty reference keeps the published one.
+func WithPostgresDifferentialImage(ref string) Option {
+	return func(h *Handler) {
+		if ref != "" {
+			h.postgresImage = ref
+		}
 	}
 }
 
@@ -71,6 +94,14 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("PATCH /api/v1/projects/{name}/status", mid.HandlerFunc(h.patchStatus))
 	mux.HandleFunc("PATCH /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.patchCondition))
 	mux.HandleFunc("DELETE /api/v1/projects/{name}/conditions/{type}", mid.HandlerFunc(h.deleteCondition))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/workload-stopped", mid.HandlerFunc(h.putWorkloadStopped))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/backup/stanzas", mid.HandlerFunc(h.putStanza))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/backup/completions/{backupID}", mid.HandlerFunc(h.putBackupCompletion))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/resources-removed", mid.HandlerFunc(h.putResourcesRemoved))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/committed-backup", mid.HandlerFunc(h.putCommittedBackup))
+	mux.HandleFunc("PUT /api/v1/projects/{name}/recovery/managed-data-quarantined", mid.HandlerFunc(h.putManagedDataQuarantined))
+	mux.HandleFunc("POST /api/v1/projects/{name}/recovery/takeover", mid.HandlerFunc(h.postTakeover))
+	mux.HandleFunc("GET /api/v1/projects/{name}/recovery/takeover-audit", mid.HandlerFunc(h.getTakeoverAudit))
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
@@ -78,6 +109,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 // validateProjectSpec validates the project spec, returning a handlerutil.ValidationError
 // if any rule is violated, or nil if the spec is valid.
 func validateProjectSpec(spec v1.ProjectSpec) error {
+	return validateProjectSpecFor(spec, v1.PostgresDifferentialImage)
+}
+
+// validateProjectSpecFor is validateProjectSpec with the image a
+// PostgresDifferential volume's service must use.
+func validateProjectSpecFor(spec v1.ProjectSpec, postgresImage string) error {
 	if len(spec.Services) == 0 {
 		return handlerutil.NewValidationError("spec.services", nil, "spec.services must contain at least one service")
 	}
@@ -100,6 +137,7 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 	}
 
 	volumeNames := make(map[string]bool, len(spec.Volumes))
+	managedVolumes := make(map[string]bool, len(spec.Volumes))
 	hasManagedVolume := false
 	for _, vol := range spec.Volumes {
 		if vol.Name == "" {
@@ -113,6 +151,7 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 		switch vol.Type {
 		case v1.VolumeTypeManaged:
 			hasManagedVolume = true
+			managedVolumes[vol.Name] = true
 		case v1.VolumeTypeEphemeral:
 		default:
 			return handlerutil.NewValidationError("spec.volumes[].type", vol.Type,
@@ -135,6 +174,9 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 		if spec.Backup.OnMissing != "" && spec.Backup.OnMissing != v1.VolumeOnMissingInitializeEmpty {
 			return handlerutil.NewValidationError("spec.backup.onMissing", spec.Backup.OnMissing,
 				"spec.backup.onMissing must be \"InitializeEmpty\"")
+		}
+		if err := validateBackupItems(spec, volumeNames, managedVolumes, postgresImage); err != nil {
+			return err
 		}
 	}
 
@@ -186,6 +228,190 @@ func validateProjectSpec(spec v1.ProjectSpec) error {
 	}
 
 	return nil
+}
+
+// validateBackupItems checks spec.backup.items against the volumes and services
+// they refer to. volumeNames holds every declared volume and managedVolumes the
+// Managed ones.
+//
+// PostgresDifferential is accepted only where Cara can run it: the volume must
+// be the PGDATA of exactly one service on PostgresDifferentialImage, because
+// Cara starts that PostgreSQL, creates its stanza and enables archiving in it.
+// Mixing strategies in one Project is rejected until a backup generation can
+// hold both kinds of item.
+func validateBackupItems(spec v1.ProjectSpec, volumeNames, managedVolumes map[string]bool, postgresImage string) error {
+	seen := make(map[string]bool, len(spec.Backup.Items))
+	for _, item := range spec.Backup.Items {
+		switch {
+		case item.Volume == "":
+			return handlerutil.NewValidationError("spec.backup.items[].volume", nil,
+				"each backup item must name a volume")
+		case !volumeNames[item.Volume]:
+			return handlerutil.NewValidationError("spec.backup.items[].volume", item.Volume,
+				"backup item references undeclared volume "+item.Volume)
+		case !managedVolumes[item.Volume]:
+			return handlerutil.NewValidationError("spec.backup.items[].volume", item.Volume,
+				"backup item "+item.Volume+": only a Managed volume can have a backup strategy")
+		case seen[item.Volume]:
+			return handlerutil.NewValidationError("spec.backup.items[].volume", item.Volume,
+				"duplicate backup item for volume "+item.Volume)
+		}
+		seen[item.Volume] = true
+
+		switch item.Strategy {
+		case v1.BackupStrategyOffline:
+			if item.RetainFull != nil {
+				return handlerutil.NewValidationError("spec.backup.items[].retainFull", item.Volume,
+					"backup item "+item.Volume+": retainFull applies only to strategy \"PostgresDifferential\"")
+			}
+		case v1.BackupStrategyPostgresDifferential:
+			if n := item.EffectiveRetainFull(); n < v1.MinRetainFull || n > v1.MaxRetainFull {
+				return handlerutil.NewValidationError("spec.backup.items[].retainFull", n,
+					fmt.Sprintf("backup item %s: retainFull must be between %d and %d", item.Volume, v1.MinRetainFull, v1.MaxRetainFull))
+			}
+			if err := validatePostgresDifferentialMount(spec, item.Volume, postgresImage); err != nil {
+				return err
+			}
+		default:
+			return handlerutil.NewValidationError("spec.backup.items[].strategy", item.Strategy,
+				"backup item "+item.Volume+": strategy must be \"Offline\" or \"PostgresDifferential\"")
+		}
+	}
+
+	if spec.HasPostgresDifferential() {
+		for _, vol := range spec.Volumes {
+			if vol.Type == v1.VolumeTypeManaged && spec.BackupStrategyFor(vol.Name) != v1.BackupStrategyPostgresDifferential {
+				return handlerutil.NewValidationError("spec.backup.items", vol.Name,
+					"Managed volume "+vol.Name+" would be backed up offline, but a Project using \"PostgresDifferential\" "+
+						"cannot mix strategies yet; give every Managed volume strategy \"PostgresDifferential\"")
+			}
+		}
+	}
+	return nil
+}
+
+// validatePostgresDifferentialMount requires volume to be mounted by exactly one
+// service, running PostgresDifferentialImage, at PostgresDifferentialDataPath.
+func validatePostgresDifferentialMount(spec v1.ProjectSpec, volume, postgresImage string) error {
+	var mounts []string
+	for _, svc := range spec.Services {
+		for _, vm := range svc.VolumeMounts {
+			if vm.Name != volume {
+				continue
+			}
+			mounts = append(mounts, svc.Name)
+			if svc.Image != postgresImage {
+				return handlerutil.NewValidationError("spec.services[].image", svc.Image,
+					fmt.Sprintf("service %s mounts PostgresDifferential volume %s, so its image must be %q",
+						svc.Name, volume, postgresImage))
+			}
+			if vm.MountPath != v1.PostgresDifferentialDataPath {
+				return handlerutil.NewValidationError("spec.services[].volumeMounts[].mountPath", vm.MountPath,
+					fmt.Sprintf("service %s mounts PostgresDifferential volume %s, so it must be mounted at %q",
+						svc.Name, volume, v1.PostgresDifferentialDataPath))
+			}
+			if err := validatePostgresDifferentialEnv(svc, volume); err != nil {
+				return err
+			}
+		}
+	}
+	switch len(mounts) {
+	case 1:
+		return nil
+	case 0:
+		return handlerutil.NewValidationError("spec.backup.items[].volume", volume,
+			"PostgresDifferential volume "+volume+" is not mounted by any service")
+	default:
+		return handlerutil.NewValidationError("spec.backup.items[].volume", volume,
+			fmt.Sprintf("PostgresDifferential volume %s must be mounted by exactly one service, found %d (%s)",
+				volume, len(mounts), strings.Join(mounts, ", ")))
+	}
+}
+
+// validatePostgresDifferentialEnv rejects environment variables that would put
+// PostgreSQL's data or WAL somewhere other than the mounted volume. The
+// image's entrypoint honours all three; with any of them, the database would
+// live partly outside the volume that provenance, placement and backup treat
+// as its data, and the part outside is lost when the container is recreated.
+//
+// A value from a Secret is refused too: what it holds is only known when the
+// agent resolves it, after the Project has been accepted.
+func validatePostgresDifferentialEnv(svc v1.ServiceDef, volume string) error {
+	for _, env := range svc.Env {
+		switch env.Name {
+		case "PGDATA", "POSTGRES_INITDB_WALDIR", "POSTGRES_INITDB_ARGS":
+		default:
+			continue
+		}
+		if env.ValueFrom != nil {
+			return handlerutil.NewValidationError("spec.services[].env[].valueFrom", env.Name,
+				fmt.Sprintf("service %s uses PostgresDifferential volume %s, so %s must be a literal value that can be checked when the Project is applied",
+					svc.Name, volume, env.Name))
+		}
+		switch env.Name {
+		case "PGDATA":
+			if env.Value != v1.PostgresDifferentialDataPath {
+				return handlerutil.NewValidationError("spec.services[].env[].value", env.Value,
+					fmt.Sprintf("service %s uses PostgresDifferential volume %s, so PGDATA must be %q or unset",
+						svc.Name, volume, v1.PostgresDifferentialDataPath))
+			}
+		case "POSTGRES_INITDB_WALDIR":
+			return handlerutil.NewValidationError("spec.services[].env[].name", env.Name,
+				fmt.Sprintf("service %s uses PostgresDifferential volume %s, so the WAL directory cannot be moved out of it",
+					svc.Name, volume))
+		case "POSTGRES_INITDB_ARGS":
+			for _, arg := range strings.Fields(env.Value) {
+				if !allowedInitdbArg(arg) {
+					return handlerutil.NewValidationError("spec.services[].env[].value", env.Value,
+						fmt.Sprintf("service %s uses PostgresDifferential volume %s, so POSTGRES_INITDB_ARGS may only contain "+
+							"-k, --data-checksums or --NAME=VALUE for a supported setting, written out in full (%q is not)",
+							svc.Name, volume, arg))
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// initdbSettings are the initdb options POSTGRES_INITDB_ARGS may set, all of
+// which take a value and none of which moves data out of PGDATA. An allowlist,
+// not a check for the dangerous ones: initdb accepts any unambiguous prefix of
+// a long option, so "--wald=/tmp/x" moves the WAL as surely as "--waldir"
+// does, and no list of forbidden spellings can be complete.
+var initdbSettings = map[string]bool{
+	"--encoding":        true,
+	"--locale":          true,
+	"--lc-collate":      true,
+	"--lc-ctype":        true,
+	"--lc-messages":     true,
+	"--lc-monetary":     true,
+	"--lc-numeric":      true,
+	"--lc-time":         true,
+	"--locale-provider": true,
+	"--icu-locale":      true,
+	"--auth":            true,
+	"--auth-host":       true,
+	"--auth-local":      true,
+	"--wal-segsize":     true,
+}
+
+// initdbValue is what a setting's value may contain. The image's entrypoint
+// passes POSTGRES_INITDB_ARGS through eval, so a value is shell input: "$",
+// quotes, backslashes and the like would let it expand into further arguments
+// (--encoding=UTF8${IFS}--waldir=/tmp/x is two of them). Every encoding,
+// locale, authentication method and segment size is spelled with these.
+var initdbValue = regexp.MustCompile(`^[A-Za-z0-9_.@-]+$`)
+
+// allowedInitdbArg reports whether arg is a flag initdb may be given for a
+// PostgresDifferential volume: -k or --data-checksums, or a setting from
+// initdbSettings written as --NAME=VALUE with a literal value. Anything else,
+// including a value given as a separate word, is refused rather than parsed.
+func allowedInitdbArg(arg string) bool {
+	if arg == "-k" || arg == "--data-checksums" {
+		return true
+	}
+	name, value, ok := strings.Cut(arg, "=")
+	return ok && initdbSettings[name] && initdbValue.MatchString(value)
 }
 
 // validateEnvVar enforces the EnvVar contract from CARA-57: value and
@@ -250,24 +476,36 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		project.Namespace = v1.DefaultNamespace
 	}
 
-	if err := validateProjectSpec(project.Spec); err != nil {
+	if err := validateProjectSpecFor(project.Spec, h.postgresImage); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 
-	// New projects start in Pending phase; the Scheduler will assign a node.
-	if project.Status.Phase == "" {
-		project.Status.Phase = v1.ProjectPhasePending
-	}
+	// Status is server-owned, all of it, so whatever the client sent is
+	// replaced rather than filtered field by field. A filter only covers the
+	// fields someone remembered to list: a client could otherwise create a
+	// Project already Running on a Node of its choosing, or with forged
+	// recovery evidence, and controllers would act on it as fact.
+	//
+	// A freshly created Project is also the only thing that may claim
+	// NeverAssigned at generation zero: the server is watching it from birth,
+	// so it can prove no Agent has ever owned it. This is what later lets a
+	// still-Pending Project be hard-deleted directly.
+	project.Status = v1.InitialProjectStatus()
 
-	// A freshly created Project is the only thing that may claim NeverAssigned
-	// at generation zero: the server is watching it from birth, so it can prove
-	// no Agent has ever owned it. Assignment generation is server-owned status,
-	// so any value a client tried to send is overwritten here rather than
-	// trusted. This is what later lets a still-Pending Project be hard-deleted
-	// directly, while a migrated Unknown row cannot.
-	project.Status.AssignmentGeneration = 0
-	project.Status.AssignmentHistory = v1.AssignmentHistoryNeverAssigned
+	// A Project whose strategy reports its backups must say it has none from
+	// the moment it exists; otherwise an accepted manifest reads as protected
+	// data. Server-owned, so any value a client sent is replaced.
+	project.Status.Conditions = v1.RemoveConditions(project.Status.Conditions, v1.ConditionTypeBackupActive)
+	if project.Spec.HasPostgresDifferential() {
+		project.Status.Conditions = append(project.Status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypeBackupActive,
+			Status:             v1.ConditionFalse,
+			LastTransitionTime: time.Now().UTC(),
+			Reason:             v1.ReasonNoAcceptedBackup,
+			Message:            "No PostgresDifferential backup of this Project has been accepted yet",
+		})
+	}
 
 	if err := h.store.CreateProject(traceCtx, &project); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
@@ -316,8 +554,18 @@ func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request) {
 		project.Namespace = v1.DefaultNamespace
 	}
 
-	if err := validateProjectSpec(project.Spec); err != nil {
+	if err := validateProjectSpecFor(project.Spec, h.postgresImage); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	// Checked here for a clear field-level answer; the store repeats the check
+	// inside its update, which is what holds against a concurrent update.
+	if current, err := h.store.GetProject(traceCtx, name); err == nil && !v1.SameBackupItems(current.Spec, project.Spec) {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("spec.backup.items", nil,
+				"spec.backup.items cannot change after the Project is created; in-place changes of backup strategy or retainFull are not supported"),
+			logger)
 		return
 	}
 
@@ -505,29 +753,66 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 	// otherwise — so it must enter the Terminating cleanup lifecycle, where the
 	// Agent stops and removes resources before the record is dropped.
 	// WorkloadStopped is never a substitute for ResourcesRemoved.
-	if (project.Status.Phase == v1.ProjectPhasePending || project.Status.Phase == v1.ProjectPhaseFailed) &&
-		project.Status.AssignmentHistory == v1.AssignmentHistoryNeverAssigned {
-		if err := h.store.DeleteProject(traceCtx, name); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
+	//
+	// The read above is only a guess. The Scheduler may commit the first
+	// assignment between it and the delete, so the store checks the same
+	// predicate again on the row it locks for the delete. If it no longer
+	// holds, the request is decided again from the current state — normally
+	// that means entering Terminating like any assigned Project — and never
+	// forced through.
+	if v1.ImmediateDeletionBlocker(project) == "" {
+		err := h.store.FinalizeProject(traceCtx, name, project.ObjectMeta.UID, v1.ImmediateDeletionBlocker)
+		switch {
+		case err == nil:
+			logger.Info("Project deleted immediately", zap.String("project", name),
+				zap.String("phase", string(project.Status.Phase)),
+				zap.String("assignmentHistory", string(project.Status.AssignmentHistory)))
+			w.WriteHeader(http.StatusNoContent)
+			return
+		case errors.Is(err, store.ErrNotFound):
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		case errors.Is(err, store.ErrStaleAssignment):
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project %s was deleted and recreated during this request; retry to delete the new one: %w",
+					name, store.ErrConflictState), logger)
+			return
+		case errors.Is(err, store.ErrConflictState):
+			logger.Info("Project changed before it could be deleted immediately; deciding again",
+				zap.String("project", name), zap.Error(err))
+			current, getErr := h.store.GetProject(traceCtx, name)
+			switch {
+			case errors.Is(getErr, store.ErrNotFound):
 				h.problemWriter.WriteError(traceCtx, w,
 					fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
 				return
+			case getErr != nil:
+				logger.Error("GetProject failed during delete", zap.String("name", name), zap.Error(getErr))
+				h.problemWriter.WriteError(traceCtx, w, getErr, logger)
+				return
+			case current.ObjectMeta.UID != project.ObjectMeta.UID:
+				h.problemWriter.WriteError(traceCtx, w,
+					fmt.Errorf("project %s was deleted and recreated during this request; retry to delete the new one: %w",
+						name, store.ErrConflictState), logger)
+				return
 			}
-			logger.Error("DeleteProject failed", zap.String("name", name), zap.Error(err))
+			project = current
+		default:
+			logger.Error("FinalizeProject failed", zap.String("name", name), zap.Error(err))
 			h.problemWriter.WriteError(traceCtx, w, err, logger)
 			return
 		}
-		logger.Info("Project deleted immediately", zap.String("project", name),
-			zap.String("phase", string(project.Status.Phase)),
-			zap.String("assignmentHistory", string(project.Status.AssignmentHistory)))
-		w.WriteHeader(http.StatusNoContent)
-		return
 	}
 
 	switch project.Status.Phase {
-	case v1.ProjectPhaseTerminating:
-		// Already in progress; idempotent.
-		logger.Info("Project already terminating", zap.String("project", name))
+	case v1.ProjectPhaseTerminating, v1.ProjectPhaseTerminated:
+		// Already in progress; idempotent. Terminated is answered the same
+		// way: its resources are confirmed gone and the record is about to be
+		// finalized, so moving it back to Terminating would only reopen a
+		// deletion that has finished.
+		logger.Info("Project already terminating", zap.String("project", name),
+			zap.String("phase", string(project.Status.Phase)))
 		w.WriteHeader(http.StatusAccepted)
 
 	default:
@@ -535,15 +820,51 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 		//
 		// The phase is set on whatever status the store read, not on the copy
 		// fetched above: a controller may have written NodeRef or a condition
-		// in between, and replacing the whole status would discard it.
-		err := h.store.UpdateProjectStatusWithRetry(traceCtx, name, func(status *v1.ProjectStatus) error {
+		// in between, and replacing the whole status would discard it. The
+		// write is pinned to the UID fetched above, so the Project the caller
+		// asked to delete is the one that terminates, never a same-name
+		// successor created in between.
+		now := time.Now().UTC()
+		uid := project.ObjectMeta.UID
+		err := h.store.UpdateProjectStatusForUID(traceCtx, name, uid, func(status *v1.ProjectStatus) error {
+			if status.Phase == v1.ProjectPhaseTerminating || status.Phase == v1.ProjectPhaseTerminated {
+				// Reached Terminating or beyond since the read above.
+				return nil
+			}
+			if !v1.PhaseTransitionAllowed(v1.WriterDeleteAPI, status.Phase, v1.ProjectPhaseTerminating) {
+				return fmt.Errorf("%w: project %q is %s; it cannot enter Terminating from there",
+					store.ErrConflictState, name, status.Phase)
+			}
 			status.Phase = v1.ProjectPhaseTerminating
+			// The assigned Node now owes the removal of everything it holds
+			// for this assignment. Recorded in the same write as the phase,
+			// so the obligation list stays the complete set of Nodes that
+			// may hold resources. A Project with no nodeRef has no current
+			// assignment; any earlier Node is already in the list from its
+			// release.
+			if status.NodeRef != "" {
+				status.EnsureRecovery().AddObligation(v1.AssignmentIdentity{
+					ProjectUID:           uid,
+					NodeName:             status.NodeRef,
+					AssignmentGeneration: status.AssignmentGeneration,
+				}, now, v1.ReleaseByDeletion)
+			}
 			return nil
 		})
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				h.problemWriter.WriteError(traceCtx, w,
 					fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+				return
+			}
+			if errors.Is(err, store.ErrStaleAssignment) {
+				h.problemWriter.WriteError(traceCtx, w,
+					fmt.Errorf("project %s was deleted and recreated during this request; retry to delete the new one: %w",
+						name, store.ErrConflictState), logger)
+				return
+			}
+			if errors.Is(err, store.ErrConflictState) {
+				h.problemWriter.WriteError(traceCtx, w, err, logger)
 				return
 			}
 			logger.Error("Marking project Terminating failed", zap.String("name", name), zap.Error(err))
@@ -563,7 +884,7 @@ func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 // UID, NodeRef, and AssignmentGeneration carry the assignment fence the Agent
 // was granted (CARA-83). AssignmentGeneration is a pointer so a legacy Agent
 // that omits it is distinguishable from one reporting generation zero: nil
-// means "no fence sent", which is only accepted under compatibility mode.
+// means "no fence sent", which is refused.
 type statusPatchRequest struct {
 	Phase                v1.ProjectPhase `json:"phase"`
 	Reason               string          `json:"reason,omitempty"`
@@ -573,31 +894,38 @@ type statusPatchRequest struct {
 	AssignmentGeneration *int64          `json:"assignmentGeneration,omitempty"`
 }
 
-// resolveFence interprets the assignment fields an Agent presented and decides
-// whether the fenced write path must be used.
-//
-// A complete fence (UID, nodeRef, and an explicit generation) always takes the
-// fenced path. An incomplete fence comes from an Agent that predates CARA-83:
-// under strict enforcement it is rejected as stale here, and the caller must
-// return; under compatibility mode it falls back to the unfenced path so the
-// old Agent keeps working. The returned proceed flag is false only when an
-// error problem has already been written.
+// resolveFence reads the assignment fields an Agent presented. An incomplete
+// fence comes from an Agent that predates CARA-83 and is rejected as stale; the
+// returned flag is then false, the problem is already written, and the caller
+// must return.
 func (h *Handler) resolveFence(
 	ctx context.Context,
 	w http.ResponseWriter,
 	logger *zap.Logger,
 	name, uid, nodeRef string,
 	generation *int64,
-) (ref store.AssignmentRef, fenced, proceed bool) {
+) (store.AssignmentRef, bool) {
 	if uid == "" || nodeRef == "" || generation == nil {
-		if h.enforceAssignment {
-			h.problemWriter.WriteError(ctx, w,
-				fmt.Errorf("%w: project %q: request is missing an assignment fence", store.ErrStaleAssignment, name), logger)
-			return store.AssignmentRef{}, false, false
-		}
-		return store.AssignmentRef{}, false, true
+		h.problemWriter.WriteError(ctx, w,
+			fmt.Errorf("%w: project %q: request is missing an assignment fence", store.ErrStaleAssignment, name), logger)
+		return store.AssignmentRef{}, false
 	}
-	return store.AssignmentRef{UID: uid, NodeRef: nodeRef, Generation: *generation}, true, true
+	if !h.fenceOwnedByCaller(ctx, w, logger, nodeRef) {
+		return store.AssignmentRef{}, false
+	}
+	return store.AssignmentRef{UID: uid, NodeRef: nodeRef, Generation: *generation}, true
+}
+
+// fenceOwnedByCaller refuses a Node that presents another Node's fence
+// (CARA-140). Every fenced write passes through it, via resolveFence or
+// decodeEvidenceFence; the flag is false when the problem is written.
+func (h *Handler) fenceOwnedByCaller(ctx context.Context, w http.ResponseWriter, logger *zap.Logger, nodeRef string) bool {
+	if err := authz.RequireFenceOwner(ctx, nodeRef); err != nil {
+		logger.Warn("Refused a fenced write", zap.Error(err))
+		h.problemWriter.WriteError(ctx, w, err, logger)
+		return false
+	}
+	return true
 }
 
 // patchStatus handles PATCH /api/v1/projects/{name}/status.
@@ -631,8 +959,8 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ref, fenced, proceed := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
-	if !proceed {
+	ref, ok := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
+	if !ok {
 		return
 	}
 
@@ -645,8 +973,30 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 	// this attempt. Replacing the whole status here is what used to discard a
 	// controller's concurrent write.
 	mutate := func(status *v1.ProjectStatus) error {
+		// Checked on the snapshot this attempt will write, so a deletion that
+		// lands between the Agent's observation and this write wins: a late
+		// Running report cannot turn a Terminating Project back into a running
+		// one, even though its fence still names the same assignment.
+		if !v1.PhaseTransitionAllowed(v1.WriterAgent, status.Phase, req.Phase) {
+			return fmt.Errorf("%w: project %q is %s; an Agent cannot report it %s",
+				store.ErrConflictState, name, status.Phase, req.Phase)
+		}
+		// The phase may say the resources are gone only once the evidence that
+		// they are is recorded, for the assignment making the report.
+		if req.Phase == v1.ProjectPhaseTerminated && status.Phase != v1.ProjectPhaseTerminated &&
+			!status.Recovery.ResourcesRemovedFor(status.NodeRef, status.AssignmentGeneration) {
+			return fmt.Errorf("%w: project %q: node %s has not recorded ResourcesRemoved for generation %d",
+				store.ErrConflictState, name, status.NodeRef, status.AssignmentGeneration)
+		}
+
 		transitioned := status.Phase != req.Phase
 		status.Phase = req.Phase
+		// A reported failure ends the healthy window in the same write. This
+		// is the one recovery field an Agent report may change, and only to
+		// clear it.
+		if req.Phase == v1.ProjectPhaseFailed {
+			status.Recovery.ClearHealthyWindow()
+		}
 
 		if req.Reason == "" && req.Message == "" {
 			return nil
@@ -666,18 +1016,18 @@ func (h *Handler) patchStatus(w http.ResponseWriter, r *http.Request) {
 
 	// The fenced path re-asserts (UID, nodeRef, generation) inside the guarding
 	// UPDATE, so a report from an Agent that has since lost ownership is
-	// rejected as stale without touching the row. The unfenced path is only
-	// reachable in compatibility mode for a legacy Agent.
-	var err error
-	if fenced {
-		err = h.store.ReportProjectStatusFenced(traceCtx, name, ref, mutate)
-	} else {
-		err = h.store.UpdateProjectStatusWithRetry(traceCtx, name, mutate)
-	}
-	if err != nil {
+	// rejected as stale without touching the row.
+	if err := h.store.ReportProjectStatusFenced(traceCtx, name, ref, mutate); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.problemWriter.WriteError(traceCtx, w,
 				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		}
+		if errors.Is(err, store.ErrConflictState) || errors.Is(err, store.ErrStaleAssignment) {
+			// Expected whenever a report races a lifecycle change; the Agent
+			// learns from the 409, and the server log need not.
+			logger.Info("Project status patch refused", zap.String("name", name), zap.Error(err))
+			h.problemWriter.WriteError(traceCtx, w, err, logger)
 			return
 		}
 		logger.Error("Project status patch failed", zap.String("name", name), zap.Error(err))
@@ -703,6 +1053,9 @@ var agentWritableConditions = map[v1.ConditionType]bool{
 	v1.ConditionTypeMaintenance:     true,
 	v1.ConditionTypeRecoveryBlocked: true,
 	v1.ConditionTypeEvictionBackup:  true,
+	v1.ConditionTypeTeardownBlocked: true,
+	v1.ConditionTypeBackupFailing:   true,
+	v1.ConditionTypeDataRestored:    true,
 }
 
 // conditionPatchRequest is the body sent to
@@ -775,8 +1128,8 @@ func (h *Handler) patchCondition(w http.ResponseWriter, r *http.Request) {
 	// merge, would cover every producer at once; it is not done yet because
 	// it changes Maintenance too, whose staleness is measured from the
 	// timestamp this stamps.
-	ref, fenced, proceed := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
-	if !proceed {
+	ref, ok := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
+	if !ok {
 		return
 	}
 
@@ -790,13 +1143,7 @@ func (h *Handler) patchCondition(w http.ResponseWriter, r *http.Request) {
 		LastTransitionTime: now,
 	}
 
-	var err error
-	if fenced {
-		err = h.store.PatchProjectConditionFenced(traceCtx, name, ref, condition)
-	} else {
-		err = h.store.PatchProjectCondition(traceCtx, name, condition)
-	}
-	if err != nil {
+	if err := h.store.PatchProjectConditionFenced(traceCtx, name, ref, condition); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.problemWriter.WriteError(traceCtx, w,
 				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
@@ -848,18 +1195,12 @@ func (h *Handler) deleteCondition(w http.ResponseWriter, r *http.Request) {
 		generation = &g
 	}
 
-	ref, fenced, proceed := h.resolveFence(traceCtx, w, logger, name, uid, nodeRef, generation)
-	if !proceed {
+	ref, ok := h.resolveFence(traceCtx, w, logger, name, uid, nodeRef, generation)
+	if !ok {
 		return
 	}
 
-	var err error
-	if fenced {
-		err = h.store.ClearProjectConditionFenced(traceCtx, name, ref, condType)
-	} else {
-		err = h.store.ClearProjectCondition(traceCtx, name, condType)
-	}
-	if err != nil {
+	if err := h.store.ClearProjectConditionFenced(traceCtx, name, ref, condType); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			h.problemWriter.WriteError(traceCtx, w,
 				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
@@ -875,4 +1216,300 @@ func (h *Handler) deleteCondition(w http.ResponseWriter, r *http.Request) {
 		zap.String("condition", string(condType)),
 	)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// evidenceRequest is the body of the recovery evidence endpoints: the
+// assignment fence and nothing else. The evidence identity is the fence; the
+// server stamps the observation time.
+type evidenceRequest struct {
+	UID                  string `json:"uid"`
+	NodeRef              string `json:"nodeRef"`
+	AssignmentGeneration *int64 `json:"assignmentGeneration"`
+}
+
+// stanzaRequest is the body of PUT /api/v1/projects/{name}/backup/stanzas: the
+// assignment fence, and the volume whose stanza the Agent is about to create.
+type stanzaRequest struct {
+	evidenceRequest
+	Volume string `json:"volume"`
+}
+
+// putStanza handles PUT /api/v1/projects/{name}/backup/stanzas.
+//
+// The Agent records a stanza before creating it, so the inventory a deleted
+// lifetime's cleanup reads lists every stanza that may exist. The fence is
+// required in full and checked atomically with the write; the volume must be
+// a PostgresDifferential item of the Project, which cannot change after
+// creation, so checking it on a separate read is sound.
+func (h *Handler) putStanza(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putStanza")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	var req stanzaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return
+	}
+	if req.UID == "" || req.NodeRef == "" || req.AssignmentGeneration == nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			fmt.Errorf("%w: project %q: a stanza requires a complete assignment fence", store.ErrStaleAssignment, name), logger)
+		return
+	}
+	if !h.fenceOwnedByCaller(traceCtx, w, logger, req.NodeRef) {
+		return
+	}
+
+	project, err := h.store.GetProject(traceCtx, name)
+	if err != nil {
+		h.writeEvidenceResult(traceCtx, w, logger, name, "Stanza", err)
+		return
+	}
+	if project.Spec.BackupStrategyFor(req.Volume) != v1.BackupStrategyPostgresDifferential || !hasManagedVolume(project.Spec, req.Volume) {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("volume", req.Volume,
+				"volume "+req.Volume+" is not a PostgresDifferential volume of project "+name), logger)
+		return
+	}
+
+	ref := store.AssignmentRef{UID: req.UID, NodeRef: req.NodeRef, Generation: *req.AssignmentGeneration}
+	err = h.store.RecordStanza(traceCtx, name, ref, req.Volume, time.Now().UTC())
+	h.writeEvidenceResult(traceCtx, w, logger, name, "Stanza", err)
+}
+
+// completionRequest is the body of
+// PUT /api/v1/projects/{name}/backup/completions/{backupID}.
+type completionRequest struct {
+	evidenceRequest
+	Items []v1.BackupCompletionItem `json:"items"`
+}
+
+// putBackupCompletion handles
+// PUT /api/v1/projects/{name}/backup/completions/{backupID}.
+//
+// The Agent reports a backup after confirming it in pgBackRest and writing its
+// manifest. The store accepts it only from the current assignment of a Running
+// Project, idempotently by backupID: a retry of an accepted one is accepted
+// again even after a reassignment. Each item must be the backup of a
+// PostgresDifferential volume of the Project in the stanza of the reporting
+// lifetime.
+func (h *Handler) putBackupCompletion(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putBackupCompletion")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name, backupID := r.PathValue("name"), r.PathValue("backupID")
+
+	var req completionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return
+	}
+	if req.UID == "" || req.NodeRef == "" || req.AssignmentGeneration == nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			fmt.Errorf("%w: project %q: a backup completion requires a complete assignment fence", store.ErrStaleAssignment, name), logger)
+		return
+	}
+	if !h.fenceOwnedByCaller(traceCtx, w, logger, req.NodeRef) {
+		return
+	}
+	if !backupIDPattern.MatchString(backupID) {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("backupID", backupID, "not a backup ID"), logger)
+		return
+	}
+
+	project, err := h.store.GetProject(traceCtx, name)
+	if err != nil {
+		h.writeEvidenceResult(traceCtx, w, logger, name, "BackupCompletion", err)
+		return
+	}
+	if len(req.Items) == 0 {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("items", nil, "a backup completion lists at least one item"), logger)
+		return
+	}
+	for i, item := range req.Items {
+		field := fmt.Sprintf("items[%d]", i)
+		switch {
+		case project.Spec.BackupStrategyFor(item.Volume) != v1.BackupStrategyPostgresDifferential || !hasManagedVolume(project.Spec, item.Volume):
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError(field+".volume", item.Volume,
+					"volume "+item.Volume+" is not a PostgresDifferential volume of project "+name), logger)
+			return
+		case item.Stanza != v1.StanzaName(req.UID, item.Volume):
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError(field+".stanza", item.Stanza, "not the stanza of this lifetime's volume"), logger)
+			return
+		case item.Label == "":
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError(field+".label", item.Label, "a backup label is required"), logger)
+			return
+		case item.Type != "full" && item.Type != "diff":
+			h.problemWriter.WriteError(traceCtx, w,
+				handlerutil.NewValidationError(field+".type", item.Type, "must be full or diff"), logger)
+			return
+		}
+	}
+
+	ref := store.AssignmentRef{UID: req.UID, NodeRef: req.NodeRef, Generation: *req.AssignmentGeneration}
+	err = h.store.RecordBackupCompletion(traceCtx, name, ref, v1.BackupCompletion{
+		BackupID:    backupID,
+		AcceptedAt:  time.Now().UTC(),
+		ManifestKey: v1.BackupManifestKey(req.UID, backupID),
+		Items:       req.Items,
+	})
+	h.writeEvidenceResult(traceCtx, w, logger, name, "BackupCompletion", err)
+}
+
+func hasManagedVolume(spec v1.ProjectSpec, volume string) bool {
+	for _, v := range spec.Volumes {
+		if v.Name == volume && v.Type == v1.VolumeTypeManaged {
+			return true
+		}
+	}
+	return false
+}
+
+// decodeEvidenceFence reads an evidenceRequest and requires a complete fence.
+//
+// Unlike the condition and status paths, a missing fence is refused in every
+// mode: the evidence records which assignment it is about, and without a fence
+// there is no assignment to record.
+func (h *Handler) decodeEvidenceFence(ctx context.Context, w http.ResponseWriter, r *http.Request, logger *zap.Logger, name string) (store.AssignmentRef, bool) {
+	var req evidenceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.problemWriter.WriteError(ctx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return store.AssignmentRef{}, false
+	}
+	if req.UID == "" || req.NodeRef == "" || req.AssignmentGeneration == nil {
+		h.problemWriter.WriteError(ctx, w,
+			fmt.Errorf("%w: project %q: evidence requires a complete assignment fence", store.ErrStaleAssignment, name), logger)
+		return store.AssignmentRef{}, false
+	}
+	if !h.fenceOwnedByCaller(ctx, w, logger, req.NodeRef) {
+		return store.AssignmentRef{}, false
+	}
+	return store.AssignmentRef{UID: req.UID, NodeRef: req.NodeRef, Generation: *req.AssignmentGeneration}, true
+}
+
+// writeEvidenceResult maps a store result for an evidence write to a response.
+func (h *Handler) writeEvidenceResult(ctx context.Context, w http.ResponseWriter, logger *zap.Logger, name, kind string, err error) {
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.problemWriter.WriteError(ctx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		}
+		if !errors.Is(err, store.ErrStaleAssignment) && !errors.Is(err, store.ErrConflictState) {
+			logger.Error("Recording recovery evidence failed", zap.String("name", name), zap.String("evidence", kind), zap.Error(err))
+		}
+		h.problemWriter.WriteError(ctx, w, err, logger)
+		return
+	}
+	logger.Info("Recovery evidence recorded", zap.String("project", name), zap.String("evidence", kind))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// putWorkloadStopped handles PUT /api/v1/projects/{name}/recovery/workload-stopped.
+//
+// The currently assigned Agent calls it after confirming every Project
+// container is stopped. The store checks the fence and phase atomically with
+// the write; re-recording the same evidence is a no-op.
+func (h *Handler) putWorkloadStopped(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putWorkloadStopped")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	ref, ok := h.decodeEvidenceFence(traceCtx, w, r, logger, name)
+	if !ok {
+		return
+	}
+	err := h.store.RecordWorkloadStopped(traceCtx, name, ref, time.Now().UTC())
+	h.writeEvidenceResult(traceCtx, w, logger, name, "WorkloadStopped", err)
+}
+
+// putManagedDataQuarantined handles
+// PUT /api/v1/projects/{name}/recovery/managed-data-quarantined.
+//
+// The Agent of a cleanup obligation calls it after its local Managed data has
+// left the active path. It lets the Node hold the Project again and grants no
+// other authority.
+func (h *Handler) putManagedDataQuarantined(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putManagedDataQuarantined")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	ref, ok := h.decodeEvidenceFence(traceCtx, w, r, logger, name)
+	if !ok {
+		return
+	}
+	err := h.store.RecordManagedDataQuarantined(traceCtx, name, ref, time.Now().UTC())
+	h.writeEvidenceResult(traceCtx, w, logger, name, "ManagedDataQuarantined", err)
+}
+
+// backupIDPattern is the shape backup.NewBackupID produces. The Agent builds
+// object store keys from the committed value, so it is checked here too.
+var backupIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`)
+
+// committedBackupRequest is the body of the committed-backup endpoint.
+type committedBackupRequest struct {
+	UID                  string `json:"uid"`
+	NodeRef              string `json:"nodeRef"`
+	AssignmentGeneration *int64 `json:"assignmentGeneration"`
+	BackupID             string `json:"backupID"`
+}
+
+// putCommittedBackup handles PUT /api/v1/projects/{name}/recovery/committed-backup.
+//
+// The currently assigned Agent calls it after a generation's archives and
+// manifest are in the object store. Until then the generation is not a restore
+// source, and an Agent whose assignment was released cannot make it one.
+func (h *Handler) putCommittedBackup(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putCommittedBackup")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	var req committedBackupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return
+	}
+	if !backupIDPattern.MatchString(req.BackupID) {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("backupID", req.BackupID, "backupID is not a valid backup generation"), logger)
+		return
+	}
+	ref, ok := h.resolveFence(traceCtx, w, logger, name, req.UID, req.NodeRef, req.AssignmentGeneration)
+	if !ok {
+		return
+	}
+	err := h.store.RecordCommittedBackup(traceCtx, name, ref, req.BackupID, time.Now().UTC())
+	h.writeEvidenceResult(traceCtx, w, logger, name, "CommittedBackup", err)
+}
+
+// putResourcesRemoved handles PUT /api/v1/projects/{name}/recovery/resources-removed.
+//
+// The Agent of a cleanup obligation calls it after removing every
+// deletion-scoped runtime resource it held for that obligation's assignment.
+// It resolves that one obligation and grants no other authority.
+func (h *Handler) putResourcesRemoved(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "putResourcesRemoved")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	ref, ok := h.decodeEvidenceFence(traceCtx, w, r, logger, name)
+	if !ok {
+		return
+	}
+	err := h.store.RecordResourcesRemoved(traceCtx, name, ref, time.Now().UTC())
+	h.writeEvidenceResult(traceCtx, w, logger, name, "ResourcesRemoved", err)
 }

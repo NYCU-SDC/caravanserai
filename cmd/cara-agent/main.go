@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -16,6 +18,8 @@ import (
 	forwardhandler "NYCU-SDC/caravanserai/internal/agent/apiserver/handler/forward"
 	logshandler "NYCU-SDC/caravanserai/internal/agent/apiserver/handler/logs"
 	"NYCU-SDC/caravanserai/internal/agent/docker"
+	"NYCU-SDC/caravanserai/internal/agent/identity"
+	"NYCU-SDC/caravanserai/internal/agent/pgbackrest"
 	"NYCU-SDC/caravanserai/internal/agent/proxy"
 	"NYCU-SDC/caravanserai/internal/appinit"
 	"NYCU-SDC/caravanserai/internal/config"
@@ -82,6 +86,19 @@ func main() {
 	defer stop()
 
 	agentClient := agent.NewClient(logger, cfg.ServerURL, cfg.NodeName)
+	// The Node token comes from AGENT_TOKEN_FILE, from an earlier enrolment, or
+	// from trading JOIN_TOKEN_FILE for one (CARA-138). Without one, every
+	// request would be refused, so the agent does not start.
+	nodeToken, err := identity.Resolve(ctx, identity.Config{
+		TokenFile:     cfg.TokenFile,
+		JoinTokenFile: cfg.JoinTokenFile,
+		Dir:           filepath.Join(cfg.DataRoot, "identity"),
+		IsRefusal:     func(err error) bool { return errors.Is(err, agent.ErrJoinRefused) },
+	}, agentClient, logger)
+	if err != nil {
+		logger.Fatal("Cannot obtain this Node's token", zap.Error(err))
+	}
+	agentClient.SetToken(nodeToken)
 
 	// ── Headscale overlay join ────────────────────────────────────────────
 	// Overlay networking is opt-in in 1.0 (CARA-55): the agent joins the
@@ -141,7 +158,7 @@ func main() {
 		logger.Info("Overlay networking disabled (headscale_url/preauth_key_file not set), running on underlay")
 	}
 
-	dockerRuntime, err := docker.NewDockerRuntime(cfg.DockerHost, cfg.DataRoot, cfg.UIDEnforcement, logger)
+	dockerRuntime, err := docker.NewDockerRuntime(cfg.DockerHost, cfg.DataRoot, logger)
 	if err != nil {
 		logger.Fatal("Failed to create Docker runtime", zap.Error(err))
 	}
@@ -173,6 +190,25 @@ func main() {
 		logger.Fatal("Failed to configure Managed volume backups", zap.Error(err))
 	}
 
+	// ── pgBackRest repo host ────────────────────────────────────────────
+	// Only with an object store: the repo host stores stanzas there. It does
+	// nothing until a PostgresDifferential Project is authorized.
+	var repoHost *pgbackrest.RepoHost
+	if cfg.S3.Enabled() {
+		repoHost = pgbackrest.NewRepoHost(dockerRuntime, pgbackrest.Config{
+			DataRoot: cfg.DataRoot,
+			NodeName: cfg.NodeName,
+			S3: pgbackrest.S3{
+				Endpoint:  cfg.S3.Endpoint,
+				Bucket:    cfg.S3.Bucket,
+				Region:    cfg.S3.Region,
+				AccessKey: cfg.S3.AccessKey,
+				SecretKey: cfg.S3.SecretKey,
+				CAFile:    cfg.S3.CAFile,
+			},
+		}, logger)
+	}
+
 	// Validate has already rejected malformed values, so this cannot fail.
 	reservedCPU, reservedMemory, _ := cfg.SystemReserved()
 
@@ -184,9 +220,10 @@ func main() {
 		AdvertiseIP:       cfg.AdvertiseIP,
 		Resources:         dockerRuntime,
 		SystemReserved:    agent.SystemReserved{CPUMilli: reservedCPU, MemoryBytes: reservedMemory},
+		DataRoot:          cfg.DataRoot,
 		Routes:            routeTable,
 		Backups:           backupSupport,
-		UIDEnforcement:    cfg.UIDEnforcement,
+		RepoHost:          repoHost,
 		Logger:            logger,
 	})
 

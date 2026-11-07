@@ -1,0 +1,22 @@
+# Installed by the cara-server package (CARA-143). Settings go in
+# /etc/cara/server.env; local changes to this unit go in a drop-in
+# (systemctl edit cara-server), which an upgrade does not overwrite.
+[Unit]
+Description=Caravanserai control plane
+Documentation=https://github.com/NYCU-SDC/caravanserai
+Wants=network-online.target
+After=network-online.target postgresql.service docker.service
+
+[Service]
+EnvironmentFile=/etc/cara/server.env
+StateDirectory=cara-server
+WorkingDirectory=/var/lib/cara-server
+ExecStart=/usr/bin/cara-server
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

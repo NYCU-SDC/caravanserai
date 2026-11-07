@@ -2,8 +2,12 @@ package objectstore
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -22,6 +26,9 @@ type MinioConfig struct {
 	Secure    bool
 	AccessKey string
 	SecretKey string
+	// CAFile, when set, is a CA certificate trusted in addition to the system
+	// pool, for an endpoint with a private CA.
+	CAFile string
 }
 
 // minioStore implements ObjectStore against a MinIO or other S3-compatible
@@ -48,17 +55,43 @@ func NewMinioStore(cfg MinioConfig) (ObjectStore, error) {
 		return nil, fmt.Errorf("objectstore: bucket must not be empty")
 	}
 
-	client, err := minio.New(cfg.Endpoint, &minio.Options{
+	opts := &minio.Options{
 		Creds:        credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure:       cfg.Secure,
 		Region:       cfg.Region,
 		BucketLookup: minio.BucketLookupPath,
-	})
+	}
+	if cfg.CAFile != "" {
+		transport, err := transportTrusting(cfg.CAFile)
+		if err != nil {
+			return nil, err
+		}
+		opts.Transport = transport
+	}
+	client, err := minio.New(cfg.Endpoint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("objectstore: create client: %w", err)
 	}
 
 	return &minioStore{client: client, bucket: cfg.Bucket}, nil
+}
+
+// transportTrusting is the default transport, also trusting the CA in caFile.
+func transportTrusting(caFile string) (*http.Transport, error) {
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("objectstore: read CA file: %w", err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("objectstore: %s holds no PEM certificate", caFile)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	return transport, nil
 }
 
 func (s *minioStore) Put(ctx context.Context, key string, body io.Reader, opts PutOptions) (ObjectMeta, error) {

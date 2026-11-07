@@ -71,6 +71,7 @@ func TestFailbackMovesProjectBackToPrimary(t *testing.T) {
 
 	waitForEvictionState(t, s, "fb-app", v1.EvictionStateBackingUp)
 	agentReportsBackup(t, s, "fb-app", v1.ConditionTrue, "backup-1")
+	sourceNodeCleansUp(t, s, "fb-app")
 
 	controllerhelper.WaitForCondition(t, 20*time.Second, 200*time.Millisecond, "back on fb-pve1", func() bool {
 		p, err := s.Store.GetProject(ctx, "fb-app")
@@ -118,6 +119,7 @@ func TestFailbackOneAtATime(t *testing.T) {
 	assert.Equal(t, v1.EvictionState(""), evictionState(t, s, "fb-b"), "fb-b waits while fb-a is moving")
 
 	agentReportsBackup(t, s, "fb-a", v1.ConditionTrue, "backup-a")
+	sourceNodeCleansUp(t, s, "fb-a")
 	controllerhelper.WaitForCondition(t, 20*time.Second, 200*time.Millisecond, "fb-a done", func() bool {
 		return evictionState(t, s, "fb-a") == ""
 	})

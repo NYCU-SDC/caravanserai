@@ -424,3 +424,71 @@ func TestSentinelErrorsAreDistinct(t *testing.T) {
 func versionConflictLike(sentinel error) error {
 	return errors.Join(sentinel, errors.New(`project "demo"`))
 }
+
+func recoveryWithEvidence() *v1.ProjectRecoveryStatus {
+	at := time.Date(2026, 10, 3, 9, 0, 0, 123456789, time.UTC)
+	return &v1.ProjectRecoveryStatus{
+		RescheduleAttempts: 1,
+		LastAttemptAt:      &at,
+		WorkloadStopped: &v1.WorkloadStoppedEvidence{
+			Assignment: v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: 6},
+			ObservedAt: at,
+		},
+	}
+}
+
+// Recovery holds pointers. A copy that shares them mutates the "before"
+// snapshot alongside the candidate, so an in-place edit of an evidence field
+// would compare equal and write nothing — the same failure the Conditions test
+// guards against, through a different field.
+func TestRetryDetectsInPlaceRecoveryEdit(t *testing.T) {
+	f := &fakeStatusCAS{
+		status:  v1.ProjectStatus{Phase: v1.ProjectPhaseRunning, Recovery: recoveryWithEvidence()},
+		version: 2,
+	}
+
+	committed, err := retryProjectStatusUpdate(context.Background(), f, "demo",
+		func(s *v1.ProjectStatus) error {
+			s.Recovery.WorkloadStopped.Assignment.AssignmentGeneration = 7
+			*s.Recovery.LastAttemptAt = s.Recovery.LastAttemptAt.Add(time.Minute)
+			return nil
+		})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !committed || f.swaps != 1 {
+		t.Fatalf("committed=%v swaps=%d — an in-place recovery edit was seen as no change, "+
+			"which means the status copy aliases a Recovery pointer", committed, f.swaps)
+	}
+}
+
+// Reasserting identical evidence — the same report arriving again after a
+// retry or an Agent restart — must be a no-op: no write, no version bump, no
+// event. Evidence that came back from the database must compare equal to the
+// same evidence built in-process.
+func TestRecoveryEvidenceReassertionIsNoOp(t *testing.T) {
+	stored := v1.ProjectStatus{Phase: v1.ProjectPhaseRunning, Recovery: recoveryWithEvidence()}
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromDB v1.ProjectStatus
+	if err := json.Unmarshal(raw, &fromDB); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &fakeStatusCAS{status: fromDB, version: 2}
+	committed, err := retryProjectStatusUpdate(context.Background(), f, "demo",
+		func(s *v1.ProjectStatus) error {
+			s.Recovery.WorkloadStopped = recoveryWithEvidence().WorkloadStopped
+			return nil
+		})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if committed || f.swaps != 0 {
+		t.Errorf("committed=%v swaps=%d — reasserting identical evidence wrote a new version", committed, f.swaps)
+	}
+}

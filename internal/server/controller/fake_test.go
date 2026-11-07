@@ -50,14 +50,12 @@ type setProjectScheduledCall struct {
 	NodeRef string
 }
 
-// deleteProjectCall records a single invocation of DeleteProject.
-type deleteProjectCall struct {
-	Name string
-}
-
-// setProjectPendingCall records a single invocation of SetProjectPending.
-type setProjectPendingCall struct {
-	Name string
+// releaseAssignmentCall records a single invocation of ReleaseAssignment.
+type releaseAssignmentCall struct {
+	Name                 string
+	NodeRef              string
+	AssignmentGeneration int64
+	Released             bool
 }
 
 // setTerminatingAtCall records a single invocation of SetTerminatingAt.
@@ -72,9 +70,12 @@ type setNotReadyAtCall struct {
 	At   time.Time
 }
 
-// forceTerminatedCall records a single invocation of ForceTerminated.
-type forceTerminatedCall struct {
-	Name string
+// setTerminationBlockedCall records a single invocation of
+// SetTerminationBlocked.
+type setTerminationBlockedCall struct {
+	Name    string
+	NodeRef string
+	At      time.Time
 }
 
 // ---------------------------------------------------------------------------
@@ -153,9 +154,14 @@ func (f *fakeNodeStore) SetNodeState(_ context.Context, name string, state v1.No
 // ---------------------------------------------------------------------------
 
 type fakeSchedulerProjectStore struct {
-	mu       sync.Mutex
-	projects map[string]schedulerProjectRecord
-	errs     map[string]error
+	SchedulingBlockedCalls []string
+	mu                     sync.Mutex
+	projects               map[string]schedulerProjectRecord
+	errs                   map[string]error
+
+	// scheduleErrs fails only SetProjectScheduled, as the adapter does when a
+	// cleanup obligation refuses the assignment; reads still succeed.
+	scheduleErrs map[string]error
 
 	SetProjectScheduledCalls []setProjectScheduledCall
 }
@@ -172,8 +178,9 @@ var _ SchedulerProjectStore = (*fakeSchedulerProjectStore)(nil)
 
 func newFakeSchedulerProjectStore() *fakeSchedulerProjectStore {
 	return &fakeSchedulerProjectStore{
-		projects: make(map[string]schedulerProjectRecord),
-		errs:     make(map[string]error),
+		projects:     make(map[string]schedulerProjectRecord),
+		errs:         make(map[string]error),
+		scheduleErrs: make(map[string]error),
 	}
 }
 
@@ -234,11 +241,21 @@ func (f *fakeSchedulerProjectStore) ListProjectsByNodeRef(_ context.Context, nod
 	return out, nil
 }
 
+func (f *fakeSchedulerProjectStore) SetSchedulingBlocked(_ context.Context, _, reason, message string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.SchedulingBlockedCalls = append(f.SchedulingBlockedCalls, reason+": "+message)
+	return nil
+}
+
 func (f *fakeSchedulerProjectStore) SetProjectScheduled(_ context.Context, name, nodeRef string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if err, ok := f.errs[name]; ok {
+		return err
+	}
+	if err, ok := f.scheduleErrs[name]; ok {
 		return err
 	}
 
@@ -303,12 +320,28 @@ type fakeTerminationProjectStore struct {
 	projects map[string]terminationProjectRecord
 	errs     map[string]error
 
-	DeleteProjectCalls []deleteProjectCall
+	FinalizeCalls               []finalizeCall
+	SetFinalizationBlockedCalls []setFinalizationBlockedCall
 }
 
 type terminationProjectRecord struct {
+	UID     string
 	Phase   v1.ProjectPhase
 	NodeRef string
+	// BlockedBy, when set, is the reason the store's finalization predicate
+	// refuses this record.
+	BlockedBy string
+}
+
+type finalizeCall struct {
+	Name string
+	UID  string
+}
+
+type setFinalizationBlockedCall struct {
+	Name   string
+	UID    string
+	Reason string
 }
 
 var _ TerminationProjectStore = (*fakeTerminationProjectStore)(nil)
@@ -333,34 +366,47 @@ func (f *fakeTerminationProjectStore) ListProjectNamesByPhase(_ context.Context,
 	return names, nil
 }
 
-func (f *fakeTerminationProjectStore) GetProjectPhase(_ context.Context, name string) (v1.ProjectPhase, string, error) {
+func (f *fakeTerminationProjectStore) GetProjectSnapshot(_ context.Context, name string) (*ProjectSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if err, ok := f.errs[name]; ok {
-		return "", "", err
+		return nil, err
 	}
 	r, ok := f.projects[name]
 	if !ok {
-		return "", "", store.ErrNotFound
+		return nil, store.ErrNotFound
 	}
-	return r.Phase, r.NodeRef, nil
+	return &ProjectSnapshot{Name: name, UID: r.UID, Phase: r.Phase, NodeRef: r.NodeRef}, nil
 }
 
-func (f *fakeTerminationProjectStore) DeleteProject(_ context.Context, name string) error {
+// FinalizeProject mirrors the store: it refuses another lifetime, then a
+// record whose predicate does not hold, and deletes otherwise.
+func (f *fakeTerminationProjectStore) FinalizeProject(_ context.Context, name, uid string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if err, ok := f.errs[name]; ok {
-		return err
-	}
+	f.FinalizeCalls = append(f.FinalizeCalls, finalizeCall{Name: name, UID: uid})
 
-	f.DeleteProjectCalls = append(f.DeleteProjectCalls, deleteProjectCall{Name: name})
-
-	if _, ok := f.projects[name]; !ok {
+	r, ok := f.projects[name]
+	switch {
+	case !ok:
 		return store.ErrNotFound
+	case r.UID != uid:
+		return store.ErrStaleAssignment
+	case r.BlockedBy != "":
+		return &store.FinalizationBlockedError{Name: name, Reason: r.BlockedBy}
 	}
 	delete(f.projects, name)
+	return nil
+}
+
+func (f *fakeTerminationProjectStore) SetFinalizationBlocked(_ context.Context, name, uid, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.SetFinalizationBlockedCalls = append(f.SetFinalizationBlockedCalls,
+		setFinalizationBlockedCall{Name: name, UID: uid, Reason: reason})
 	return nil
 }
 
@@ -373,11 +419,16 @@ type fakeReschedulerProjectStore struct {
 	projects map[string]*ProjectSnapshot
 	errs     map[string]error
 
-	SetProjectPendingCalls    []setProjectPendingCall
-	SetTerminatingAtCalls     []setTerminatingAtCall
-	SetNotReadyAtCalls        []setNotReadyAtCall
-	ForceTerminatedCalls      []forceTerminatedCall
-	ClearRescheduleClockCalls []clearRescheduleClocksCall
+	ReleaseAssignmentCalls     []releaseAssignmentCall
+	SetTerminatingAtCalls      []setTerminatingAtCall
+	SetNotReadyAtCalls         []setNotReadyAtCall
+	SetTerminationBlockedCalls []setTerminationBlockedCall
+	ClearRescheduleClockCalls  []clearRescheduleClocksCall
+
+	// unconfirmed names Projects whose release the fake refuses, as the
+	// adapter does when no WorkloadStopped evidence matches the assignment.
+	// Every other Project is released.
+	unconfirmed map[string]bool
 
 	// onList runs after ListProjectsByNodeRef has built its result and
 	// released the lock, so a test can change the store in the window between
@@ -390,8 +441,9 @@ var _ ReschedulerProjectStore = (*fakeReschedulerProjectStore)(nil)
 
 func newFakeReschedulerProjectStore() *fakeReschedulerProjectStore {
 	return &fakeReschedulerProjectStore{
-		projects: make(map[string]*ProjectSnapshot),
-		errs:     make(map[string]error),
+		projects:    make(map[string]*ProjectSnapshot),
+		errs:        make(map[string]error),
+		unconfirmed: make(map[string]bool),
 	}
 }
 
@@ -461,8 +513,7 @@ func (f *fakeReschedulerProjectStore) ClearRescheduleClocks(
 
 	kept := make([]ConditionSnapshot, 0, len(p.Conditions))
 	for _, c := range p.Conditions {
-		isClock := c.Type == v1.ConditionTypeNotReadyAt || c.Type == v1.ConditionTypeTerminatingAt
-		if isClock && !c.LastTransitionTime.After(notAfter) {
+		if IsOutageCondition(c.Type) && !c.LastTransitionTime.After(notAfter) {
 			continue
 		}
 		kept = append(kept, c)
@@ -471,21 +522,38 @@ func (f *fakeReschedulerProjectStore) ClearRescheduleClocks(
 	return nil
 }
 
-func (f *fakeReschedulerProjectStore) SetProjectPending(_ context.Context, name string) error {
+// ReleaseAssignment mirrors the adapter's outcomes, not its gate: whether a
+// release is authorized is decided by unconfirmed, and the gate itself is
+// tested against the real adapter. A Project that has moved off the
+// snapshot's assignment is stale, as in the adapter.
+func (f *fakeReschedulerProjectStore) ReleaseAssignment(_ context.Context, snap *ProjectSnapshot) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if err, ok := f.errs[name]; ok {
-		return err
+	if err, ok := f.errs[snap.Name]; ok {
+		return false, err
 	}
 
-	f.SetProjectPendingCalls = append(f.SetProjectPendingCalls, setProjectPendingCall{Name: name})
+	p, ok := f.projects[snap.Name]
+	if !ok {
+		return false, store.ErrNotFound
+	}
+	if p.NodeRef != snap.NodeRef || p.AssignmentGeneration != snap.AssignmentGeneration {
+		return false, store.ErrStaleAssignment
+	}
 
-	if p, ok := f.projects[name]; ok {
+	released := !f.unconfirmed[snap.Name]
+	f.ReleaseAssignmentCalls = append(f.ReleaseAssignmentCalls, releaseAssignmentCall{
+		Name:                 snap.Name,
+		NodeRef:              snap.NodeRef,
+		AssignmentGeneration: snap.AssignmentGeneration,
+		Released:             released,
+	})
+	if released {
 		p.Phase = v1.ProjectPhasePending
 		p.NodeRef = ""
 	}
-	return nil
+	return released, nil
 }
 
 func (f *fakeReschedulerProjectStore) SetTerminatingAt(_ context.Context, name string, at time.Time) error {
@@ -548,7 +616,9 @@ func (f *fakeReschedulerProjectStore) SetNotReadyAt(_ context.Context, name stri
 	return nil
 }
 
-func (f *fakeReschedulerProjectStore) ForceTerminated(_ context.Context, name string) error {
+// SetTerminationBlocked mirrors the adapter: only a Terminating Project is
+// marked, and the phase never changes.
+func (f *fakeReschedulerProjectStore) SetTerminationBlocked(_ context.Context, name, nodeRef string, at time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -556,11 +626,23 @@ func (f *fakeReschedulerProjectStore) ForceTerminated(_ context.Context, name st
 		return err
 	}
 
-	f.ForceTerminatedCalls = append(f.ForceTerminatedCalls, forceTerminatedCall{Name: name})
+	f.SetTerminationBlockedCalls = append(f.SetTerminationBlockedCalls,
+		setTerminationBlockedCall{Name: name, NodeRef: nodeRef, At: at})
 
-	if p, ok := f.projects[name]; ok {
-		p.Phase = v1.ProjectPhaseTerminated
+	p, ok := f.projects[name]
+	if !ok || p.Phase != v1.ProjectPhaseTerminating {
+		return nil
 	}
+	for i, c := range p.Conditions {
+		if c.Type == v1.ConditionTypeTerminationBlocked {
+			p.Conditions[i].LastTransitionTime = at
+			return nil
+		}
+	}
+	p.Conditions = append(p.Conditions, ConditionSnapshot{
+		Type:               v1.ConditionTypeTerminationBlocked,
+		LastTransitionTime: at,
+	})
 	return nil
 }
 
