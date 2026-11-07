@@ -104,8 +104,9 @@ func (c *Client) SetToken(token string) {
 	c.httpClient.Transport = &bearerTransport{token: token, base: base, logger: c.logger}
 }
 
-// bearerTransport adds a bearer token to every request it sends, and says once
-// when cara-server starts refusing it.
+// bearerTransport adds a bearer token to every request it sends, says once
+// when cara-server starts refusing it, and logs every request cara-server
+// forbids.
 type bearerTransport struct {
 	token  string
 	base   http.RoundTripper
@@ -121,6 +122,14 @@ func (t *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, err := t.base.RoundTrip(r)
 	if err != nil {
 		return resp, err
+	}
+	if resp.StatusCode == http.StatusForbidden && t.logger != nil {
+		// The caller still treats it as transient and retries on its next
+		// tick, which is right when an assignment has just moved. Logging each
+		// one is what makes a lasting refusal visible: nothing in the
+		// Project's status would show it (CARA-140).
+		t.logger.Warn("cara-server forbade a request from this Node",
+			zap.String("method", r.Method), zap.String("path", r.URL.Path))
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		if !t.refused.Swap(true) && t.logger != nil {

@@ -21,6 +21,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/server/agentdialer"
 	"NYCU-SDC/caravanserai/internal/server/apiserver"
 	"NYCU-SDC/caravanserai/internal/server/auth"
+	"NYCU-SDC/caravanserai/internal/server/authz"
 	"NYCU-SDC/caravanserai/internal/server/controller"
 	"NYCU-SDC/caravanserai/internal/server/handler"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
@@ -198,6 +199,7 @@ func main() {
 		logger.Warn("No break-glass token configured: only issued tokens can authenticate, and none can be issued until one exists")
 	}
 	apiSrv.RequireAuthentication(auth.NewAuthenticator(logger, pgStore, breakGlassToken))
+	apiSrv.RequireAuthorization(authz.New(logger, pgStore))
 
 	// Overlay administration (CARA-49): issue Headscale pre-auth keys and
 	// list/revoke overlay nodes. Only active when Headscale admin credentials
