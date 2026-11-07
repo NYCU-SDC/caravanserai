@@ -15,6 +15,7 @@ for command in docker curl go python3; do
 done
 
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/cara-orphan-e2e.XXXXXX")"
+. "$(dirname "${BASH_SOURCE[0]}")/lib/auth.sh"
 suffix="${PPID}-$$"
 postgres_name="cara69-postgres-${suffix}"
 dind_name="cara69-dind-${suffix}"
@@ -100,6 +101,19 @@ container_absent() {
 	! dind inspect "$1" >/dev/null 2>&1
 }
 
+# A failed listing is not an absent resource: an unreachable daemon prints
+# nothing, and reading that as "deleted" would pass a run that proved nothing.
+# Returning non-zero keeps wait_until waiting, so the run fails on timeout.
+volume_absent() {
+	listed="$(dind volume ls --format '{{.Name}}')" || return 1
+	! grep -qxF -- "$1" <<<"$listed"
+}
+
+network_absent() {
+	listed="$(dind network ls --format '{{.Name}}')" || return 1
+	! grep -qxF -- "$1" <<<"$listed"
+}
+
 project_is() {
 	project_name=$1
 	expected_phase=$2
@@ -152,6 +166,7 @@ dind pull nginx:alpine >/dev/null
 log "building cara-server and cara-agent"
 go build -o "$test_root/bin/cara-server" ./cmd/cara-server
 go build -o "$test_root/bin/cara-agent" ./cmd/cara-agent
+go build -o "$test_root/bin/caractl" ./cmd/caractl
 
 server_port="$(choose_port)"
 server_url="http://127.0.0.1:$server_port"
@@ -160,6 +175,7 @@ server_url="http://127.0.0.1:$server_port"
 	env \
 		HOST=127.0.0.1 \
 		PORT="$server_port" \
+		BREAK_GLASS_TOKEN_FILE="$e2e_admin_token_file" \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &
@@ -170,10 +186,12 @@ cat >"$test_root/agent-run/config.yaml" <<EOF
 data_root: "$data_root"
 EOF
 
+agent_token_file="$(join_token_file node-a)"
 (
 	cd "$test_root/agent-run"
 	env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
 		SERVER_URL="$server_url" \
+		JOIN_TOKEN_FILE="$agent_token_file" \
 		NODE_NAME=node-a \
 		HEARTBEAT_INTERVAL=1s \
 		DOCKER_HOST="$dind_host" \
@@ -283,12 +301,12 @@ log "waiting for permanent cleanup after continuously confirmed ownership loss"
 wait_until 100 "target resource deletion after grace" container_absent "$target_container"
 
 container_absent "$target_container" || fail "target container still exists"
-if dind volume inspect cara-orphan-target-scratch >/dev/null 2>&1; then
-	fail "target Ephemeral volume still exists"
-fi
-if dind network inspect cara-orphan-target >/dev/null 2>&1; then
-	fail "target Cara network still exists"
-fi
+# The agent removes the containers first, then the network, then the volumes,
+# so the container vanishing does not mean the rest is gone yet. Wait for each
+# rather than read it once in the gap; a resource that is never removed still
+# fails the run.
+wait_until 30 "target Ephemeral volume deletion" volume_absent cara-orphan-target-scratch
+wait_until 30 "target Cara network deletion" network_absent cara-orphan-target
 [[ -f "$managed_marker" ]] || fail "Managed host data was removed"
 
 assert_same_running_container "$unmanaged_name" "$unmanaged_id"
@@ -298,3 +316,11 @@ dind network inspect "$foreign_network" >/dev/null || fail "foreign network was 
 container_running "$guard_container" || fail "Failed project assigned to node-a was touched"
 
 log "PASS: target stopped then deleted; Failed/foreign containers, foreign volume/network, and Managed data survived"
+
+# CARA-138: revoking the Node stops its Agent's token at once, and the Agent says
+# why rather than only failing.
+CARA_TOKEN="$e2e_admin_token" "$test_root/bin/caractl" --server "$server_url" node revoke node-a ||
+	fail "caractl node revoke failed"
+agent_refused() { grep -q "refused this Node's token" "$test_root/agent.log"; }
+wait_until 30 "the agent to report its token refused" agent_refused
+log "PASS: after caractl node revoke, the agent's requests are refused and it logs why"

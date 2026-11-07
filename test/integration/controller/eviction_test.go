@@ -40,13 +40,50 @@ func createRunningProject(t *testing.T, s *controllerhelper.Suite, name, node st
 // agent does through the fenced condition endpoint.
 func agentReportsBackup(t *testing.T, s *controllerhelper.Suite, name string, status v1.ConditionStatus, message string) {
 	t.Helper()
-	require.NoError(t, s.Store.UpdateProjectStatusWithRetry(context.Background(), name, func(st *v1.ProjectStatus) error {
+	ctx := context.Background()
+	// The Agent confirms the workload stopped before reporting success; the
+	// release gate rests on that evidence.
+	if status == v1.ConditionTrue {
+		p, err := s.Store.GetProject(ctx, name)
+		require.NoError(t, err)
+		require.NoError(t, s.Store.RecordWorkloadStopped(ctx, name,
+			store.AssignmentRef{UID: p.UID, NodeRef: p.Status.NodeRef, Generation: p.Status.AssignmentGeneration},
+			time.Now().UTC()))
+	}
+	require.NoError(t, s.Store.UpdateProjectStatusWithRetry(ctx, name, func(st *v1.ProjectStatus) error {
 		st.Conditions = append(st.Conditions, v1.Condition{
 			Type: v1.ConditionTypeEvictionBackup, Status: status, Reason: "BackupSucceeded",
 			Message: message, LastTransitionTime: time.Now().UTC(),
 		})
 		return nil
 	}))
+}
+
+// sourceNodeCleansUp resolves the cleanup obligation a planned move left on
+// the source Node, as its Agent does on its next poll: the old containers are
+// removed and the local Managed data quarantined. Until then the scheduler
+// may not place the Project anywhere (ADR-0024 C3). It waits for the release
+// to happen first.
+func sourceNodeCleansUp(t *testing.T, s *controllerhelper.Suite, name string) {
+	t.Helper()
+	ctx := context.Background()
+	var owner store.AssignmentRef
+	controllerhelper.WaitForCondition(t, 20*time.Second, 200*time.Millisecond, name+" released with a cleanup obligation", func() bool {
+		p, err := s.Store.GetProject(ctx, name)
+		if err != nil || p.Status.Recovery == nil {
+			return false
+		}
+		for _, o := range p.Status.Recovery.CleanupObligations {
+			if !o.Resolved() {
+				owner = store.AssignmentRef{UID: o.Assignment.ProjectUID, NodeRef: o.Assignment.NodeName, Generation: o.Assignment.AssignmentGeneration}
+				return true
+			}
+		}
+		return false
+	})
+	now := time.Now().UTC()
+	require.NoError(t, s.Store.RecordResourcesRemoved(ctx, name, owner, now))
+	require.NoError(t, s.Store.RecordManagedDataQuarantined(ctx, name, owner, now))
 }
 
 func evictionState(t *testing.T, s *controllerhelper.Suite, name string) v1.EvictionState {
@@ -90,6 +127,7 @@ func TestPlannedMoveEndToEnd(t *testing.T) {
 	assert.Equal(t, "evict-a", p.Status.NodeRef)
 
 	agentReportsBackup(t, s, "evict-app", v1.ConditionTrue, "backup-1")
+	sourceNodeCleansUp(t, s, "evict-app")
 
 	controllerhelper.WaitForCondition(t, 20*time.Second, 200*time.Millisecond, "moved to evict-b and done", func() bool {
 		p, err := s.Store.GetProject(ctx, "evict-app")
@@ -127,6 +165,7 @@ func TestPlannedMovesRunOneAtATime(t *testing.T) {
 	}, 2*time.Second, 200*time.Millisecond, "the second move waits for the first")
 
 	agentReportsBackup(t, s, "evict-first", v1.ConditionTrue, "backup-1")
+	sourceNodeCleansUp(t, s, "evict-first")
 	waitForEvictionState(t, s, "evict-second", v1.EvictionStateBackingUp)
 	assert.Equal(t, v1.EvictionState(""), evictionState(t, s, "evict-first"), "the first is done before the second starts")
 }

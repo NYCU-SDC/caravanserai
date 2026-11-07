@@ -15,8 +15,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fencedStatusBody is a status report for phase carrying the Project's current
+// assignment fence, as its Agent would send it.
+func fencedStatusBody(t *testing.T, name, phase string) []byte {
+	t.Helper()
+	p := getProject(t, name)
+	return mustMarshal(t, map[string]any{
+		"phase":                phase,
+		"uid":                  p.ObjectMeta.UID,
+		"nodeRef":              p.Status.NodeRef,
+		"assignmentGeneration": p.Status.AssignmentGeneration,
+	})
+}
+
 // TestProjectStatusPatch verifies that PATCH /api/v1/projects/{name}/status
-// rejects unrecognised phase values with 400 and accepts valid ones with 204.
+// rejects unrecognised phase values with 400 and accepts a valid report with
+// 204. The cases run in order against one Scheduled Project, so each valid
+// report is a transition its Agent may make; which transitions are refused is
+// TestLifecycleTransitionGuards' subject.
 func TestProjectStatusPatch(t *testing.T) {
 	const projectName = "e2e-phase-validation"
 
@@ -39,9 +55,11 @@ func TestProjectStatusPatch(t *testing.T) {
 			wantStatus: http.StatusNoContent,
 		},
 		{
-			name:       "Valid phase Terminated returns 204",
+			// A valid phase the Project cannot reach from Failed: well-formed,
+			// so 409 rather than 400.
+			name:       "Valid phase Terminated from Failed returns 409",
 			phase:      "Terminated",
-			wantStatus: http.StatusNoContent,
+			wantStatus: http.StatusConflict,
 		},
 		{
 			name:       "Invalid phase returns 400 with descriptive error",
@@ -92,13 +110,13 @@ func TestProjectStatusPatch(t *testing.T) {
 	resp := doRequest(t, http.MethodPost, "/api/v1/projects", createBody)
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "create project: expected 201")
 	drainBody(resp)
+	placeInPhase(t, projectName, v1.ProjectPhaseScheduled, "", "")
 
 	// ── Run test cases ──────────────────────────────────────────────────────
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			patchBody := mustMarshal(t, map[string]string{"phase": tc.phase})
-			resp := doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", patchBody)
+			resp := doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", fencedStatusBody(t, projectName, tc.phase))
 
 			require.Equal(t, tc.wantStatus, resp.StatusCode,
 				"phase %q: expected %d", tc.phase, tc.wantStatus)
@@ -420,9 +438,10 @@ func TestProjectUpdate(t *testing.T) {
 
 	// ── 4. Transition to Running, then PUT → 409 ──────────────────────────────
 
-	// Patch phase to Running via status endpoint.
-	patchBody := mustMarshal(t, map[string]string{"phase": string(v1.ProjectPhaseRunning)})
-	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", patchBody)
+	// Assign the Project, then report it Running and Failed through the status
+	// endpoint as its Agent would.
+	placeInPhase(t, projectName, v1.ProjectPhaseScheduled, "", "")
+	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", fencedStatusBody(t, projectName, string(v1.ProjectPhaseRunning)))
 	require.Equal(t, http.StatusNoContent, resp.StatusCode, "patch to Running: expected 204")
 	drainBody(resp)
 
@@ -432,8 +451,7 @@ func TestProjectUpdate(t *testing.T) {
 
 	// ── 5. Transition to Failed, then PUT → 200 (allowed) ────────────────────
 
-	patchBody = mustMarshal(t, map[string]string{"phase": string(v1.ProjectPhaseFailed)})
-	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", patchBody)
+	resp = doRequest(t, http.MethodPatch, "/api/v1/projects/"+projectName+"/status", fencedStatusBody(t, projectName, string(v1.ProjectPhaseFailed)))
 	require.Equal(t, http.StatusNoContent, resp.StatusCode, "patch to Failed: expected 204")
 	drainBody(resp)
 
@@ -472,13 +490,11 @@ func TestProjectForceDelete(t *testing.T) {
 		drainBody(resp)
 	}
 
-	// patchPhase transitions a project to the given phase via the status endpoint.
+	// patchPhase puts a project into the given phase. What is under test is
+	// force-delete, not how the Project got there.
 	patchPhase := func(t *testing.T, name string, phase v1.ProjectPhase) {
 		t.Helper()
-		body := mustMarshal(t, map[string]string{"phase": string(phase)})
-		resp := doRequest(t, http.MethodPatch, "/api/v1/projects/"+name+"/status", body)
-		require.Equal(t, http.StatusNoContent, resp.StatusCode, "patch %q to %s", name, phase)
-		drainBody(resp)
+		placeInPhase(t, name, phase, "Test", "")
 	}
 
 	// assertGone verifies a project no longer exists in the store.
@@ -592,4 +608,25 @@ func TestProjectUIDLifecycle(t *testing.T) {
 
 	// Cleanup.
 	drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+name, nil))
+}
+
+// TestServiceCommandRoundTrip: command survives the API and the JSONB column in
+// order, and an unset one stays unset so the image's default applies.
+func TestServiceCommandRoundTrip(t *testing.T) {
+	const name = "e2e-service-command"
+	drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+name+"?force=true", nil))
+	resp := doRequest(t, http.MethodPost, "/api/v1/projects", mustMarshal(t, v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: name},
+		Spec: v1.ProjectSpec{Services: []v1.ServiceDef{
+			{Name: "job", Image: "busybox:1.36", Command: []string{"sh", "-c", "echo hello"}},
+			{Name: "web", Image: "nginx:alpine"},
+		}},
+	}))
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	drainBody(resp)
+
+	got := getProject(t, name).Spec.Services
+	require.Len(t, got, 2)
+	assert.Equal(t, []string{"sh", "-c", "echo hello"}, got[0].Command)
+	assert.Empty(t, got[1].Command)
 }

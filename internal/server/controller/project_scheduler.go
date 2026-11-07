@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -34,8 +35,16 @@ type SchedulerProjectStore interface {
 	CapacityProjectStore
 
 	// SetProjectScheduled writes the nodeRef and transitions the Project to
-	// Scheduled phase atomically.
+	// Scheduled phase atomically. Only a Pending Project is assigned;
+	// re-asserting the same Node on a Scheduled Project is a no-op. It returns
+	// ErrConflictState, writing nothing, for any other phase or Node, and
+	// while a cleanup obligation forbids a new assignment.
 	SetProjectScheduled(ctx context.Context, name, nodeRef string) error
+
+	// SetSchedulingBlocked records why a Pending Project could not be placed.
+	// It writes nothing for a Project no longer Pending, or when the reason has
+	// not changed.
+	SetSchedulingBlocked(ctx context.Context, name, reason, message string) error
 }
 
 // ProjectPlacement is what the scheduler needs to know about a Project to
@@ -158,6 +167,7 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 
 	if len(readyNodes) == 0 {
 		log.Warn("No Ready nodes available, will retry")
+		c.reportBlocked(ctx, log, name, "NoReadyNodes", "no Node is Ready")
 		return Result{Requeue: true}, nil
 	}
 
@@ -180,6 +190,7 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		log.Warn("No node can host the project, will retry",
 			zap.String("size", string(v1.ProjectSpec{Size: size}.EffectiveSize())),
 			zap.Strings("rejected", rejected))
+		c.reportBlocked(ctx, log, name, "NoSuitableNode", strings.Join(rejected, "; "))
 		return Result{Requeue: true}, nil
 	}
 
@@ -193,11 +204,29 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		zap.Int("candidates", len(candidates)))
 
 	if err := c.projects.SetProjectScheduled(ctx, name, target); err != nil {
+		// Refused, not failed: a previous Node still owes cleanup, or the
+		// Project left Pending after it was read. Neither clears by retrying
+		// now; the periodic resync of Pending Projects tries again later, and
+		// a Project no longer Pending is not listed by it.
+		if errors.Is(err, store.ErrConflictState) {
+			log.Info("Project not schedulable yet", zap.Error(err))
+			c.reportBlocked(ctx, log, name, "AssignmentRefused", err.Error())
+			return Result{}, nil
+		}
 		return Result{}, err
 	}
 
 	log.Info("Project scheduled successfully", zap.String("node", target))
 	return Result{}, nil
+}
+
+// reportBlocked makes the reason visible on the Project. A failure only costs
+// the explanation, and the next attempt reports it again, so it does not fail
+// the reconcile.
+func (c *ProjectSchedulerController) reportBlocked(ctx context.Context, log *zap.Logger, name, reason, message string) {
+	if err := c.projects.SetSchedulingBlocked(ctx, name, reason, message); err != nil && !errors.Is(err, store.ErrNotFound) {
+		log.Warn("Failed to record why the project is not scheduled", zap.Error(err))
+	}
 }
 
 // Seed implements controller.Seeder.

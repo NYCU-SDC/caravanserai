@@ -12,6 +12,186 @@
       ],
       "description": "Whether a Project has ever held a Node assignment, and how confidently that is known."
     },
+    "AssignmentIdentity": {
+      "properties": {
+        "projectUID": {
+          "type": "string"
+        },
+        "nodeName": {
+          "type": "string"
+        },
+        "assignmentGeneration": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "projectUID",
+        "nodeName",
+        "assignmentGeneration"
+      ],
+      "description": "AssignmentIdentity names one assignment of one Project lifetime."
+    },
+    "BackupCompletion": {
+      "properties": {
+        "backupID": {
+          "type": "string"
+        },
+        "nodeRef": {
+          "type": "string",
+          "description": "NodeRef and AssignmentGeneration are the assignment it completed under."
+        },
+        "assignmentGeneration": {
+          "type": "integer"
+        },
+        "acceptedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "manifestKey": {
+          "type": "string",
+          "description": "ManifestKey is where the Agent wrote the backup's manifest."
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/BackupCompletionItem"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "backupID",
+        "nodeRef",
+        "assignmentGeneration",
+        "acceptedAt",
+        "manifestKey",
+        "items"
+      ],
+      "description": "BackupCompletion is one backup the server accepted."
+    },
+    "BackupCompletionItem": {
+      "properties": {
+        "volume": {
+          "type": "string"
+        },
+        "stanza": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string",
+          "description": "Label is the pgBackRest backup label."
+        },
+        "type": {
+          "type": "string",
+          "description": "Type is full or diff."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "volume",
+        "stanza",
+        "label",
+        "type"
+      ],
+      "description": "BackupCompletionItem is the backup of one volume within a completion."
+    },
+    "BackupItem": {
+      "properties": {
+        "volume": {
+          "type": "string",
+          "description": "Volume names a Managed volume declared in spec.volumes."
+        },
+        "strategy": {
+          "$ref": "#/$defs/BackupStrategy",
+          "description": "Strategy is how the volume is backed up."
+        },
+        "retainFull": {
+          "type": "integer",
+          "description": "RetainFull is how many full backups pgBackRest keeps, each with the\ndifferential backups that depend on it. Only valid for\nPostgresDifferential; DefaultRetainFull when omitted. It is a count, not\na time guarantee: extra full backups and failed runs change how far back\nthe retained backups reach."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "volume",
+        "strategy"
+      ],
+      "description": "BackupItem selects the backup strategy of one Managed volume."
+    },
+    "BackupStrategy": {
+      "type": "string",
+      "enum": [
+        "Offline",
+        "PostgresDifferential"
+      ],
+      "description": "How a Managed volume is backed up."
+    },
+    "CleanupObligation": {
+      "properties": {
+        "assignment": {
+          "$ref": "#/$defs/AssignmentIdentity",
+          "description": "Assignment is the released assignment. Its Agent is the cleanup owner."
+        },
+        "releasedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ReleasedAt is when the assignment was given up."
+        },
+        "releaseAuthorization": {
+          "type": "string",
+          "description": "ReleaseAuthorization is what permitted giving the assignment up."
+        },
+        "resourcesRemoved": {
+          "$ref": "#/$defs/ResourcesRemovedEvidence",
+          "description": "ResourcesRemoved is the cleanup owner's evidence that every\ndeletion-scoped runtime resource it held for this assignment is gone.\nNil means the obligation is unresolved."
+        },
+        "managedDataOwed": {
+          "type": "boolean",
+          "description": "ManagedDataOwed records that the Project moved away while declaring a\nManaged volume, so this Node's local data has to leave the active path\n(ADR-0024 C2) before the Node may hold the Project again. A deletion does\nnot set it: local Managed data is retained then."
+        },
+        "managedDataQuarantined": {
+          "$ref": "#/$defs/ManagedDataQuarantinedEvidence",
+          "description": "ManagedDataQuarantined is the cleanup owner's evidence that it did so. It\nis separate from ResourcesRemoved because each can be true without the\nother."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "assignment",
+        "releasedAt",
+        "releaseAuthorization"
+      ],
+      "description": "CleanupObligation is one released assignment whose Node may still hold the Project's runtime resources."
+    },
+    "CommittedBackup": {
+      "properties": {
+        "backupID": {
+          "type": "string",
+          "description": "BackupID names the generation in the object store."
+        },
+        "assignment": {
+          "$ref": "#/$defs/AssignmentIdentity",
+          "description": "Assignment is the assignment that produced and committed it."
+        },
+        "committedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "CommittedAt is when the server accepted it."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "backupID",
+        "assignment",
+        "committedAt"
+      ],
+      "description": "CommittedBackup records one backup generation accepted as the restore source."
+    },
     "Condition": {
       "properties": {
         "type": {
@@ -148,6 +328,20 @@
       ],
       "description": "IngressTarget is the backend service and port for an ingress rule."
     },
+    "ManagedDataQuarantinedEvidence": {
+      "properties": {
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "observedAt"
+      ],
+      "description": "ManagedDataQuarantinedEvidence records when the cleanup owner of an obligation moved its local Managed data out of the active path, or found none there."
+    },
     "ObjectMeta": {
       "properties": {
         "name": {
@@ -237,6 +431,13 @@
         "onMissing": {
           "$ref": "#/$defs/VolumeOnMissing",
           "description": "OnMissing selects behaviour when no backup exists at restore time.\nDefaults to InitializeEmpty when empty."
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/BackupItem"
+          },
+          "type": "array",
+          "description": "Items selects a backup strategy per Managed volume. A Managed volume not\nlisted here uses BackupStrategyOffline. Items are fixed when the Project\nis created: switching a live volume between strategies would leave two\nbackup histories for the same data, and nothing can yet choose between\nthem at restore time."
         }
       },
       "additionalProperties": false,
@@ -245,6 +446,27 @@
         "interval"
       ],
       "description": "ProjectBackupConfig configures periodic object-store backup of a Project's Managed volumes."
+    },
+    "ProjectBackupStatus": {
+      "properties": {
+        "stanzas": {
+          "items": {
+            "$ref": "#/$defs/StanzaRecord"
+          },
+          "type": "array",
+          "description": "Stanzas lists every pgBackRest stanza this lifetime has created,\nincluding those of volumes later removed from the spec. It only grows:\ndeleting a lifetime's backups has to find every stanza it ever wrote."
+        },
+        "completions": {
+          "items": {
+            "$ref": "#/$defs/BackupCompletion"
+          },
+          "type": "array",
+          "description": "Completions lists the most recent backups the server accepted from this\nlifetime's assigned Agents, oldest first, at most MaxBackupCompletions.\nAccepted means the backup completed under the assignment current at\nthe time; it does not make the backup a restore source."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ProjectBackupStatus is the backup state of one Project lifetime."
     },
     "ProjectEviction": {
       "properties": {
@@ -304,6 +526,50 @@
         "Terminated"
       ],
       "description": "Lifecycle state of a Project as maintained by the Controller Manager."
+    },
+    "ProjectRecoveryStatus": {
+      "properties": {
+        "rescheduleAttempts": {
+          "type": "integer",
+          "description": "RescheduleAttempts counts cross-Node reschedules in the current incident."
+        },
+        "lastAttemptAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "LastAttemptAt is when the most recent reschedule was attempted. Backoff\nis computed from it."
+        },
+        "healthySince": {
+          "type": "string",
+          "format": "date-time",
+          "description": "HealthySince is when the Project was last seen continuously healthy. It\nis meaningful only while HealthySinceGeneration equals the current\nassignment generation: a window observed under an older assignment says\nnothing about the current one."
+        },
+        "healthySinceGeneration": {
+          "type": "integer",
+          "description": "HealthySinceGeneration is the assignment generation HealthySince was\nobserved under."
+        },
+        "preferredNode": {
+          "type": "string",
+          "description": "PreferredNode is a scheduler hint only. Status.NodeRef remains the\nauthoritative assignment."
+        },
+        "workloadStopped": {
+          "$ref": "#/$defs/WorkloadStoppedEvidence",
+          "description": "WorkloadStopped is the durable no-start latch for one assignment\ngeneration: the assigned Agent confirmed that every Project container is\nstopped. It is not proof that runtime resources were removed, and it\nalone never authorizes final deletion. Only a committed newer assignment\nclears it; time alone does not."
+        },
+        "cleanupObligations": {
+          "items": {
+            "$ref": "#/$defs/CleanupObligation"
+          },
+          "type": "array",
+          "description": "CleanupObligations lists every assignment this Project has given up\nwhose Node may still hold its runtime resources. An entry is appended in\nthe same write that releases an assignment or moves the Project to\nTerminating, so the list is the complete set of Nodes that may still\nhold resources. Final deletion requires every entry to be resolved."
+        },
+        "committedBackup": {
+          "$ref": "#/$defs/CommittedBackup",
+          "description": "CommittedBackup is the generation a new placement restores from\n(ADR-0024 C1). Only the assignment current at the time can set it, so once\nan assignment is released its Agent can no longer change where the next\none restores from, even if it can still reach the object store. A new\nassignment keeps it. Nil means no backup has ever been committed."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ProjectRecoveryStatus is the structured recovery state of a Project."
     },
     "ProjectSize": {
       "type": "string",
@@ -393,11 +659,33 @@
           },
           "type": "array",
           "description": "Conditions is a list of granular observable states."
+        },
+        "recovery": {
+          "$ref": "#/$defs/ProjectRecoveryStatus",
+          "description": "Recovery is the durable state of cross-Node recovery: retry bookkeeping\nand the evidence that lets an assignment be released or a record be\ndeleted. It lives here rather than in Condition messages because it must\nsurvive server restarts and duplicate controller events, and because code\nmust never recover a counter or an identity by parsing a message.\n\nServer-owned; not a user manifest field. Nil until recovery first records\nsomething."
+        },
+        "backup": {
+          "$ref": "#/$defs/ProjectBackupStatus",
+          "description": "Backup is the backup state of this Project lifetime. Server-owned: the\nAPI resets it on create and only the assigned Agent's fenced reports\nchange it."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "ProjectStatus is written by the Controller Manager and Agent."
+    },
+    "ResourcesRemovedEvidence": {
+      "properties": {
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "observedAt"
+      ],
+      "description": "ResourcesRemovedEvidence records when the cleanup owner of an obligation finished removing every deletion-scoped runtime resource it held."
     },
     "SecretKeySelector": {
       "properties": {
@@ -428,6 +716,13 @@
           "type": "string",
           "description": "Image is the Docker image reference, e.g. \"postgres:15\"."
         },
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Command overrides the image's CMD, as in Docker Compose; the image's\nENTRYPOINT still applies. Empty keeps the image's default."
+        },
         "env": {
           "items": {
             "$ref": "#/$defs/EnvVar"
@@ -450,6 +745,28 @@
         "image"
       ],
       "description": "ServiceDef describes a single container (analogous to a Compose service)."
+    },
+    "StanzaRecord": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "volume": {
+          "type": "string"
+        },
+        "recordedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "volume",
+        "recordedAt"
+      ],
+      "description": "StanzaRecord is one pgBackRest stanza a Project lifetime created."
     },
     "VolumeDef": {
       "properties": {
@@ -500,6 +817,24 @@
         "Ephemeral"
       ],
       "description": "Governs the lifecycle and backup behaviour of a Volume."
+    },
+    "WorkloadStoppedEvidence": {
+      "properties": {
+        "assignment": {
+          "$ref": "#/$defs/AssignmentIdentity"
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "assignment",
+        "observedAt"
+      ],
+      "description": "WorkloadStoppedEvidence records that the Agent of Assignment confirmed every Project container stopped."
     }
   },
   "title": "Project"

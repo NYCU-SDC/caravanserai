@@ -171,7 +171,6 @@ func sweepOrphans(
 	tracker *orphanTracker,
 	busy busyChecker,
 	projects []*v1.Project,
-	uidEnforcement bool,
 	logger *zap.Logger,
 ) {
 	localProjects, err := runtime.ListLocalProjects(ctx)
@@ -183,7 +182,7 @@ func sweepOrphans(
 
 	assigned := make(map[docker.ProjectIdentity]*v1.Project, len(projects))
 	for _, p := range projects {
-		assigned[projectIdentity(p, uidEnforcement)] = p
+		assigned[projectIdentity(p)] = p
 	}
 
 	observation := tracker.observe(localProjects, assigned)
@@ -256,20 +255,14 @@ func sweepOrphans(
 	}
 }
 
-// projectIdentity builds the Docker ownership identity for a Project. UID is
-// included only when enforcing (CARA-82); in compatibility mode it is left
-// empty so ownership matches by (namespace, name), mirroring
+// projectIdentity builds the Docker ownership identity for a Project, mirroring
 // DockerRuntime.ListLocalProjects.
-func projectIdentity(project *v1.Project, uidEnforcement bool) docker.ProjectIdentity {
+func projectIdentity(project *v1.Project) docker.ProjectIdentity {
 	namespace := project.Namespace
 	if namespace == "" {
 		namespace = v1.DefaultNamespace
 	}
-	id := docker.ProjectIdentity{Namespace: namespace, Name: project.Name}
-	if uidEnforcement {
-		id.UID = project.ObjectMeta.UID
-	}
-	return id
+	return docker.ProjectIdentity{Namespace: namespace, Name: project.Name, UID: project.ObjectMeta.UID}
 }
 
 func claimOrphanCleanup(busy busyChecker, project docker.ProjectIdentity) (func(), bool) {

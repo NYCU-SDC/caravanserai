@@ -116,12 +116,6 @@ func newHarness(t *testing.T, volumes ...string) *harness {
 	require.NoError(t, err)
 	store.objects[manifestKey] = manifestBytes
 
-	latestBytes, err := backup.NewLatest(backupID, manifestKey, time.Now()).Marshal()
-	require.NoError(t, err)
-	latestKey, err := backup.LatestKey("default", "blog")
-	require.NoError(t, err)
-	store.objects[latestKey] = latestBytes
-
 	return &harness{
 		restorer: NewRestorer(store, Config{DataRoot: dataRoot}, zap.NewNop()),
 		store:    store,
@@ -135,39 +129,11 @@ func (h *harness) volumeFile(volume, file string) string {
 	return filepath.Join(h.dataRoot, "volumes", "default", "blog", volume, "data", file)
 }
 
-// ── ResolveLatest ────────────────────────────────────────────────────────────
-
-func TestResolveLatest(t *testing.T) {
-	h := newHarness(t, "db-data")
-
-	got, err := h.restorer.ResolveLatest(context.Background(), "default", "blog")
-	require.NoError(t, err)
-	assert.Equal(t, h.backupID, got)
-}
-
-func TestResolveLatestWithNoGeneration(t *testing.T) {
-	// A Project that has never been backed up is a normal state, not a fault —
-	// the caller turns it into "initialize empty" when the spec allows.
-	h := newHarness(t, "db-data")
-	latestKey, err := backup.LatestKey("default", "blog")
-	require.NoError(t, err)
-	delete(h.store.objects, latestKey)
-
-	_, err = h.restorer.ResolveLatest(context.Background(), "default", "blog")
-	assert.ErrorIs(t, err, ErrNeverBackedUp)
-}
-
-func TestResolveLatestIsSeparateFromRestore(t *testing.T) {
+func TestRestoreGenerationRestoresTheGenerationItIsNamed(t *testing.T) {
 	// The property Correction 3 exists to preserve: a caller can restore a
-	// generation it names itself, without ResolveLatest being involved. This
-	// is what makes operator-initiated rollback a thin addition later.
+	// generation it names itself. This is what makes operator-initiated
+	// rollback a thin addition later.
 	h := newHarness(t, "db-data")
-
-	// Deleting latest.json makes "newest" unresolvable, yet an explicitly
-	// named generation still restores.
-	latestKey, err := backup.LatestKey("default", "blog")
-	require.NoError(t, err)
-	delete(h.store.objects, latestKey)
 
 	require.NoError(t, h.restorer.RestoreGeneration(context.Background(), h.project, h.backupID))
 
@@ -379,34 +345,17 @@ func TestNeverBackedUpAndGenerationMissingAreDistinguishable(t *testing.T) {
 	// legitimately start empty volumes; "the generation is gone" must not,
 	// because real backups exist and starting empty would present data loss as
 	// a successful restore.
-	t.Run("no latest.json means never backed up", func(t *testing.T) {
-		h := newHarness(t, "db-data")
-		latestKey, err := backup.LatestKey("default", "blog")
-		require.NoError(t, err)
-		delete(h.store.objects, latestKey)
-
-		_, err = h.restorer.ResolveLatest(context.Background(), "default", "blog")
-
-		assert.ErrorIs(t, err, ErrNeverBackedUp)
-		assert.NotErrorIs(t, err, ErrGenerationMissing)
-	})
-
-	t.Run("dangling latest.json means the generation is missing", func(t *testing.T) {
-		// latest.json survives, but the manifest it names is gone — deleted by
+	t.Run("a committed generation whose manifest is gone is missing", func(t *testing.T) {
+		// The server still names it, but the manifest is gone — deleted by
 		// hand, lost to a future retention policy, or an object store fault.
 		h := newHarness(t, "db-data")
 		manifestKey, err := backup.ManifestKey("default", "blog", h.backupID)
 		require.NoError(t, err)
 		delete(h.store.objects, manifestKey)
 
-		resolved, err := h.restorer.ResolveLatest(context.Background(), "default", "blog")
-		require.NoError(t, err, "the pointer itself still reads fine")
-
-		_, err = h.restorer.FetchManifest(context.Background(), "default", "blog", resolved)
+		_, err = h.restorer.FetchManifest(context.Background(), "default", "blog", h.backupID)
 
 		assert.ErrorIs(t, err, ErrGenerationMissing)
-		assert.NotErrorIs(t, err, ErrNeverBackedUp,
-			"a project with real backups must never be treated as never-backed-up")
 	})
 }
 

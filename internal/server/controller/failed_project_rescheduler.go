@@ -78,11 +78,15 @@ type FailedProjectStore interface {
 	// GetProjectSnapshot returns the named Project.
 	GetProjectSnapshot(ctx context.Context, name string) (*ProjectSnapshot, error)
 
-	// MoveFailedProject returns a Failed Project to Pending, clearing its
-	// nodeRef and adding fromNode to its FailedNodes, with message as the
-	// reason shown for the move. It does nothing unless the Project is still
-	// Failed on fromNode.
-	MoveFailedProject(ctx context.Context, name, fromNode, message string) error
+	// MoveFailedProject releases a Failed Project's assignment (p's UID,
+	// NodeRef and AssignmentGeneration) back to Pending and adds the Node to
+	// its FailedNodes, with message as the reason shown for the move. It moves
+	// the Project only when that assignment's Agent has confirmed the workload
+	// stopped, recording the cleanup obligation in the same write; otherwise it
+	// marks TakeoverRequired and leaves FailedNodes alone. It reports whether
+	// the Project was moved, and does nothing unless the Project is still
+	// Failed on that assignment.
+	MoveFailedProject(ctx context.Context, p *ProjectSnapshot, message string) (bool, error)
 
 	// ClearFailedNodes empties the Project's FailedNodes.
 	ClearFailedNodes(ctx context.Context, name string) error
@@ -197,18 +201,25 @@ func (c *FailedProjectReschedulerController) reconcileFailed(ctx context.Context
 
 	message := fmt.Sprintf("Failed on node %q (%s); moved to a different node (move %d of %d)",
 		p.NodeRef, phase.Reason, spent+1, maxReschedules)
-	log.Warn("Moving failed project to a different node",
+	log.Warn("Moving failed project to a different node if its workload is confirmed stopped",
 		zap.String("fromNode", p.NodeRef),
 		zap.String("reason", phase.Reason),
 		zap.Int("move", spent+1),
 		zap.Int("maxMoves", maxReschedules))
 
-	if err := c.projects.MoveFailedProject(ctx, p.Name, p.NodeRef, message); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			log.Debug("Project disappeared before the move, skipping")
+	moved, err := c.projects.MoveFailedProject(ctx, p, message)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrStaleAssignment) {
+			log.Debug("Project disappeared or changed before the move, skipping")
 			return Result{}, nil
 		}
 		return Result{}, err
+	}
+	if !moved {
+		// Failed is not stopped. Until the Agent confirms this generation's
+		// containers are stopped, the move waits; the resync looks again.
+		log.Info("Not moving failed project: its node has not confirmed the workload stopped",
+			zap.String("node", p.NodeRef), zap.Int64("generation", p.AssignmentGeneration))
 	}
 	return Result{}, nil
 }

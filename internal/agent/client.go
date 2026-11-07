@@ -13,8 +13,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -88,6 +91,90 @@ func NewClient(logger *zap.Logger, serverURL, nodeName string) *Client {
 			Timeout: 10 * time.Second,
 		},
 		logger: logger,
+	}
+}
+
+// SetToken makes every request to cara-server carry token as its bearer
+// credential (ADR-0031). Call it before the client is used.
+func (c *Client) SetToken(token string) {
+	base := c.httpClient.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	c.httpClient.Transport = &bearerTransport{token: token, base: base, logger: c.logger}
+}
+
+// bearerTransport adds a bearer token to every request it sends, says once
+// when cara-server starts refusing it, and logs every request cara-server
+// forbids.
+type bearerTransport struct {
+	token  string
+	base   http.RoundTripper
+	logger *zap.Logger
+	// refused is set while cara-server answers 401, so the cause is logged
+	// once rather than on every request.
+	refused atomic.Bool
+}
+
+func (t *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+t.token)
+	resp, err := t.base.RoundTrip(r)
+	if err != nil {
+		return resp, err
+	}
+	if resp.StatusCode == http.StatusForbidden && t.logger != nil {
+		// The caller still treats it as transient and retries on its next
+		// tick, which is right when an assignment has just moved. Logging each
+		// one is what makes a lasting refusal visible: nothing in the
+		// Project's status would show it (CARA-140).
+		t.logger.Warn("cara-server forbade a request from this Node",
+			zap.String("method", r.Method), zap.String("path", r.URL.Path))
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		if !t.refused.Swap(true) && t.logger != nil {
+			t.logger.Error("cara-server refused this Node's token: it was revoked or is unknown. " +
+				"Issue a new join token (caractl node token create), put it in JOIN_TOKEN_FILE and restart the agent")
+		}
+	} else if t.refused.Swap(false) && t.logger != nil {
+		t.logger.Info("cara-server accepts this Node's token again")
+	}
+	return resp, nil
+}
+
+// ErrJoinRefused means cara-server refused a join token: it is unknown, used,
+// revoked, expired, or for another Node. Retrying the same token cannot help.
+var ErrJoinRefused = errors.New("cara-server refused the join token")
+
+// Join trades joinToken for a Node token for this client's Node (CARA-138) and
+// returns the Node token. Call it before SetToken. A refusal wraps
+// ErrJoinRefused; any other error may succeed on retry.
+func (c *Client) Join(ctx context.Context, joinToken string) (string, error) {
+	url := c.serverURL + "/api/v1/nodes/" + c.nodeName + "/join"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("build join request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+joinToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("join request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	switch {
+	case resp.StatusCode == http.StatusCreated:
+		var joined v1.NodeJoined
+		if err := json.Unmarshal(body, &joined); err != nil || joined.Token == "" {
+			return "", fmt.Errorf("join: unreadable response: %v", err)
+		}
+		return joined.Token, nil
+	case resp.StatusCode >= 400 && resp.StatusCode < 500:
+		return "", fmt.Errorf("%w: %s: %s", ErrJoinRefused, resp.Status, strings.TrimSpace(string(body)))
+	default:
+		return "", fmt.Errorf("join: unexpected status %s", resp.Status)
 	}
 }
 
@@ -315,6 +402,283 @@ func (c *Client) GetProject(ctx context.Context, name string) (*v1.Project, erro
 		return nil, fmt.Errorf("decode project: %w", err)
 	}
 	return &project, nil
+}
+
+// ListCleanupTasks returns the cleanup obligations this node owes for
+// assignments it has given up. The list is candidates only: each must be
+// revalidated under the Project's claim before anything is removed.
+func (c *Client) ListCleanupTasks(ctx context.Context) ([]v1.CleanupTask, error) {
+	url := fmt.Sprintf("%s/api/v1/nodes/%s/cleanup-obligations", c.serverURL, c.nodeName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build list cleanup obligations request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list cleanup obligations request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list cleanup obligations: unexpected status %s", resp.Status)
+	}
+
+	var list v1.CleanupTaskList
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, fmt.Errorf("decode cleanup obligations: %w", err)
+	}
+	return list.Items, nil
+}
+
+// evidenceRequest is the body of the recovery evidence endpoints: the
+// assignment the evidence is about.
+type evidenceRequest struct {
+	UID                  string `json:"uid"`
+	NodeRef              string `json:"nodeRef"`
+	AssignmentGeneration *int64 `json:"assignmentGeneration"`
+}
+
+// ReportResourcesRemoved resolves the cleanup obligation for assignment, after
+// every deletion-scoped resource this node held for it is confirmed gone. A
+// 409 comes back as ErrStaleAssignment and a 404 as ErrProjectNotFound.
+//
+// The server sends 409 both when no such unresolved obligation exists for this
+// node and lifetime and when its compare-and-swap lost every retry. A caller
+// that must not drop the report reads the Project again to tell them apart
+// (obligationStands).
+func (c *Client) ReportResourcesRemoved(ctx context.Context, projectName string, assignment v1.AssignmentIdentity) error {
+	gen := assignment.AssignmentGeneration
+	body, err := json.Marshal(evidenceRequest{UID: assignment.ProjectUID, NodeRef: assignment.NodeName, AssignmentGeneration: &gen})
+	if err != nil {
+		return fmt.Errorf("marshal resources-removed request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/projects/%s/recovery/resources-removed", c.serverURL, projectName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build resources-removed request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("resources-removed request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("report resources removed: unexpected status %s", resp.Status)
+	}
+}
+
+// ReportManagedDataQuarantined records that this node's local Managed data for
+// assignment left the active path. A 409 comes back as ErrStaleAssignment and a
+// 404 as ErrProjectNotFound.
+func (c *Client) ReportManagedDataQuarantined(ctx context.Context, projectName string, assignment v1.AssignmentIdentity) error {
+	gen := assignment.AssignmentGeneration
+	body, err := json.Marshal(evidenceRequest{UID: assignment.ProjectUID, NodeRef: assignment.NodeName, AssignmentGeneration: &gen})
+	if err != nil {
+		return fmt.Errorf("marshal managed-data-quarantined request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/projects/%s/recovery/managed-data-quarantined", c.serverURL, projectName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build managed-data-quarantined request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("managed-data-quarantined request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("report managed data quarantined: unexpected status %s", resp.Status)
+	}
+}
+
+// CommitBackup asks the server to make backupID the Project's restore source. A
+// 409 comes back as ErrStaleAssignment and a 404 as ErrProjectNotFound.
+func (c *Client) CommitBackup(ctx context.Context, projectName string, fence AssignmentFence, backupID string) error {
+	body, err := json.Marshal(struct {
+		evidenceRequest
+		BackupID string `json:"backupID"`
+	}{
+		evidenceRequest: evidenceRequest{UID: fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &fence.Generation},
+		BackupID:        backupID,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal committed-backup request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/projects/%s/recovery/committed-backup", c.serverURL, projectName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build committed-backup request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("committed-backup request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("commit backup: unexpected status %s", resp.Status)
+	}
+}
+
+// ReportWorkloadStopped records the evidence that every container of the
+// assignment fence names is stopped. It is what lets the server release that
+// assignment (the release gate of CARA-84), so it is sent only once the
+// containers really are stopped and are meant to stay so — after the fresh
+// backup a planned move takes, for one.
+//
+// It returns ErrStaleAssignment when the fence no longer names the Project's
+// current assignment, and ErrProjectNotFound when the Project is gone.
+func (c *Client) ReportWorkloadStopped(ctx context.Context, projectName string, fence AssignmentFence) error {
+	body, err := json.Marshal(evidenceRequest{UID: fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &fence.Generation})
+	if err != nil {
+		return fmt.Errorf("marshal workload-stopped request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/projects/%s/recovery/workload-stopped", c.serverURL, projectName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build workload-stopped request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("workload-stopped request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("report workload stopped: unexpected status %s", resp.Status)
+	}
+}
+
+// stanzaRequest is the body of PUT /api/v1/projects/{name}/backup/stanzas.
+type stanzaRequest struct {
+	evidenceRequest
+	Volume string `json:"volume"`
+}
+
+// RecordStanza tells the server, under the assignment fence, that this Agent
+// is about to create the pgBackRest stanza for volume. It must succeed before
+// the stanza is created, so the lifetime's inventory never misses one. A 409
+// means the fence is no longer current (ErrStaleAssignment).
+func (c *Client) RecordStanza(ctx context.Context, projectName string, fence AssignmentFence, volume string) error {
+	gen := fence.Generation
+	body, err := json.Marshal(stanzaRequest{
+		evidenceRequest: evidenceRequest{UID: fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &gen},
+		Volume:          volume,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal stanza request: %w", err)
+	}
+	url := fmt.Sprintf("%s/api/v1/projects/%s/backup/stanzas", c.serverURL, projectName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build stanza request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("stanza request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("record stanza: unexpected status %s", resp.Status)
+	}
+}
+
+// completionRequest is the body of
+// PUT /api/v1/projects/{name}/backup/completions/{backupID}.
+type completionRequest struct {
+	evidenceRequest
+	Items []v1.BackupCompletionItem `json:"items"`
+}
+
+// RecordBackupCompletion reports a completed backup under the assignment
+// fence. Retrying with the same backupID is safe: an accepted one is accepted
+// again. A 409 means the fence is no longer current and the backup was never
+// accepted (ErrStaleAssignment).
+func (c *Client) RecordBackupCompletion(ctx context.Context, projectName string, fence AssignmentFence, backupID string, items []v1.BackupCompletionItem) error {
+	gen := fence.Generation
+	body, err := json.Marshal(completionRequest{
+		evidenceRequest: evidenceRequest{UID: fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &gen},
+		Items:           items,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal completion request: %w", err)
+	}
+	url := fmt.Sprintf("%s/api/v1/projects/%s/backup/completions/%s", c.serverURL, projectName, backupID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build completion request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("completion request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("record backup completion: unexpected status %s", resp.Status)
+	}
 }
 
 // conditionPatchRequest is the body sent to

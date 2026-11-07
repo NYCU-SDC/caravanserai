@@ -27,6 +27,36 @@ type Server struct {
 
 	mux             *http.ServeMux
 	basicMiddleware *middleware.Set
+
+	// authenticate wraps the whole mux, so no route can be registered outside
+	// it. Nil serves without authentication, which only tests do.
+	authenticate func(http.Handler) http.Handler
+	// authorize wraps the mux inside authentication, so it sees the
+	// principal. Nil serves without authorization, which only tests do.
+	authorize func(*http.ServeMux) http.Handler
+}
+
+// Authenticator attaches the caller's identity to a request, or rejects it.
+type Authenticator interface {
+	Middleware(next http.Handler) http.Handler
+}
+
+// RequireAuthentication puts every route behind a. cara-server always calls
+// it (ADR-0031).
+func (s *Server) RequireAuthentication(a Authenticator) {
+	s.authenticate = a.Middleware
+}
+
+// Authorizer decides what an authenticated caller may do (CARA-140). It wraps
+// the mux itself because it needs to know which route a request matches.
+type Authorizer interface {
+	Wrap(mux *http.ServeMux) http.Handler
+}
+
+// RequireAuthorization puts every route behind a, inside authentication.
+// cara-server always calls it.
+func (s *Server) RequireAuthorization(a Authorizer) {
+	s.authorize = a.Wrap
 }
 
 // New creates a Server and wires up the recover + trace middleware chain.
@@ -64,5 +94,12 @@ func (s *Server) Register(registrar RouteRegistrar) {
 // Handler returns the final http.Handler to pass to http.Server.
 // Call this after all registrars have been registered.
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	var h http.Handler = s.mux
+	if s.authorize != nil {
+		h = s.authorize(s.mux)
+	}
+	if s.authenticate != nil {
+		h = s.authenticate(h)
+	}
+	return h
 }

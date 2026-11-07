@@ -3,6 +3,8 @@ BLUE = \033[0;34m
 RED = \033[0;31m
 NC = \033[0m
 
+include version.mk
+
 all: build
 
 prepare:
@@ -18,6 +20,18 @@ build:
 	@$(MAKE) -C cmd/cara-agent build
 	@$(MAKE) -C cmd/caractl build
 	@echo -e "==> $(BLUE)All binaries built successfully$(NC)"
+
+# package builds the release packages for one architecture into dist/ with
+# scripts/release/package.sh, the script the release workflow and test/vm use.
+#   make package               the host's architecture
+#   make package ARCH=amd64
+ARCH ?= $(shell go env GOARCH)
+
+package:
+	@echo -e ":: $(GREEN)Packaging cara $(CARA_VERSION) for linux/$(ARCH)...$(NC)"
+	@scripts/release/package.sh $(ARCH) dist \
+		&& echo -e "==> $(BLUE)Packages are in dist/$(NC)" \
+		|| (echo -e "==> $(RED)Packaging failed$(NC)" && exit 1)
 
 run-server:
 	@$(MAKE) -C cmd/cara-server run
@@ -75,9 +89,13 @@ test:
 		&& echo -e "==> $(BLUE)All tests passed$(NC)" \
 		|| (echo -e "==> $(RED)Tests failed$(NC)" && exit 1)
 
+# The store package also carries e2e tests that need its internals, such as a
+# hook between a read and its compare-and-swap. It runs as a separate go test
+# because -args -verbose is defined only by the test/integration suite.
 test-integration:
 	@echo -e ":: $(GREEN)Running integration tests (requires Docker)...$(NC)"
 	@go test -v -tags e2e -timeout 120s ./test/integration/... $(if $(VERBOSE),-args -verbose) \
+		&& go test -v -tags e2e -timeout 120s ./internal/store/postgres/... \
 		&& echo -e "==> $(BLUE)All integration tests passed$(NC)" \
 		|| (echo -e "==> $(RED)Integration tests failed$(NC)" && exit 1)
 
@@ -94,10 +112,19 @@ test-managed-failover-e2e:
 		|| (echo -e "==> $(RED)Managed-volume failover rehearsal failed$(NC)" && exit 1)
 
 test-recovery-e2e:
-	@echo -e ":: $(GREEN)Running isolated local-recovery rehearsal (about 6 minutes)...$(NC)"
+	@echo -e ":: $(GREEN)Running isolated local-recovery rehearsal (about 9 minutes)...$(NC)"
 	@./scripts/e2e/local-recovery.sh \
 		&& echo -e "==> $(BLUE)Local-recovery rehearsal passed$(NC)" \
 		|| (echo -e "==> $(RED)Local-recovery rehearsal failed$(NC)" && exit 1)
+
+# PGDIFF_IMAGE=<reference> runs it against a copy of cara-postgres published
+# somewhere other than GHCR; E2E_INSECURE_REGISTRY=<host:port> lets the
+# isolated daemon pull that copy from a plain-HTTP registry.
+test-pgdiff-e2e:
+	@echo -e ":: $(GREEN)Running isolated PostgresDifferential rehearsal (about 5 minutes)...$(NC)"
+	@./scripts/e2e/postgres-differential.sh \
+		&& echo -e "==> $(BLUE)PostgresDifferential rehearsal passed$(NC)" \
+		|| (echo -e "==> $(RED)PostgresDifferential rehearsal failed$(NC)" && exit 1)
 
 schemas:
 	@echo -e ":: $(GREEN)Generating JSON Schemas...$(NC)"
@@ -132,9 +159,12 @@ dev-reset: .env
 		&& echo -e "==> $(BLUE)Development environment reset complete$(NC)" \
 		|| (echo -e "==> $(RED)Failed to reset development environment$(NC)" && exit 1)
 
+# The dev server's break-glass token lives in .dev-break-glass-token, created on
+# first use. Export it as CARA_TOKEN to use caractl against the dev server.
 dev-server: dev-up build
-	@echo -e ":: $(GREEN)Starting cara-server...$(NC)"
-	@./bin/cara-server
+	@[ -s .dev-break-glass-token ] || (umask 077 && openssl rand -base64 32 > .dev-break-glass-token)
+	@echo -e ":: $(GREEN)Starting cara-server (CARA_TOKEN is in .dev-break-glass-token)...$(NC)"
+	@BREAK_GLASS_TOKEN_FILE=.dev-break-glass-token ./bin/cara-server
 
 dev-logs:
 	@docker compose logs -f
@@ -163,12 +193,33 @@ walg-verify: .env
 		&& echo -e "==> $(BLUE)Verification complete$(NC)" \
 		|| (echo -e "==> $(RED)Verification failed$(NC)" && exit 1)
 
+# The image for PostgresDifferential databases and the Node's pgBackRest repo
+# host. Built for the host architecture under the name manifests use, which is
+# also what the workflow publishes; the image ID and recorded versions are
+# printed so two builds can be compared.
+CARA_POSTGRES_IMAGE ?= ghcr.io/nycu-sdc/cara-postgres:16
+
+build-cara-postgres-image:
+	@echo -e ":: $(GREEN)Building $(CARA_POSTGRES_IMAGE)...$(NC)"
+	@docker build -t $(CARA_POSTGRES_IMAGE) deploy/images/cara-postgres/16 \
+		&& docker image inspect $(CARA_POSTGRES_IMAGE) --format '  -> image ID {{.Id}}' \
+		&& docker run --rm --entrypoint cat $(CARA_POSTGRES_IMAGE) /usr/share/cara/image-versions | sed 's/^/  -> /' \
+		&& echo -e "==> $(BLUE)Image built$(NC)" \
+		|| (echo -e "==> $(RED)Image build failed$(NC)" && exit 1)
+
+test-cara-postgres-image: build-cara-postgres-image
+	@echo -e ":: $(GREEN)Running the cara-postgres image smoke test (about 2 minutes)...$(NC)"
+	@CARA_POSTGRES_IMAGE=$(CARA_POSTGRES_IMAGE) ./scripts/image/cara-postgres-smoke.sh \
+		&& echo -e "==> $(BLUE)Image smoke test passed$(NC)" \
+		|| (echo -e "==> $(RED)Image smoke test failed$(NC)" && exit 1)
+
 install-hooks:
 	@echo -e ":: $(GREEN)Installing git hooks...$(NC)"
 	@git config core.hooksPath .githooks \
 		&& echo -e "==> $(BLUE)Git hooks installed (using .githooks/)$(NC)" \
 		|| (echo -e "==> $(RED)Failed to configure git hooks$(NC)" && exit 1)
 
-.PHONY: all prepare build run-server run-agent run-cli test test-integration test-orphan-e2e test-recovery-e2e test-managed-failover-e2e schemas
+.PHONY: all prepare build package run-server run-agent run-cli test test-integration test-orphan-e2e test-recovery-e2e test-managed-failover-e2e test-pgdiff-e2e schemas
 .PHONY: dev-up dev-down dev-reset dev-server dev-logs install-hooks
 .PHONY: walg-backup walg-restore walg-verify
+.PHONY: build-cara-postgres-image test-cara-postgres-image

@@ -49,17 +49,38 @@ type Config struct {
 	// Defaults to "cara-node".
 	HeadscaleUser string `yaml:"headscale_user" envconfig:"HEADSCALE_USER"`
 
-	// UIDEnforcement turns on strict UID and assignment-generation fencing on
-	// the server side (CARA-82, CARA-83). It shares the agent's UID_ENFORCEMENT
-	// switch on purpose: UID and generation are one ownership identity, rolled
-	// out together. When false (the default, "compatibility mode") an Agent
-	// report that carries a complete UID + nodeRef + generation fence is still
-	// validated atomically, but a legacy report missing that fence is accepted
-	// through the unfenced path so an un-upgraded Agent keeps working. When
-	// true, a report missing UID or generation is rejected as a stale
-	// assignment rather than accepted. Enable it cluster-wide only after every
-	// Agent sends the fence and legacy runtime ownership has been remediated.
-	UIDEnforcement bool `yaml:"uid_enforcement" envconfig:"UID_ENFORCEMENT"`
+	// TerminatingTimeout is how long a Terminating Project's Node may stay
+	// NotReady before the Project is marked TerminationBlocked. Zero means the
+	// controller's default (10m). It only decides when the stuck deletion is
+	// reported; the record is kept either way.
+	TerminatingTimeout time.Duration `yaml:"terminating_timeout" envconfig:"TERMINATING_TIMEOUT"`
+
+	// RunningGracePeriod is how long a Running Project may stay on a NotReady
+	// Node before its release is attempted. Zero means the controller's default
+	// (3m).
+	RunningGracePeriod time.Duration `yaml:"running_grace_period" envconfig:"RUNNING_GRACE_PERIOD"`
+
+	// GraceExpiredRelease moves a Project with no Managed volume, or with a
+	// committed backup to restore from, off a Node that stayed NotReady past the
+	// grace period, with no proof it stopped. A partitioned Node keeps its copy
+	// running until it reconnects (ADR-0024).
+	// The assignment fence refuses the returning Agent's stale writes.
+	GraceExpiredRelease bool `yaml:"grace_expired_release" envconfig:"GRACE_EXPIRED_RELEASE"`
+
+	// BreakGlassTokenFile names a file holding the break-glass admin token
+	// (ADR-0031). It authenticates as user:break-glass, and is how the first
+	// tokens are issued and how an operator gets in when nothing else works.
+	// Empty configures none. The token is read from a file, not a flag or an
+	// environment variable, to keep it out of process listings.
+	BreakGlassTokenFile string `yaml:"break_glass_token_file" envconfig:"BREAK_GLASS_TOKEN_FILE"`
+
+	// PostgresDifferentialImage is the image reference a PostgresDifferential
+	// volume's service must use. Empty means the published one,
+	// ghcr.io/nycu-sdc/cara-postgres:16. Set it where that image cannot be
+	// pulled, for example a development environment using a copy pushed to
+	// another registry; Agents pull whatever the manifest names, so manifests
+	// in that environment name the same reference.
+	PostgresDifferentialImage string `yaml:"postgres_differential_image" envconfig:"POSTGRES_DIFFERENTIAL_IMAGE"`
 
 	// MaxInFlightEvictions caps how many planned moves (drain, fail-back) run
 	// at once across the cluster (CARA-119). Each move is downtime plus a
@@ -92,6 +113,9 @@ type Config struct {
 	// FailbackMinFreePercent is how much of a primary node's CPU and memory
 	// must still be free once the Project is placed there.
 	FailbackMinFreePercent float64 `yaml:"failback_min_free_percent" envconfig:"FAILBACK_MIN_FREE_PERCENT"`
+
+	// configFileError is why a config file named explicitly could not be used.
+	configFileError error
 }
 
 // DefaultFailbackTimezone is the time zone FailbackWindow is read in when
@@ -127,10 +151,12 @@ func Load() (Config, *LogBuffer) {
 
 	var err error
 
-	cfg, err = FromFile("config.yaml", cfg, logger)
+	path, explicit := resolveConfigPath(os.Args[1:])
+	cfg, err = FromFile(path, cfg, logger)
 	if err != nil {
-		logger.Warn("Failed to load config from file", err, map[string]string{"path": "config.yaml"})
+		logger.Warn("Failed to load config from file", err, map[string]string{"path": path})
 	}
+	fileErr := explicitFileError(explicit, err)
 
 	cfg, err = FromEnv(cfg, logger)
 	if err != nil {
@@ -142,6 +168,7 @@ func Load() (Config, *LogBuffer) {
 		logger.Warn("Failed to load config from flags", err, nil)
 	}
 
+	cfg.configFileError = fileErr
 	return *cfg, logger
 }
 
@@ -174,21 +201,40 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 	}
 
 	envConfig := &Config{
-		Debug:            os.Getenv("DEBUG") == "true",
-		Host:             os.Getenv("HOST"),
-		Port:             os.Getenv("PORT"),
-		OtelCollectorUrl: os.Getenv("OTEL_COLLECTOR_URL"),
-		DatabaseURL:      os.Getenv("DATABASE_URL"),
-		HeadscaleURL:     os.Getenv("HEADSCALE_URL"),
-		PreauthKeyFile:   os.Getenv("HEADSCALE_PREAUTH_KEY_FILE"),
-		OverlayHostname:  os.Getenv("OVERLAY_HOSTNAME"),
-		OverlayStateDir:  os.Getenv("OVERLAY_STATE_DIR"),
-		HeadscaleAPIURL:  os.Getenv("HEADSCALE_API_URL"),
-		HeadscaleAPIKey:  os.Getenv("HEADSCALE_API_KEY"),
-		HeadscaleUser:    os.Getenv("HEADSCALE_USER"),
-		UIDEnforcement:   os.Getenv("UID_ENFORCEMENT") == "true",
-		FailbackWindow:   os.Getenv("FAILBACK_WINDOW"),
-		FailbackTimezone: os.Getenv("FAILBACK_TIMEZONE"),
+		Debug:               os.Getenv("DEBUG") == "true",
+		Host:                os.Getenv("HOST"),
+		Port:                os.Getenv("PORT"),
+		OtelCollectorUrl:    os.Getenv("OTEL_COLLECTOR_URL"),
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		HeadscaleURL:        os.Getenv("HEADSCALE_URL"),
+		PreauthKeyFile:      os.Getenv("HEADSCALE_PREAUTH_KEY_FILE"),
+		OverlayHostname:     os.Getenv("OVERLAY_HOSTNAME"),
+		OverlayStateDir:     os.Getenv("OVERLAY_STATE_DIR"),
+		HeadscaleAPIURL:     os.Getenv("HEADSCALE_API_URL"),
+		HeadscaleAPIKey:     os.Getenv("HEADSCALE_API_KEY"),
+		HeadscaleUser:       os.Getenv("HEADSCALE_USER"),
+		BreakGlassTokenFile: os.Getenv("BREAK_GLASS_TOKEN_FILE"),
+		GraceExpiredRelease: os.Getenv("GRACE_EXPIRED_RELEASE") == "true",
+
+		PostgresDifferentialImage: os.Getenv("POSTGRES_DIFFERENTIAL_IMAGE"),
+		FailbackWindow:            os.Getenv("FAILBACK_WINDOW"),
+		FailbackTimezone:          os.Getenv("FAILBACK_TIMEZONE"),
+	}
+
+	if raw := os.Getenv("RUNNING_GRACE_PERIOD"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil {
+			envConfig.RunningGracePeriod = d
+		} else {
+			logger.Warn("Invalid RUNNING_GRACE_PERIOD, ignoring", err, map[string]string{"value": raw})
+		}
+	}
+
+	if raw := os.Getenv("TERMINATING_TIMEOUT"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil {
+			envConfig.TerminatingTimeout = d
+		} else {
+			logger.Warn("Invalid TERMINATING_TIMEOUT, ignoring", err, map[string]string{"value": raw})
+		}
 	}
 	for _, d := range []struct {
 		env string
@@ -246,7 +292,11 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.StringVar(&flagConfig.HeadscaleAPIURL, "headscale-api-url", "", "Headscale management API URL (enables overlay admin endpoints)")
 	flag.StringVar(&flagConfig.HeadscaleAPIKey, "headscale-api-key", "", "Headscale management API key")
 	flag.StringVar(&flagConfig.HeadscaleUser, "headscale-user", "", "Headscale user new pre-auth keys are created under (default: cara-node)")
-	flag.BoolVar(&flagConfig.UIDEnforcement, "uid-enforcement", false, "enforce Project UID and assignment-generation fencing (default: false, compatibility mode)")
+	flag.DurationVar(&flagConfig.TerminatingTimeout, "terminating-timeout", 0, "how long a Terminating project's node may be NotReady before the deletion is reported blocked (default: 10m)")
+	flag.DurationVar(&flagConfig.RunningGracePeriod, "running-grace-period", 0, "how long a Running Project may stay on a NotReady node before its release is attempted (default: 3m)")
+	flag.BoolVar(&flagConfig.GraceExpiredRelease, "grace-expired-release", false, "move Projects off a node that stayed NotReady past the grace period; one with a Managed volume needs a committed backup")
+	flag.StringVar(&flagConfig.BreakGlassTokenFile, "break-glass-token-file", "", "file holding the break-glass admin token")
+	flag.String(configFlag, "", configFlagUsage)
 	flag.IntVar(&flagConfig.MaxInFlightEvictions, "max-inflight-evictions", 0, "planned moves (drain, fail-back) allowed at once across the cluster (default: 1)")
 	flag.StringVar(&flagConfig.FailbackWindow, "failback-window", "", "daily window HH:MM-HH:MM in which projects are moved back to the primary tier (default: disabled)")
 	flag.StringVar(&flagConfig.FailbackTimezone, "failback-timezone", "", "IANA time zone the fail-back window is read in (default: Asia/Taipei)")

@@ -22,7 +22,7 @@ func TestRunForEviction(t *testing.T) {
 		assert.Equal(t, []string{"stop"}, h.containers.history(), "no restart: the move takes it from here")
 		assert.Equal(t, 0, h.routes.count())
 		assert.Equal(t, []string{"set", "clear"}, h.conditions.history())
-		assert.Contains(t, h.store.keys()[len(h.store.keys())-1], "latest.json", "the generation is complete")
+		assert.Equal(t, []string{backupID}, h.committer.ids, "the fresh backup is committed through the server as the restore source")
 	})
 
 	t.Run("a move called off meanwhile restarts the containers", func(t *testing.T) {
@@ -46,6 +46,7 @@ func TestRunForEviction(t *testing.T) {
 		require.Error(t, err)
 		assert.False(t, leftStopped)
 		assert.Empty(t, backupID)
+		assert.Empty(t, h.committer.ids, "a failed backup is never committed")
 		assert.False(t, asked)
 		assert.Equal(t, []string{"stop", "start"}, h.containers.history())
 	})

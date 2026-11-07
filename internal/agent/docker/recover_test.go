@@ -1,9 +1,13 @@
 package docker
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +22,7 @@ import (
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/pkg/stdcopy"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,11 +43,38 @@ type fakeDocker struct {
 	containers map[string]types.ContainerJSON
 	// volumes is the set of Docker named volumes that exist.
 	volumes map[string]bool
+	// volumeLabels holds the labels of volumes that have any, for
+	// VolumeInspect and the label filters of VolumeList.
+	volumeLabels map[string]map[string]string
 	// networks maps network name → its labels, for NetworkInspect.
 	networks map[string]map[string]string
+	// endpoints maps network name → the containers attached to it.
+	endpoints map[string]map[string]bool
+
+	// execs maps a command (its words joined by spaces) to what running it
+	// produces. A command not listed exits 0 with no output.
+	execs map[string]ExecResult
+	// lastExec is the command and user of the most recent exec.
+	lastExec     []string
+	lastExecUser string
+	// waitCode is the exit code ContainerWait reports.
+	waitCode int64
+	// missingImages are images not on the Node until pulled.
+	missingImages map[string]bool
+	// removedVolumesOf lists the containers removed with their anonymous
+	// volumes.
+	removedVolumesOf []string
+	// waitHangs makes ContainerWait never report an exit.
+	waitHangs bool
+	// execHangs makes every exec run on without output or end.
+	execHangs bool
+	hungPeers []net.Conn
 
 	// mutations records every call that changes Docker state, in order.
 	mutations []string
+
+	// commands records the Cmd of every container created, in order.
+	commands [][]string
 
 	// onInspect, when set, runs at the start of every ContainerInspect, so a
 	// test can change what Docker holds between two reads of it.
@@ -59,9 +91,10 @@ type fakeDocker struct {
 
 func newFakeDocker() *fakeDocker {
 	return &fakeDocker{
-		containers: map[string]types.ContainerJSON{},
-		volumes:    map[string]bool{},
-		networks:   map[string]map[string]string{},
+		containers:   map[string]types.ContainerJSON{},
+		volumes:      map[string]bool{},
+		volumeLabels: map[string]map[string]string{},
+		networks:     map[string]map[string]string{},
 	}
 }
 
@@ -104,10 +137,14 @@ func (f *fakeDocker) ContainerInspect(_ context.Context, containerID string) (ty
 
 func (f *fakeDocker) ContainerCreate(_ context.Context, cfg *container.Config, _ *container.HostConfig,
 	_ *network.NetworkingConfig, _ *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+	if cfg != nil && f.missingImages[cfg.Image] {
+		return container.CreateResponse{}, errdefs.NotFound(fmt.Errorf("No such image: %s", cfg.Image))
+	}
 	f.record("ContainerCreate:" + containerName)
 	var labels map[string]string
 	if cfg != nil {
 		labels = cfg.Labels
+		f.commands = append(f.commands, cfg.Cmd)
 	}
 	f.withContainer(containerName, "created", labels)
 	return container.CreateResponse{ID: fakeID(containerName)}, nil
@@ -123,8 +160,11 @@ func (f *fakeDocker) ContainerStart(_ context.Context, containerID string, _ con
 	return nil
 }
 
-func (f *fakeDocker) ContainerRemove(_ context.Context, containerID string, _ container.RemoveOptions) error {
+func (f *fakeDocker) ContainerRemove(_ context.Context, containerID string, opts container.RemoveOptions) error {
 	f.record("ContainerRemove:" + containerID)
+	if opts.RemoveVolumes {
+		f.removedVolumesOf = append(f.removedVolumesOf, containerID)
+	}
 	// A removed container stops existing, so a later inspect must miss it.
 	// Without this the dead-container path would look like it repaired a
 	// container it had just destroyed.
@@ -145,17 +185,20 @@ func (f *fakeDocker) VolumeInspect(_ context.Context, volumeID string) (volume.V
 	if !f.volumes[volumeID] {
 		return volume.Volume{}, errFakeNotFound
 	}
-	return volume.Volume{Name: volumeID}, nil
+	return volume.Volume{Name: volumeID, Labels: f.volumeLabels[volumeID]}, nil
 }
 
 func (f *fakeDocker) VolumeCreate(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
 	f.record("VolumeCreate:" + options.Name)
 	f.volumes[options.Name] = true
-	return volume.Volume{Name: options.Name}, nil
+	f.volumeLabels[options.Name] = options.Labels
+	return volume.Volume{Name: options.Name, Labels: options.Labels}, nil
 }
 
 func (f *fakeDocker) VolumeRemove(_ context.Context, volumeID string, _ bool) error {
 	f.record("VolumeRemove:" + volumeID)
+	delete(f.volumes, volumeID)
+	delete(f.volumeLabels, volumeID)
 	return nil
 }
 
@@ -164,17 +207,92 @@ func (f *fakeDocker) NetworkInspect(_ context.Context, networkID string, _ netwo
 	if !ok {
 		return network.Inspect{}, errFakeNotFound
 	}
-	return network.Inspect{Name: networkID, Labels: labels}, nil
+	containers := map[string]network.EndpointResource{}
+	for c := range f.endpoints[networkID] {
+		containers["id-"+c] = network.EndpointResource{Name: c}
+	}
+	return network.Inspect{ID: "net-" + networkID, Name: networkID, Labels: labels, Containers: containers}, nil
 }
 
-func (f *fakeDocker) NetworkCreate(_ context.Context, name string, _ network.CreateOptions) (network.CreateResponse, error) {
+func (f *fakeDocker) NetworkConnect(_ context.Context, networkID, containerID string, _ *network.EndpointSettings) error {
+	f.record("NetworkConnect:" + networkID + ":" + containerID)
+	if _, ok := f.networks[networkID]; !ok {
+		return errFakeNotFound
+	}
+	if f.endpoints == nil {
+		f.endpoints = map[string]map[string]bool{}
+	}
+	if f.endpoints[networkID] == nil {
+		f.endpoints[networkID] = map[string]bool{}
+	}
+	f.endpoints[networkID][containerID] = true
+	return nil
+}
+
+func (f *fakeDocker) NetworkDisconnect(_ context.Context, networkID, containerID string, _ bool) error {
+	f.record("NetworkDisconnect:" + networkID + ":" + containerID)
+	delete(f.endpoints[networkID], containerID)
+	return nil
+}
+
+func (f *fakeDocker) ContainerWait(_ context.Context, containerID string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	ch := make(chan container.WaitResponse, 1)
+	if !f.waitHangs {
+		ch <- container.WaitResponse{StatusCode: f.waitCode}
+	}
+	return ch, make(chan error)
+}
+
+func (f *fakeDocker) ContainerKill(_ context.Context, containerID, signal string) error {
+	f.record("ContainerKill:" + containerID + ":" + signal)
+	return nil
+}
+
+// fakeExecs carries an exec's planned result from create to inspect.
+var fakeExecs = map[string]ExecResult{}
+
+func (f *fakeDocker) ContainerExecCreate(_ context.Context, containerID string, options container.ExecOptions) (types.IDResponse, error) {
+	f.record("ContainerExecCreate:" + containerID)
+	f.lastExec, f.lastExecUser = options.Cmd, options.User
+	id := fmt.Sprintf("exec-%d", len(fakeExecs))
+	fakeExecs[id] = f.execs[strings.Join(options.Cmd, " ")]
+	return types.IDResponse{ID: id}, nil
+}
+
+func (f *fakeDocker) ContainerExecAttach(_ context.Context, execID string, _ container.ExecAttachOptions) (types.HijackedResponse, error) {
+	result := fakeExecs[execID]
+	if f.execHangs {
+		// A command that runs on without writing: the read ends only when
+		// the connection is closed.
+		conn, peer := net.Pipe()
+		f.hungPeers = append(f.hungPeers, peer)
+		return types.HijackedResponse{Conn: conn, Reader: bufio.NewReader(conn)}, nil
+	}
+	var stream bytes.Buffer
+	_, _ = stdcopy.NewStdWriter(&stream, stdcopy.Stdout).Write([]byte(result.Stdout))
+	_, _ = stdcopy.NewStdWriter(&stream, stdcopy.Stderr).Write([]byte(result.Stderr))
+	conn, peer := net.Pipe()
+	_ = peer.Close()
+	return types.HijackedResponse{Conn: conn, Reader: bufio.NewReader(&stream)}, nil
+}
+
+func (f *fakeDocker) ContainerExecInspect(_ context.Context, execID string) (container.ExecInspect, error) {
+	return container.ExecInspect{ExecID: execID, ExitCode: fakeExecs[execID].ExitCode}, nil
+}
+
+func (f *fakeDocker) NetworkCreate(_ context.Context, name string, options network.CreateOptions) (network.CreateResponse, error) {
 	f.record("NetworkCreate:" + name)
-	f.networks[name] = map[string]string{}
+	labels := options.Labels
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	f.networks[name] = labels
 	return network.CreateResponse{ID: "net-" + name}, nil
 }
 
 func (f *fakeDocker) NetworkRemove(_ context.Context, networkID string) error {
 	f.record("NetworkRemove:" + networkID)
+	delete(f.networks, strings.TrimPrefix(networkID, "net-"))
 	return nil
 }
 
@@ -183,6 +301,7 @@ func (f *fakeDocker) ImagePull(_ context.Context, refStr string, _ image.PullOpt
 	if err := f.pullErr[refStr]; err != nil {
 		return nil, err
 	}
+	delete(f.missingImages, refStr)
 	return io.NopCloser(strings.NewReader("")), nil
 }
 
@@ -218,8 +337,16 @@ func (f *fakeDocker) ContainerLogs(context.Context, string, container.LogsOption
 	return io.NopCloser(strings.NewReader("")), nil
 }
 
-func (f *fakeDocker) VolumeList(context.Context, volume.ListOptions) (volume.ListResponse, error) {
-	return volume.ListResponse{}, nil
+func (f *fakeDocker) VolumeList(_ context.Context, opts volume.ListOptions) (volume.ListResponse, error) {
+	var out volume.ListResponse
+	for name := range f.volumes {
+		labels := f.volumeLabels[name]
+		if !matchesLabelFilters(labels, opts.Filters.Get("label")) {
+			continue
+		}
+		out.Volumes = append(out.Volumes, &volume.Volume{Name: name, Labels: labels})
+	}
+	return out, nil
 }
 
 func (f *fakeDocker) Info(context.Context) (system.Info, error) {
@@ -446,6 +573,17 @@ func TestRecoverServicesRecreatesAMissingContainer(t *testing.T) {
 	}, f.docker.mutations)
 }
 
+func TestCreatedContainerUsesTheServiceCommand(t *testing.T) {
+	f := newRecoverFixture(t, v1.VolumeTypeManaged)
+	f.provisionManaged(t)
+	f.project.Spec.Services[0].Command = []string{"sh", "-c", "echo hello"}
+
+	require.NoError(t, f.runtime.RecoverServices(t.Context(), f.project, []string{"db"}))
+
+	require.Len(t, f.docker.commands, 1)
+	assert.Equal(t, []string{"sh", "-c", "echo hello"}, []string(f.docker.commands[0]))
+}
+
 // A dead container is removed first, then rebuilt. The removal is allowed only
 // because the preflight has already confirmed the data it mounts is present.
 func TestRecoverServicesReplacesADeadContainer(t *testing.T) {
@@ -486,6 +624,9 @@ func TestPreflightRecoveryMutatesNothing(t *testing.T) {
 	f := newRecoverFixture(t, v1.VolumeTypeEphemeral)
 	f.container("db", "exited")
 	f.docker.volumes[VolumeName("blog", "db-data")] = true
+	f.docker.volumeLabels[VolumeName("blog", "db-data")] = map[string]string{
+		labelProject: "blog", labelNamespace: "default", labelUID: f.project.UID,
+	}
 
 	require.NoError(t, f.runtime.PreflightRecovery(t.Context(), f.project, []string{"db"}))
 	assert.Empty(t, f.docker.mutations)
@@ -540,12 +681,10 @@ func TestPreflightRecoveryReportsWhichVolumeIsMissing(t *testing.T) {
 
 // ── Container ownership ──────────────────────────────────────────────────────
 
-// newStrictFixture is a fixture with UID enforcement on, the mode CARA-83's
-// generation fence is enforced in.
+// newStrictFixture is a fixture with its Managed volume provisioned.
 func newStrictFixture(t *testing.T) *recoverFixture {
 	t.Helper()
 	f := newRecoverFixture(t, v1.VolumeTypeManaged)
-	f.runtime.enforceUID = true
 	f.provisionManaged(t)
 	return f
 }
@@ -629,7 +768,7 @@ func TestRecoverServicesAlwaysChecksProjectServiceAndNamespace(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.label, func(t *testing.T) {
-			f := newRecoverFixture(t, v1.VolumeTypeManaged) // compatibility mode
+			f := newRecoverFixture(t, v1.VolumeTypeManaged)
 			f.provisionManaged(t)
 			f.staleContainer("db", "exited", tc.label, tc.value)
 
@@ -651,27 +790,8 @@ func TestRecoverServicesRefusesAnUnlabelledContainer(t *testing.T) {
 	assert.Empty(t, f.docker.mutations)
 }
 
-// Compatibility mode keeps its documented contract: during a mixed-agent
-// rollout ownership falls back to (namespace, name), so a container without
-// the UID and generation labels — or with older ones — is still recovered,
-// exactly as ensureContainer would adopt it. A missing namespace label is
-// tolerated for the same reason. Strict mode is what closes these.
-func TestRecoverServicesCompatibilityModeIgnoresUIDAndGeneration(t *testing.T) {
-	f := newRecoverFixture(t, v1.VolumeTypeManaged)
-	f.provisionManaged(t)
-	f.docker.withContainer(ContainerName("blog", "db"), "exited", map[string]string{
-		labelProject:    "blog",
-		labelService:    "db",
-		labelUID:        "uid-previous-lifetime",
-		labelGeneration: "6",
-	})
-
-	require.NoError(t, f.runtime.RecoverServices(t.Context(), f.project, []string{"db"}))
-	assert.Equal(t, []string{"ContainerStart:" + fakeID("blog-db")}, f.docker.mutations)
-}
-
-// In strict mode the namespace label is required, not merely consistent.
-func TestRecoverServicesStrictModeRequiresTheNamespaceLabel(t *testing.T) {
+// The namespace label is required, not merely consistent.
+func TestRecoverServicesRequiresTheNamespaceLabel(t *testing.T) {
 	f := newStrictFixture(t)
 	labels := f.ownedLabels("db")
 	delete(labels, labelNamespace)
@@ -730,7 +850,7 @@ func TestInspectProjectReportsOwnership(t *testing.T) {
 func TestEnsureContainerUsesTheSharedOwnershipRule(t *testing.T) {
 	ensure := func(f *recoverFixture) error {
 		_, err := f.runtime.ensureContainer(t.Context(), f.project.Namespace, f.project.Name,
-			f.project.UID, f.project.Status.AssignmentGeneration, f.project.Spec.Services[0], f.project.Spec.Volumes)
+			f.project.UID, f.project.Status.AssignmentGeneration, f.project.Spec.Services[0], f.project.Spec)
 		return err
 	}
 
@@ -767,13 +887,29 @@ func TestEnsureContainerUsesTheSharedOwnershipRule(t *testing.T) {
 		assert.Empty(t, f.docker.mutations)
 	})
 
-	// Previously compatibility mode adopted any container with the right
-	// name. The project and service labels are now required in every mode.
-	t.Run("refuses another project's container in compatibility mode", func(t *testing.T) {
+	t.Run("refuses another project's container", func(t *testing.T) {
 		f := newRecoverFixture(t, v1.VolumeTypeManaged)
 		f.staleContainer("db", "exited", labelProject, "someone-else")
 
 		require.ErrorIs(t, ensure(f), ErrContainerNotOwned)
 		assert.Empty(t, f.docker.mutations)
 	})
+}
+
+// An Ephemeral volume under the right name but of a same-name predecessor
+// lifetime is not this Project's data. Recovery must not recreate a container
+// against it; it is reported unavailable, as a missing one is, and nothing is
+// touched.
+func TestRecoverServicesRefusesAPredecessorsEphemeralVolume(t *testing.T) {
+	f := newRecoverFixture(t, v1.VolumeTypeEphemeral)
+	f.docker.volumes[VolumeName("blog", "db-data")] = true
+	f.docker.volumeLabels[VolumeName("blog", "db-data")] = map[string]string{
+		labelProject: "blog", labelNamespace: "default", labelUID: "uid-previous-lifetime",
+	}
+
+	err := f.runtime.RecoverServices(t.Context(), f.project, []string{"db"})
+
+	require.ErrorIs(t, err, ErrRecoveryVolumeUnavailable)
+	assert.ErrorContains(t, err, "another Project lifetime")
+	assert.Empty(t, f.docker.mutations)
 }

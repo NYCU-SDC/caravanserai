@@ -6,7 +6,7 @@ central control plane — without requiring Kubernetes.
 
 ```
                       ┌─────────────────┐
-  caractrl ──────────▶│   cara-server   │◀── Scheduler / Controller Manager
+  caractl ──────────▶│   cara-server   │◀── Scheduler / Controller Manager
                       │  (control plane) │
                       └────────┬────────┘
                                │ HTTP API
@@ -26,7 +26,7 @@ central control plane — without requiring Kubernetes.
 |--------|------|
 | `cara-server` | Control-plane API server + Controller Manager |
 | `cara-agent` | Per-node agent — reconciles containers via Docker |
-| `caractrl` | CLI for managing Nodes and Projects |
+| `caractl` | CLI for managing Nodes and Projects |
 
 ## Concepts
 
@@ -55,13 +55,51 @@ Pending ──(scheduler)──▶ Scheduled ──(agent)──▶ Running
 - Docker (daemon accessible at `unix:///var/run/docker.sock` or via `DOCKER_HOST`)
 - PostgreSQL (for `cara-server`)
 
+## Installing from a release
+
+Each release on the [Releases page](https://github.com/NYCU-SDC/caravanserai/releases) carries Debian/Ubuntu packages for amd64 and arm64. Each package installs a binary in `/usr/bin`, a systemd unit and a settings file in `/etc/cara`, and leaves its service disabled until that file is filled in. `caractl` also comes as a `.tar.gz` for Linux and macOS. `SHA256SUMS` lists the checksums.
+
+On the control-plane machine, with PostgreSQL 16 already running:
+
+```bash
+sudo apt install ./cara-server_<version>_amd64.deb ./caractl_<version>_amd64.deb
+sudoedit /etc/cara/server.env          # set DATABASE_URL
+sudo systemctl enable --now cara-server
+export CARA_TOKEN="$(sudo cat /etc/cara/break-glass-token)"   # generated on install
+caractl node token create my-node      # prints a one-time join token
+```
+
+On each Node, with Docker installed:
+
+```bash
+sudo apt install ./cara-agent_<version>_amd64.deb
+sudoedit /etc/cara/agent.env           # set SERVER_URL, NODE_NAME, AGENT_ADVERTISE_IP
+sudo sh -c 'umask 077; cat > /etc/cara/join-token'   # paste the join token, then Ctrl-D
+sudo systemctl enable --now cara-agent
+```
+
+What the packages do to a running system:
+
+| Action | Service | Settings and data |
+|---|---|---|
+| install | installed, disabled, stopped | `/etc/cara/*.env` from the template; cara-server also generates `/etc/cara/break-glass-token` (0600) if none exists |
+| upgrade or reinstall | restarted if it was running | edited `.env` files and the break-glass token are kept |
+| `apt remove` | stopped and disabled | `.env` files, tokens, and `/var/lib/cara` (the agent's identity and data) are kept; installing again and `systemctl enable --now` brings the Node back with its kept identity |
+| `apt purge` | | the `.env` files are removed as well; tokens and `/var/lib/cara` are still kept |
+
+A crashed service is restarted by systemd after 5 s (`Restart=on-failure`). A clean stop through `systemctl stop` is not restarted.
+
+Releases are cut by pushing a `v*` tag (`v0.1.0`, or `v0.1.0-rc.1` for a prerelease). The [Release workflow](.github/workflows/release.yml) builds the packages with `scripts/release/package.sh`, installs them on its runner, and publishes them. `make package` builds the same packages locally into `dist/`.
+
 ## Quick Start
+
+The steps below run cara from source, for development. To install it on servers, see [Installing from a release](#installing-from-a-release).
 
 ### 1. Build all binaries
 
 ```bash
 make build
-# Outputs: bin/cara-server  bin/cara-agent  bin/caractrl
+# Outputs: bin/cara-server  bin/cara-agent  bin/caractl
 ```
 
 ### 2. Start PostgreSQL
@@ -78,7 +116,11 @@ docker run -d \
 
 ### 3. Start the control-plane server
 
+Every API request needs a bearer token. The break-glass admin token, read from a file, is how the first tokens are issued:
+
 ```bash
+(umask 077 && openssl rand -base64 32 > break-glass-token)
+BREAK_GLASS_TOKEN_FILE=break-glass-token \
 DATABASE_URL="postgresql://postgres:password@localhost:5432/caravanserai?sslmode=disable" \
   ./bin/cara-server
 # Listening on 0.0.0.0:8080
@@ -86,20 +128,31 @@ DATABASE_URL="postgresql://postgres:password@localhost:5432/caravanserai?sslmode
 
 ### 4. Start the agent (on the same or a different machine)
 
+Issue a one-time join token for the Node, then start the agent with it:
+
 ```bash
+export CARA_TOKEN="$(cat break-glass-token)"
+(umask 077 && ./bin/caractl node token create my-node > my-node.join-token)
+
 SERVER_URL=http://localhost:8080 \
 NODE_NAME=my-node \
+JOIN_TOKEN_FILE=my-node.join-token \
   ./bin/cara-agent
-# Agent registers itself, begins heartbeating and polling for work
+# Agent trades the join token for its Node token, registers itself, and begins
+# heartbeating and polling for work
 ```
+
+The agent keeps its Node token in `<data_root>/identity/` and needs no join token on later starts; the join token file can be deleted once the Node is enrolled. A join token works once, for the Node it names, for an hour unless `--ttl` says otherwise.
+
+`caractl node revoke my-node` stops the Node's token at once; the agent logs that it was refused. To bring the Node back, issue a new join token, put it in the same file and restart the agent.
 
 ### 5. Deploy a Project
 
 ```bash
-./bin/caractrl apply -f examples/nginx-project.yaml
+./bin/caractl apply -f examples/nginx-project.yaml
 # project/nginx-demo created
 
-./bin/caractrl get projects
+./bin/caractl get projects
 # NAME         PHASE     NODE      CONDITIONS          AGE
 # nginx-demo   Running   my-node   ContainersRunning   5s
 ```
@@ -108,13 +161,13 @@ NODE_NAME=my-node \
 
 ```bash
 # List all nodes
-./bin/caractrl get nodes
+./bin/caractl get nodes
 
 # Get a single project (JSON)
-./bin/caractrl --output json get projects nginx-demo
+./bin/caractl --output json get projects nginx-demo
 
 # Delete the project (agent tears down all containers)
-./bin/caractrl delete project nginx-demo
+./bin/caractl delete project nginx-demo
 ```
 
 ---
@@ -168,6 +221,34 @@ spec:
       type: Ephemeral
 ```
 
+### Backup strategy per Managed volume
+
+`spec.backup` backs up every Managed volume offline by default: the Project's services are stopped and each volume is archived. The newest 7 generations of a Project are kept, along with the one the server committed; a generation from an earlier Project of the same name is left alone. `spec.backup.items` can select `PostgresDifferential` for a PostgreSQL data volume instead (pgBackRest full and differential backups, PostgreSQL keeps running). See [`examples/volume/postgres-differential.yaml`](examples/volume/postgres-differential.yaml).
+
+| Field | Meaning |
+|---|---|
+| `items[].volume` | A declared Managed volume |
+| `items[].strategy` | `Offline` (default for unlisted volumes) or `PostgresDifferential` |
+| `items[].retainFull` | `PostgresDifferential` only: full backups kept, 1 to 12, default 4. A count, not a time guarantee |
+
+`PostgresDifferential` requires the volume to be mounted by exactly one service on `ghcr.io/nycu-sdc/cara-postgres:16` (or the image `postgres_differential_image` names) at `/var/lib/postgresql/data`, and every Managed volume of the Project to use it. That service cannot move its data or WAL out of the volume: `PGDATA` must be unset or that path, `POSTGRES_INITDB_WALDIR` is refused, `POSTGRES_INITDB_ARGS` may only hold `-k`, `--data-checksums` or `--NAME=VALUE` for an encoding, locale, authentication or WAL segment size setting written out in full (initdb accepts abbreviations, so anything else is refused), and none of the three may come from a Secret. A tablespace created from SQL outside the volume cannot be checked at apply time and is not supported. `items` is fixed when the Project is created and must be resent exactly as created: an omitted `retainFull` and an explicit `4` are different values, even though both mean four.
+
+Placing such a Project needs the Agent's object store to be reached over HTTPS (`S3_ENDPOINT`, with `S3_CA_FILE` for a private CA): the Agent runs a pgBackRest repo host on the Node, creates the volume's stanza, turns on WAL archiving (restarting PostgreSQL once) and reports `Running` only after `pgbackrest check` passes. The Project's other services start together with the database and may see that restart. Until then the Project stays `Scheduled` with a `RecoveryBlocked` condition and is retried on every poll:
+
+| Reason | Meaning |
+|--------|---------|
+| `BackupRepositoryUnavailable` | The Node has no object store, or reaches it over plain HTTP |
+| `PgBackRestVersionMismatch` | The database image and the repo host run different pgBackRest versions |
+| `ArchivingNotReady` | Creating the stanza or the archive check failed |
+| `PostgresPlacementPending` | Another placement step failed, for example the server was unreachable |
+| `RestoreInProgress` | The data is being restored in the background |
+| `RestoreFailed` | The restore failed and will be tried again |
+| `NoRestoreSource` | The Project was placed before, its data is not here, and the server has accepted no backup of it |
+
+Once `Running`, the Project's `interval` takes a pgBackRest backup of the database without stopping any service: full when the stanza has none, when the newest full is seven days old, when the database is on a new timeline, or when the Agent cannot prove WAL archiving was continuous since, and differential otherwise. Continuity is read from the database container's Docker log: a `dropped WAL file` warning (the archive queue passed its 4 GiB bound), a replaced container, or a log that was rotated, truncated or cannot be read each make the next backup full. On a Node whose Docker logging driver keeps no readable log, every backup is full. Each backup's manifest is written to `cara/v2/projects/<uid>/generations/<backupID>/manifest.json` and the backup is then reported to the server, which accepts it only from the Project's current assignment. The Project shows `BackupActive=False` (reason `NoAcceptedBackup`) until the first backup is accepted and `True` after; `caractl describe` shows the last accepted backup. A placement that would need this data restored on a Node with no object store configured is refused with `StrategyRestoreUnavailable`.
+
+A new assignment with no local data restores in the background, without holding up the Node's other Projects. It restores the newest backup the server accepted into staging, replays every WAL segment archived after it, and swaps the result into place once PostgreSQL has shut down cleanly, so a failure leaves nothing started. WAL is archived at least every minute while the database is written to (`archive_timeout`), so that is about what a restore loses. The `DataRestored` condition names the last transaction recovered. A failed restore retries the same backup, waiting from one minute up to 30; it never falls back to an older one. `GRACE_EXPIRED_RELEASE` moves these Projects off a lost Node once they have an accepted backup.
+
 ### Node manifest (manual registration)
 
 ```yaml
@@ -190,16 +271,22 @@ spec:
 
 Configuration is read in order: `config.yaml` → `.env` → environment variables → CLI flags.
 
+The file is the one named by `--config` or `CARA_CONFIG`, and a named file that cannot be read stops startup. Otherwise it is `./config.yaml`, then `/etc/cara/config.yaml`. The same applies to cara-agent.
+
 | Key | Env var | Default | Description |
 |-----|---------|---------|-------------|
 | `debug` | `DEBUG` | `false` | Enable debug logging |
 | `host` | `HOST` | `0.0.0.0` | Listen address |
 | `port` | `PORT` | `8080` | Listen port |
 | `database_url` | `DATABASE_URL` | _(required)_ | PostgreSQL DSN |
+| `break_glass_token_file` | `BREAK_GLASS_TOKEN_FILE` | _(none)_ | File holding the break-glass admin token (`user:break-glass`). Issue the first tokens with it, and keep it for when nothing else works. A named file that is unreadable or empty stops startup |
 | `otel_collector_url` | `OTEL_COLLECTOR_URL` | _(optional)_ | OTLP gRPC endpoint |
 | `headscale_api_url` | `HEADSCALE_API_URL` | _(optional)_ | Headscale management API URL. Enables the `/api/v1/overlay` endpoints when set together with the API key |
 | `headscale_api_key` | `HEADSCALE_API_KEY` | _(optional)_ | Headscale management API key (secret, never logged) |
+| `running_grace_period` | `RUNNING_GRACE_PERIOD` | `3m` | How long a Running Project may stay on a NotReady node before its release is attempted |
+| `grace_expired_release` | `GRACE_EXPIRED_RELEASE` | `false` | Move Projects off a node that stayed NotReady past the grace period, with no proof it stopped; a partitioned node keeps its copy running until it reconnects. A Project with a Managed volume moves only once it has a committed backup, and restores from it |
 | `headscale_user` | `HEADSCALE_USER` | `cara-node` | Headscale user new pre-auth keys are created under |
+| `postgres_differential_image` | `POSTGRES_DIFFERENTIAL_IMAGE` | `ghcr.io/nycu-sdc/cara-postgres:16` | Image a `PostgresDifferential` volume's service must use. Set it where the published image cannot be pulled, or to a `16-<run>.<attempt>` tag to keep every Node on one content; manifests then name the same reference |
 | `max_inflight_evictions` | `MAX_INFLIGHT_EVICTIONS` | `1` | Planned moves (drain, fail-back) allowed at once across the cluster. Each is downtime plus a backup and a restore |
 | `failback_window` | `FAILBACK_WINDOW` | _(disabled)_ | Daily window `HH:MM-HH:MM` (may cross midnight, e.g. `02:00-05:00`) in which Projects on the backup tier are moved back to primary, one at a time. Empty disables fail-back |
 | `failback_timezone` | `FAILBACK_TIMEZONE` | `Asia/Taipei` | IANA time zone `failback_window` is read in. The server logs the window in both this zone and UTC at startup |
@@ -216,23 +303,26 @@ Configuration is read in order: `config.yaml` → `.env` → environment variabl
 |-----|---------|---------|-------------|
 | `debug` | `DEBUG` | `false` | Enable debug logging |
 | `server_url` | `SERVER_URL` | `http://localhost:8080` | cara-server address |
+| `join_token_file` | `JOIN_TOKEN_FILE` | _(none)_ | File holding a one-time join token (`caractl node token create <name>`). On first start the agent trades it for a Node token and keeps that in `<data_root>/identity/`; later starts use the kept token. A different join token in the file enrols the Node again |
+| `token_file` | `AGENT_TOKEN_FILE` | _(none)_ | File holding a Node token issued by hand (`caractl token create node <name>`). Takes precedence over the join token and the kept token. With neither, the agent does not start |
 | `node_name` | `NODE_NAME` | OS hostname | Name to register with |
 | `heartbeat_interval` | `HEARTBEAT_INTERVAL` | `30s` | Heartbeat frequency |
 | `docker_host` | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon endpoint |
 
-### caractrl flags
+### caractl flags
 
 These flags are global, so they work on either side of the subcommand:
 
 ```bash
-./bin/caractrl [--server <url>] [--output <format>] <command>
-./bin/caractrl <command> [--server <url>] [--output <format>]
+./bin/caractl [--server <url>] [--output <format>] <command>
+./bin/caractl <command> [--server <url>] [--output <format>]
 ```
 
 | Flag | Short | Env var | Default | Description |
 |------|-------|---------|---------|-------------|
 | `--server` | | `CARA_SERVER` | `http://localhost:8080` | cara-server URL |
 | `--output` | `-o` | | `table` | Output format: `table` \| `json` \| `yaml` |
+| | | `CARA_TOKEN` | _(none)_ | Bearer token sent on every request. There is no flag, to keep it out of process listings |
 
 `--server` resolves in this order: the explicit flag, then `$CARA_SERVER`, then
 the localhost default. So on the server box it needs no configuration; from a
@@ -270,19 +360,34 @@ Remove it again with `make uninstall-cli`.
 
 ## API Reference
 
-All endpoints are under `/api/v1/`.
+All endpoints are under `/api/v1/`. Every endpoint except `GET /api/healthz` needs `Authorization: Bearer <token>` and answers 401 without a valid one (ADR-0031). A token identifies a Node (`node:<name>`) or a user (`user:<name>`); every user is an admin for now.
+
+### Tokens
+
+Admin only. Surfaced as `caractl token …`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/tokens` | Issue a token (body: `{kind: node\|user, name}`). The response is the only time the token is shown; the server keeps its SHA-256 hash |
+| `GET` | `/api/v1/tokens` | List tokens, without the tokens themselves |
+| `DELETE` | `/api/v1/tokens/{id}` | Revoke a token; its next request gets 401 |
+| `POST` | `/api/v1/nodes/{name}/join-tokens` | Issue a one-time join token for the Node (body: `{ttl}`, a Go duration, default `1h`, at most `168h`). Shown once. `caractl node token create <name> [--ttl]` |
+| `DELETE` | `/api/v1/nodes/{name}/tokens` | Revoke the Node's tokens and its unused join tokens. `caractl node revoke <name>` |
+
+The agent calls `POST /api/v1/nodes/{name}/join` with the join token as its bearer token and gets its Node token back. It is the only route that takes a join token, and a join token works nowhere else. An unknown, used, revoked or expired join token gets 401; one issued for another Node gets 403 and is not used up.
 
 ### Nodes
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/v1/nodes` | Register a node |
+| `POST` | `/api/v1/nodes` | Register a node. A Node token may register only its own name (403 otherwise) |
 | `PUT` | `/api/v1/nodes/{name}` | Update a node's spec and labels. The `cara.io/tier` label must be `primary` or `backup` (an unlabeled node is treated as `backup`); `POST` validates it too. Set it with `caractl node set-tier <name> primary\|backup`. |
 | `GET` | `/api/v1/nodes` | List all nodes |
 | `GET` | `/api/v1/nodes/{name}` | Get a single node |
 | `DELETE` | `/api/v1/nodes/{name}` | Delete a node |
 | `POST` | `/api/v1/nodes/{name}/heartbeat` | Send a heartbeat |
 | `POST` | `/api/v1/nodes/{name}/probe` | Server-side reachability probe — server dials the agent's `/healthz` via the agent dialer (see `internal/server/agentdialer/`) and reports latency + status. When the server is joined to the overlay (see below) the dialer routes this over the agent's overlay IP via a tsnet-backed transport; otherwise it uses the default transport. Also surfaced as `caractl node probe <name>`. |
+| `GET` | `/api/v1/nodes/{name}/cleanup-obligations` | Unresolved cleanup obligations this node owes for assignments it gave up — the cleanup tasks its agent runs (excludes Projects the node is still assigned) |
 
 ### Projects
 
@@ -293,6 +398,12 @@ All endpoints are under `/api/v1/`.
 | `GET` | `/api/v1/projects/{name}` | Get a single project |
 | `DELETE` | `/api/v1/projects/{name}` | Delete a project |
 | `PATCH` | `/api/v1/projects/{name}/status` | Update project status (agent only) |
+| `PUT` | `/api/v1/projects/{name}/recovery/workload-stopped` | Record that every container is stopped (currently assigned agent only; requires the assignment fence) |
+| `PUT` | `/api/v1/projects/{name}/recovery/managed-data-quarantined` | Record that local Managed data left the active path (the obligation's agent only) |
+| `PUT` | `/api/v1/projects/{name}/recovery/committed-backup` | Make a backup generation the restore source (currently assigned agent only; requires the assignment fence) |
+| `PUT` | `/api/v1/projects/{name}/recovery/resources-removed` | Resolve a cleanup obligation after removing its runtime resources (the obligation's agent only; requires the assignment fence) |
+| `POST` | `/api/v1/projects/{name}/recovery/takeover` | Override the release gate for a Node that will not report back (admin only; `caractl takeover`) |
+| `GET` | `/api/v1/projects/{name}/recovery/takeover-audit` | List recorded takeovers of the Project (admin only; `caractl takeover-audit`) |
 
 ### Overlay
 

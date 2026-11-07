@@ -1,30 +1,28 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Isolated CARA-87 rehearsal: a Project with Managed volume data survives the
-# loss of the Agent it was running on, and a destination that already holds
-# unprovable bytes refuses to start rather than adopt them.
+# Isolated rehearsal of losing the Agent under Projects with Managed volume
+# data (ADR-0024). node-a's Agent stops while its containers keep running.
 #
-# Two Docker-in-Docker daemons stand in for two Nodes. They are separate on
-# purpose: stopping an Agent does not stop its containers, and container names
-# are derived from (project, service), so a single shared daemon would make
-# Node B collide with containers Node A never got to release.
+#   backed up, clean B  moves by itself and restores the committed generation,
+#                       serving the same bytes.
 #
-# Two scenarios run against one Agent-loss event, because both need the same
-# thing to happen — Node A's Agent stops and the control plane reassigns:
+#   backed up, stale B  moves by itself, but B holds bytes from an earlier
+#                       placement and a v1 marker: RecoveryBlocked. No container,
+#                       no rewritten marker, no deleted bytes, no new generation.
 #
-#   clean B  Node B holds nothing for the Project.
-#            → restores the generation A backed up, serves the same bytes.
+#   no backup           the only copy may be on node-a, so it stays there with
+#                       TakeoverRequired. After an operator takes over it refuses
+#                       to start rather than starting empty.
 #
-#   stale B  Node B holds bytes from an earlier placement and a v1 marker.
-#            → RecoveryBlocked. No container, no rewritten marker, no deleted
-#              bytes, no new backup generation.
+#   no Managed volume   moves by itself.
 #
-# The second is the regression test. Before CARA-87 a v1 marker was proof
-# enough to skip the restore, so that Project would have started on the stale
-# bytes and then had them archived over the good generation. Verify that by
-# running this script against the parent commit: the stale scenario must fail
-# there, or it is not testing the defect.
+# When node-a returns it must remove its containers without starting them, and
+# move its Managed data to quarantine, leaving the active paths empty.
+#
+# The stale case is the regression test for CARA-87. Before it a v1 marker was
+# proof enough to skip the restore, so that Project would have started on the
+# stale bytes and then had them archived over the good generation.
 #
 # Managed volume data must be visible at the same path to the Agent (on the
 # host) and to the workload containers (inside DinD). It defaults to /var/tmp;
@@ -41,6 +39,7 @@ done
 shared_root="${E2E_SHARED_ROOT:-/var/tmp}"
 [[ -d "$shared_root" && -w "$shared_root" ]] || fail "E2E_SHARED_ROOT is not a writable directory: $shared_root"
 test_root="$(mktemp -d "$shared_root/cara-failover-e2e.XXXXXX")"
+. "$(dirname "${BASH_SOURCE[0]}")/lib/auth.sh"
 suffix="${PPID}-$$"
 postgres_name="cara87-postgres-${suffix}"
 minio_name="cara87-minio-${suffix}"
@@ -115,6 +114,17 @@ choose_port() {
 dind_a() { env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH docker -H "$dind_a_host" "$@"; }
 dind_b() { env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH docker -H "$dind_b_host" "$@"; }
 
+# count_containers prints how many containers the given daemon (dind_a or
+# dind_b) lists under name, passing any further arguments to `docker ps`. It
+# returns non-zero when the daemon cannot be queried: an unreachable daemon
+# prints nothing, and counted that would read as "no containers" — the very
+# result several checks below want to see.
+count_containers() {
+	daemon=$1; name=$2; shift 2
+	listed="$("$daemon" ps "$@" --filter "name=$name" --format '{{.Names}}')" || return 1
+	printf '%s' "$listed" | grep -c . || true
+}
+
 server_ready() { curl -fsS "$server_url/api/v1/nodes" >/dev/null 2>&1; }
 
 node_state() {
@@ -147,6 +157,7 @@ node_ref() { project_field "$1" 'p["status"].get("nodeRef","")'; }
 assigned_to() { [[ "$(node_ref "$1")" == "$2" ]]; }
 blocked_reason() { project_field "$1" 'cond("RecoveryBlocked").get("reason","")'; }
 blocked_is() { [[ "$(blocked_reason "$1")" == "$2" ]]; }
+takeover_required() { [[ "$(project_field "$1" 'cond("TakeoverRequired").get("status","")')" == "True" ]]; }
 
 create_project() {
 	curl -fsS -X POST "$server_url/api/v1/projects" -H 'Content-Type: application/json' -d "$1" >/dev/null
@@ -154,12 +165,13 @@ create_project() {
 
 mc() { docker exec "$minio_name" mc "$@"; }
 
-latest_backup_id() {
-	mc cat "local/$bucket/cara/v1/projects/default/$1/latest.json" 2>/dev/null |
-		python3 -c 'import json,sys; print(json.load(sys.stdin).get("backupID",""))' 2>/dev/null || true
+committed_backup_id() {
+	project_field "$1" '(p["status"].get("recovery") or {}).get("committedBackup",{}).get("backupID","")'
 }
 
-backup_published() { [[ -n "$(latest_backup_id "$1")" ]]; }
+# A generation's ID starts with when its run began, so one newer than the payload
+# was captured after it was written. An earlier one may hold nothing.
+backup_published() { [[ "$(committed_backup_id "$1")" > "$payload_written" ]]; }
 
 marker_field() {
 	python3 -c '
@@ -174,7 +186,9 @@ print(m.get(sys.argv[2], ""))
 
 dind_image="${DIND_IMAGE:-docker:27-dind}"
 postgres_image="${POSTGRES_IMAGE:-postgres:16}"
-minio_image="${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z}"
+# Chainguard, pinned by digest, as docker-compose.yaml uses: MinIO's own Quay
+# repositories refuse anonymous pulls. The image ships mc alongside the server.
+minio_image="${MINIO_IMAGE:-cgr.dev/chainguard/minio:latest@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1}"
 bucket=cara-e2e
 
 data_root_a="$test_root/agent-a-data"
@@ -194,12 +208,15 @@ postgres_port="$(docker port "$postgres_name" 5432/tcp | head -1)"; postgres_por
 log "starting isolated MinIO ($minio_name)"
 docker run -d --name "$minio_name" \
 	-e MINIO_ROOT_USER=caraadmin -e MINIO_ROOT_PASSWORD=caraadmin123 \
+	-e MC_HOST_local=http://caraadmin:caraadmin123@127.0.0.1:9000 \
 	-p 127.0.0.1::9000 "$minio_image" server /data >/dev/null
 minio_port="$(docker port "$minio_name" 9000/tcp | head -1)"; minio_port="${minio_port##*:}"
 minio_endpoint="http://127.0.0.1:$minio_port"
 wait_until 90 "MinIO readiness" \
 	bash -c "curl -fsS '$minio_endpoint/minio/health/live' >/dev/null 2>&1"
-mc alias set local http://127.0.0.1:9000 caraadmin caraadmin123 >/dev/null
+# The local alias comes from MC_HOST_local on the container, not from mc's
+# config file: the image runs as a non-root user, and nothing guarantees it
+# can write one.
 mc mb --ignore-existing "local/$bucket" >/dev/null
 
 for name in "$dind_a_name:$data_root_a" "$dind_b_name:$data_root_b"; do
@@ -235,13 +252,14 @@ done
 
 log "building cara-server and cara-agent"
 go build -o "$test_root/bin/cara-server" ./cmd/cara-server
+go build -o "$test_root/bin/caractl" ./cmd/caractl
 go build -o "$test_root/bin/cara-agent" ./cmd/cara-agent
 
 server_port="$(choose_port)"
 server_url="http://127.0.0.1:$server_port"
 (
 	cd "$test_root/server-run"
-	env HOST=127.0.0.1 PORT="$server_port" UID_ENFORCEMENT=true \
+	env HOST=127.0.0.1 PORT="$server_port" BREAK_GLASS_TOKEN_FILE="$e2e_admin_token_file" GRACE_EXPIRED_RELEASE=true \
 		DATABASE_URL="postgresql://postgres:password@127.0.0.1:$postgres_port/caravanserai?sslmode=disable" \
 		"$test_root/bin/cara-server"
 ) >"$test_root/server.log" 2>&1 &
@@ -250,6 +268,7 @@ wait_until 60 "cara-server readiness" server_ready
 
 start_agent() {
 	agent_node=$1; agent_root=$2; agent_docker=$3; agent_log=$4; agent_dir=$5
+	agent_token_file="$(join_token_file "$agent_node")"
 	cat >"$agent_dir/config.yaml" <<EOF
 data_root: "$agent_root"
 EOF
@@ -257,13 +276,13 @@ EOF
 		cd "$agent_dir"
 		env -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
 			SERVER_URL="$server_url" \
+			JOIN_TOKEN_FILE="$agent_token_file" \
 			NODE_NAME="$agent_node" \
 			HEARTBEAT_INTERVAL=1s \
 			DOCKER_HOST="$agent_docker" \
 			AGENT_LISTEN_PORT=0 \
 			PROXY_LISTEN_ADDR=127.0.0.1:0 \
 			AGENT_ADVERTISE_IP=127.0.0.1 \
-			UID_ENFORCEMENT=true \
 			S3_ENDPOINT="$minio_endpoint" \
 			S3_BUCKET="$bucket" \
 			S3_ACCESS_KEY=caraadmin \
@@ -317,15 +336,45 @@ for project in "$clean_project" "$stale_project"; do
 	assigned_to "$project" node-a || fail "$project was not placed on node-a"
 done
 
+# Managed data with no backup: the only copy is on node-a, so nothing may move it
+# without a person deciding to.
+unbacked_project=failover-unbacked
+create_project '{
+	"apiVersion":"caravanserai/v1",
+	"kind":"Project",
+	"metadata":{"name":"'"$unbacked_project"'","namespace":"default"},
+	"spec":{
+		"services":[{
+			"name":"web","image":"nginx:alpine",
+			"volumeMounts":[{"name":"content","mountPath":"/usr/share/nginx/html"}]
+		}],
+		"volumes":[{"name":"content","type":"Managed"}]
+	}
+}'
+wait_until 120 "$unbacked_project Running on node-a" phase_is "$unbacked_project" Running
+assigned_to "$unbacked_project" node-a || fail "$unbacked_project was not placed on node-a"
+
+# No Managed volume, so ADR-0024 lets it move on the grace period alone.
+stateless_project=failover-stateless
+create_project '{
+	"apiVersion":"caravanserai/v1","kind":"Project",
+	"metadata":{"name":"'"$stateless_project"'","namespace":"default"},
+	"spec":{"services":[{"name":"web","image":"nginx:alpine"}]}
+}'
+wait_until 120 "$stateless_project Running on node-a" phase_is "$stateless_project" Running
+assigned_to "$stateless_project" node-a || fail "$stateless_project was not placed on node-a"
+
 # Deterministic content: the failover is only proven if the exact bytes come
 # back, so compare a checksum rather than "the file exists".
 declare -A expected_sum
-for project in "$clean_project" "$stale_project"; do
+for project in "$clean_project" "$stale_project" "$unbacked_project"; do
 	payload="$data_root_a/volumes/default/$project/content/data/index.html"
 	printf 'cara-87 failover payload for %s, run %s\n' "$project" "$suffix" >"$payload"
 	expected_sum["$project"]="$(sha256sum "$payload" | cut -d' ' -f1)"
 	log "$project payload checksum ${expected_sum[$project]}"
 done
+
+payload_written="$(date -u +%Y%m%dT%H%M%SZ)"
 
 log "waiting for node-a to publish a complete backup of each Project"
 for project in "$clean_project" "$stale_project"; do
@@ -333,10 +382,12 @@ for project in "$clean_project" "$stale_project"; do
 done
 declare -A backup_before
 for project in "$clean_project" "$stale_project"; do
-	backup_before["$project"]="$(latest_backup_id "$project")"
-	[[ -n "${backup_before[$project]}" ]] || fail "$project has no latest.json to restore from"
-	log "$project latest generation ${backup_before[$project]}"
+	backup_before["$project"]="$(committed_backup_id "$project")"
+	[[ -n "${backup_before[$project]}" ]] || fail "$project has no committed backup to restore from"
+	log "$project committed generation ${backup_before[$project]}"
 done
+old_uid="$(project_field "$clean_project" 'p["metadata"]["uid"]')"
+old_generation="$(project_field "$clean_project" 'p["status"]["assignmentGeneration"]')"
 
 # The backup runs against a stopped Project, so wait for it to be serving again
 # before the Agent is taken away — otherwise the loss is of a Project that was
@@ -382,70 +433,228 @@ agent_a_pid=""
 log "waiting for the control plane to mark node-a NotReady (heartbeat timeout)"
 wait_until 180 "node-a NotReady" node_is node-a NotReady
 
-log "waiting for both Projects to be reassigned to node-b (grace period applies)"
+stateless_moved() { assigned_to "$stateless_project" node-b && phase_is "$stateless_project" Running; }
+
+# ── Moving by itself (ADR-0024) ─────────────────────────────────────────────
+#
+# node-a's containers are still running and its Agent cannot confirm them
+# stopped. A Project with a committed backup, or with no Managed volume, moves
+# once the grace period is over, with nobody acting. One whose only copy may be
+# on node-a stays, marked TakeoverRequired, and node-b starts nothing.
+
+log "waiting for the Project with no backup to be marked TakeoverRequired (grace period applies)"
+wait_until 300 "$unbacked_project TakeoverRequired" takeover_required "$unbacked_project"
+
+log "waiting for the rest to move with no operator action"
+wait_until 180 "$stateless_project Running on node-b" stateless_moved
 for project in "$clean_project" "$stale_project"; do
 	wait_until 300 "$project assigned to node-b" assigned_to "$project" node-b
 done
+log "$stateless_project and the backed-up Managed Projects moved by themselves"
 
-# ── Scenario 1: unprovable destination data is refused, not adopted ──────────
+# The mark proves the grace period is over and the release was attempted.
+# Hold for two more 30-second resync rounds to prove the refusal holds rather
+# than being the first of several attempts.
+log "holding for two more resync rounds"
+sleep 65
+
+for project in "$unbacked_project"; do
+	assigned_to "$project" node-a ||
+		fail "$project left node-a without a release authorization (nodeRef now '$(node_ref "$project")')"
+	takeover_required "$project" ||
+		fail "$project lost TakeoverRequired while node-a is still NotReady"
+	on_b="$(count_containers dind_b "$project-web" -a)" ||
+		fail "$project: could not list node-b's containers, so cannot show it started none"
+	[[ "$on_b" == "0" ]] ||
+		fail "$project: node-b created a container while node-a may still run it ($on_b found)"
+	on_a="$(count_containers dind_a "$project-web")" ||
+		fail "$project: could not list node-a's containers"
+	[[ "$on_a" != "0" ]] ||
+		fail "$project: node-a's container is gone; the run no longer reproduces a Node that may still be serving"
+	log "$project kept on node-a: TakeoverRequired, node-a container running, nothing on node-b"
+done
+
+# ── CARA-87 destination scenarios ────────────────────────────────────────────
+#
+# The moved Projects are already on node-b. The one with no backup needs an
+# audited operator override (CARA-89), sent the way an operator would, through
+# caractl, and must then refuse to start rather than start empty.
+
+takeover_supported=1
+
+authorize_takeover() {
+	for project in "$unbacked_project"; do
+		CARA_TOKEN="$e2e_admin_token" "$test_root/bin/caractl" --server "http://127.0.0.1:$server_port" \
+			takeover "$project" --yes --note "managed-failover e2e" ||
+			fail "$project: operator takeover was refused"
+	done
+}
+
+# Scenario 1: unprovable destination data is refused, not adopted.
 #
 # This one runs first on purpose. It is the regression test — the clean
 # destination already worked before CARA-87 — so when this script is run
 # against an older commit to prove it exercises the defect, this is the
 # assertion that has to be the one reporting.
+scenario_stale_destination() {
+	log "scenario: destination holding stale bytes and a v1 marker"
+	wait_until 180 "$stale_project blocked on node-b" blocked_is "$stale_project" LegacyProvenance
 
-log "scenario: destination holding stale bytes and a v1 marker"
-wait_until 180 "$stale_project blocked on node-b" blocked_is "$stale_project" LegacyProvenance
+	if phase_is "$stale_project" Running; then
+		fail "$stale_project: a refused placement must not report Running"
+	fi
 
-if phase_is "$stale_project" Running; then
-	fail "$stale_project: a refused placement must not report Running"
+	containers="$(count_containers dind_b "$stale_project-web" -a)" ||
+		fail "$stale_project: could not list node-b's containers, so cannot show it started none"
+	[[ "$containers" == "0" ]] ||
+		fail "$stale_project: node-b started a container against data it could not prove ($containers found)"
+
+	got_stale="$(sha256sum "$stale_dir/index.html" | cut -d' ' -f1)"
+	[[ "$got_stale" == "$stale_sum" ]] ||
+		fail "$stale_project: refusing to use the bytes is not a licence to change them"
+
+	got_marker="$(sha256sum "$stale_marker" | cut -d' ' -f1)"
+	[[ "$got_marker" == "$stale_marker_sum" ]] ||
+		fail "$stale_project: the v1 marker was rewritten; unprovable data must never be stamped as owned"
+
+	after="$(committed_backup_id "$stale_project")"
+	[[ "$after" == "${backup_before[$stale_project]}" ]] ||
+		fail "$stale_project: the authoritative generation moved while the Project was blocked (was ${backup_before[$stale_project]}, now $after)"
+
+	log "$stale_project blocked with reason $(blocked_reason "$stale_project"), generation unchanged at $after"
+}
+
+# Scenario 2: a clean destination restores the selected generation.
+scenario_clean_destination() {
+	log "scenario: clean destination"
+	wait_until 180 "$clean_project Running on node-b" phase_is "$clean_project" Running
+
+	restored="$data_root_b/volumes/default/$clean_project/content/data/index.html"
+	[[ -f "$restored" ]] || fail "$clean_project: node-b has no restored payload"
+	got_sum="$(sha256sum "$restored" | cut -d' ' -f1)"
+	[[ "$got_sum" == "${expected_sum[$clean_project]}" ]] ||
+		fail "$clean_project: restored bytes differ (want ${expected_sum[$clean_project]}, got $got_sum)"
+
+	clean_marker="$data_root_b/volumes/default/$clean_project/.cara-restore.json"
+	[[ -f "$clean_marker" ]] || fail "$clean_project: node-b wrote no provenance marker"
+	[[ "$(marker_field "$clean_marker" version)" == "2" ]] || fail "$clean_project: marker is not v2"
+	[[ "$(marker_field "$clean_marker" nodeName)" == "node-b" ]] || fail "$clean_project: marker does not name node-b"
+	restored_from="$(marker_field "$clean_marker" initializedFromBackupID)"
+	[[ -n "$restored_from" ]] || fail "$clean_project: marker records no source generation"
+
+	log "$clean_project restored generation $restored_from, checksum $got_sum"
+	log "$clean_project source generation was ${backup_before[$clean_project]}"
+	[[ "$restored_from" == "${backup_before[$clean_project]}" ]] ||
+		fail "$clean_project: restored $restored_from, but the server committed ${backup_before[$clean_project]}"
+
+	# ADR-0024 C1: node-a may still reach the bucket during a partition. Its
+	# assignment was released, so a generation it finishes now must not become
+	# the restore source.
+	forged=20000101T000000Z-00000000
+	code="$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$server_url/api/v1/projects/$clean_project/recovery/committed-backup" \
+		-H 'Content-Type: application/json' \
+		-d "{\"uid\":\"$old_uid\",\"nodeRef\":\"node-a\",\"assignmentGeneration\":$old_generation,\"backupID\":\"$forged\"}")"
+	[[ "$code" == "409" ]] || fail "$clean_project: a commit from the released assignment returned $code, want 409"
+	[[ "$(committed_backup_id "$clean_project")" != "$forged" ]] ||
+		fail "$clean_project: the released assignment changed the restore source"
+	log "$clean_project refused a commit from the released assignment"
+}
+
+# Scenario: no committed backup, and an operator gave up on the lost Node. There
+# is nothing to restore, so it stays blocked rather than starting empty.
+scenario_no_restore_source() {
+	log "scenario: taken over with no committed backup"
+	wait_until 180 "$unbacked_project blocked on node-b" blocked_is "$unbacked_project" NoRestoreSource
+	on_b="$(count_containers dind_b "$unbacked_project-web" -a)" ||
+		fail "$unbacked_project: could not list node-b's containers"
+	[[ "$on_b" == "0" ]] || fail "$unbacked_project: started on node-b with no data ($on_b containers)"
+	log "$unbacked_project blocked on node-b with NoRestoreSource, nothing started"
+}
+
+# ADR-0024 C2: the data has left the active path and still exists.
+assert_quarantined() {
+	local project="$1" copy
+	[[ ! -e "$data_root_a/volumes/default/$project" ]] ||
+		fail "$project: node-a still holds data at the active path"
+	copy="$(find "$data_root_a/quarantine/default/$project" -path '*/content/data/index.html' 2>/dev/null | head -1)"
+	[[ -n "$copy" ]] || fail "$project: node-a's data is not in quarantine"
+	[[ "$(sha256sum "$copy" | cut -d' ' -f1)" == "${expected_sum[$project]}" ]] ||
+		fail "$project: quarantined bytes differ from what node-a held"
+}
+
+quarantine_recorded() {
+	[[ "$(project_field "$1" '[o for o in p["status"]["recovery"]["cleanupObligations"] if o["assignment"]["nodeName"]=="node-a"][0].get("managedDataQuarantined",{}).get("observedAt","")')" != "" ]]
+}
+
+# Scenario 3: the lost Node comes back after the override.
+#
+# Its containers are stopped first, as a power loss would leave them: this is
+# the case where an Agent running local recovery before it learns the assignment
+# is gone would start a second copy. The Agent must remove them without ever
+# starting one, and the new assignment must be untouched.
+scenario_old_node_returns() {
+	log "scenario: node-a returns after the override"
+	for project in "$clean_project" "$stale_project" "$stateless_project" "$unbacked_project"; do
+		dind_a stop "$project-web" >/dev/null ||
+			fail "$project: could not stop node-a's container to simulate the power loss"
+	done
+
+	start_agent node-a "$data_root_a" "$dind_a_host" "$test_root/agent-a-return.log" "$test_root/agent-a-run"
+	agent_a_pid=$!
+
+	deadline=$((SECONDS + 180))
+	while :; do
+		running=0
+		left=0
+		for project in "$clean_project" "$stale_project" "$stateless_project" "$unbacked_project"; do
+			n="$(count_containers dind_a "$project-web")" || fail "$project: could not list node-a's containers"
+			running=$((running + n))
+			n="$(count_containers dind_a "$project-web" -a)" || fail "$project: could not list node-a's containers"
+			left=$((left + n))
+		done
+		(( running == 0 )) || fail "node-a restarted a workload it no longer owns ($running running)"
+		(( left == 0 )) && break
+		(( SECONDS < deadline )) || fail "node-a did not remove the old containers ($left left)"
+		sleep 1
+	done
+
+	assigned_to "$clean_project" node-b || fail "$clean_project left node-b when node-a returned"
+	phase_is "$clean_project" Running || fail "$clean_project stopped running when node-a returned"
+	log "node-a removed the old containers without starting them; $clean_project still Running on node-b"
+
+	for project in "$clean_project" "$stale_project" "$unbacked_project"; do
+		wait_until 60 "$project quarantine recorded" quarantine_recorded "$project"
+		assert_quarantined "$project"
+	done
+	log "node-a moved its Managed data to quarantine; the active paths are empty and the bytes match"
+}
+
+if (( takeover_supported )); then
+	authorize_takeover
+	log "waiting for $unbacked_project to be reassigned to node-b"
+	wait_until 300 "$unbacked_project assigned to node-b" assigned_to "$unbacked_project" node-b
+	scenario_no_restore_source
+	scenario_stale_destination
+	scenario_clean_destination
+	scenario_old_node_returns
+else
+	log "NOT RUN: CARA-87 destination scenarios (stale, clean) need an authorized takeover, which does not exist yet"
 fi
-
-containers="$(dind_b ps -a --filter "name=$stale_project-web" --format '{{.Names}}' | grep -c . || true)"
-[[ "$containers" == "0" ]] ||
-	fail "$stale_project: node-b started a container against data it could not prove ($containers found)"
-
-got_stale="$(sha256sum "$stale_dir/index.html" | cut -d' ' -f1)"
-[[ "$got_stale" == "$stale_sum" ]] ||
-	fail "$stale_project: refusing to use the bytes is not a licence to change them"
-
-got_marker="$(sha256sum "$stale_marker" | cut -d' ' -f1)"
-[[ "$got_marker" == "$stale_marker_sum" ]] ||
-	fail "$stale_project: the v1 marker was rewritten; unprovable data must never be stamped as owned"
-
-after="$(latest_backup_id "$stale_project")"
-[[ "$after" == "${backup_before[$stale_project]}" ]] ||
-	fail "$stale_project: the authoritative generation moved while the Project was blocked (was ${backup_before[$stale_project]}, now $after)"
-
-log "$stale_project blocked with reason $(blocked_reason "$stale_project"), generation unchanged at $after"
-
-# ── Scenario 2: a clean destination restores the selected generation ─────────
-
-log "scenario: clean destination"
-wait_until 180 "$clean_project Running on node-b" phase_is "$clean_project" Running
-
-restored="$data_root_b/volumes/default/$clean_project/content/data/index.html"
-[[ -f "$restored" ]] || fail "$clean_project: node-b has no restored payload"
-got_sum="$(sha256sum "$restored" | cut -d' ' -f1)"
-[[ "$got_sum" == "${expected_sum[$clean_project]}" ]] ||
-	fail "$clean_project: restored bytes differ (want ${expected_sum[$clean_project]}, got $got_sum)"
-
-clean_marker="$data_root_b/volumes/default/$clean_project/.cara-restore.json"
-[[ -f "$clean_marker" ]] || fail "$clean_project: node-b wrote no provenance marker"
-[[ "$(marker_field "$clean_marker" version)" == "2" ]] || fail "$clean_project: marker is not v2"
-[[ "$(marker_field "$clean_marker" nodeName)" == "node-b" ]] || fail "$clean_project: marker does not name node-b"
-restored_from="$(marker_field "$clean_marker" initializedFromBackupID)"
-[[ -n "$restored_from" ]] || fail "$clean_project: marker records no source generation"
-
-log "$clean_project restored generation $restored_from, checksum $got_sum"
-log "$clean_project source generation was ${backup_before[$clean_project]}"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 cat <<EOF
 
 [failover-e2e] result
-  agent loss            node-a stopped, reassignment observed on node-b
+  agent loss            node-a stopped, NotReady
+  moved by themselves   $clean_project, $stale_project, $stateless_project
+  release gate          $unbacked_project (no backup) kept on node-a with TakeoverRequired
+                        node-a container still running, node-b started none
+  after takeover        $unbacked_project blocked with NoRestoreSource, nothing started
+EOF
+
+if (( takeover_supported )); then
+	cat <<EOF
   clean destination     $clean_project
                         source generation   ${backup_before[$clean_project]}
                         restored generation $restored_from
@@ -456,6 +665,15 @@ cat <<EOF
                         stale bytes         unchanged
                         v1 marker           unchanged
                         latest generation   $after (unchanged)
+  no Managed volume     $stateless_project moved to node-b with no operator action
+  old node returns      stopped containers removed, none started
+                        Managed data in quarantine, active paths empty, bytes match
 EOF
-
-log "PASS"
+	log "PASS"
+else
+	cat <<EOF
+  clean destination     NOT RUN (needs an authorized takeover)
+  stale destination     NOT RUN (needs an authorized takeover)
+EOF
+	log "PASS (release gate only; CARA-87 destination scenarios NOT RUN)"
+fi

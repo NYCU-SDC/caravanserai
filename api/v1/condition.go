@@ -22,9 +22,16 @@
 //
 //	  ConditionTypeTerminatingAt — written by ProjectReschedulerController when
 //	  it observes a Terminating project on a NotReady node without a clock for
-//	  the current outage. LastTransitionTime is the start of the
-//	  force-termination timeout clock, and carries the same per-incident rule
-//	  as ConditionTypeNotReadyAt below.
+//	  the current outage. LastTransitionTime is the start of the termination
+//	  timeout clock, and carries the same per-incident rule as
+//	  ConditionTypeNotReadyAt below.
+//
+//	  ConditionTypeTerminationBlocked — written by ProjectReschedulerController
+//	  once that clock expires, and removed when the node returns. Same
+//	  per-incident rule.
+//
+//	  ConditionTypeFinalizationBlocked — written by ProjectTerminationController
+//	  when a Project awaiting finalization cannot be finalized yet.
 //
 //	  ConditionTypeNotReadyAt — written by ProjectReschedulerController when it
 //	  observes a Running project on a NotReady node without a clock for the
@@ -44,6 +51,18 @@
 //	  ConditionTypeRecoveryBlocked — set by the agent when it has refused to
 //	  recover a Project's containers because doing so would be unsafe, and
 //	  cleared once the reason is gone.
+//
+//	  ConditionTypeTeardownBlocked — set by the agent while it cannot finish
+//	  removing a Terminating Project's resources, and cleared once it has.
+//
+//	  ConditionTypeDataRestored — set by the agent when a restore from the
+//	  object store finishes, naming the last transaction it recovered.
+//
+//	  ConditionTypeBackupFailing — set by the agent when a scheduled backup
+//	  fails, and cleared by the next one that succeeds.
+//
+//	  ConditionTypeBackupActive — server-owned, part of the initial status of
+//	  a Project whose backup uses a strategy that is not running yet.
 package v1
 
 import "time"
@@ -78,6 +97,22 @@ const (
 	// first observed a Terminating project on a NotReady node.
 	ConditionTypeTerminatingAt ConditionType = "TerminatingAt"
 
+	// ConditionTypeTerminationBlocked indicates that a Terminating Project's
+	// Node has been NotReady past the termination timeout, so nothing can
+	// confirm that its resources there are gone. The Project stays Terminating
+	// and its record is kept: deleting the record would leave whatever still
+	// runs on that Node with nothing that knows it exists. The condition is
+	// removed when the Node returns and the teardown resumes. Server-owned.
+	ConditionTypeTerminationBlocked ConditionType = "TerminationBlocked"
+
+	// ConditionTypeFinalizationBlocked indicates that the record of a Project
+	// awaiting finalization (Terminated, or Terminating with no current
+	// assignment) is kept because the finalization predicate does not hold yet
+	// — typically an earlier Node has not confirmed that its resources are gone.
+	// The message names what it waits for. It is not cleared: the record is
+	// deleted as soon as the predicate holds. Server-owned.
+	ConditionTypeFinalizationBlocked ConditionType = "FinalizationBlocked"
+
 	// ConditionTypeNotReadyAt records the timestamp at which the rescheduler
 	// first observed a Running project on a NotReady node.
 	ConditionTypeNotReadyAt ConditionType = "NotReadyAt"
@@ -110,12 +145,67 @@ const (
 	// without logging into the node.
 	ConditionTypeRecoveryBlocked ConditionType = "RecoveryBlocked"
 
+	// ConditionTypeSchedulingBlocked is True on a Pending Project the scheduler
+	// could not place, and says why. It goes away with the assignment.
+	ConditionTypeSchedulingBlocked ConditionType = "SchedulingBlocked"
+
+	// ConditionTypeTeardownBlocked indicates that the assigned agent is
+	// tearing down a Terminating Project and cannot finish: a removal failed,
+	// what is left could not be read, or something survived the removal.
+	// Reason says which, and Message carries the detail.
+	//
+	// The phase stays Terminating, not Failed: the agent retries the whole
+	// teardown every poll, and Failed would end those retries. Without this
+	// condition a stuck deletion would look exactly like one still in
+	// progress. It is cleared once the teardown completes. Agent-owned.
+	ConditionTypeTeardownBlocked ConditionType = "TeardownBlocked"
+
+	// ConditionTypeRecovering indicates that the server is moving the Project
+	// to another Node. Server-owned: agents cannot write it.
+	//
+	// Like every condition, its message is for humans. Retry counts, backoff
+	// and evidence live in ProjectStatus.Recovery; code must not parse this
+	// message to recover them.
+	ConditionTypeRecovering ConditionType = "Recovering"
+
+	// ConditionTypeRecoveryExhausted indicates that automatic cross-Node
+	// recovery has stopped retrying. Server-owned.
+	ConditionTypeRecoveryExhausted ConditionType = "RecoveryExhausted"
+
+	// ConditionTypeTakeoverRequired indicates that recovery cannot proceed
+	// without an operator: the previous assignment can be neither confirmed
+	// stopped nor fenced. Server-owned.
+	ConditionTypeTakeoverRequired ConditionType = "TakeoverRequired"
+
 	// ConditionTypeRescheduleExhausted is True on a Failed Project that has used
 	// up every move to a different Node. Nothing will move it again, so it needs
 	// an operator; this condition is how that becomes visible without reading
 	// server logs. It is cleared when the Project is applied again.
 	ConditionTypeRescheduleExhausted ConditionType = "RescheduleExhausted"
 
+	// ConditionTypeBackupActive says whether the Project's backup is enabled
+	// and has had at least one successful backup accepted. Status=False with
+	// Reason=ReasonNoAcceptedBackup means no backup of the strategy the Project
+	// selected, such as PostgresDifferential, has been accepted yet, so nothing
+	// protects its data even though the manifest asks for backups.
+	// Status=True with Reason=ReasonBackupAccepted follows the first one.
+	//
+	// It is server-owned; agents cannot write it. It does not say the Project
+	// can be restored automatically, nor that the latest backup is recent:
+	// BackupFailing is what says backups have stopped working.
+	ConditionTypeBackupActive ConditionType = "BackupActive"
+
+	// ConditionTypeBackupFailing says the most recent scheduled backup failed,
+	// so the restore point is getting older. An Agent that cannot reach the
+	// server cannot set it; the time of the last accepted backup is the check
+	// that holds then.
+	ConditionTypeBackupFailing ConditionType = "BackupFailing"
+
+	// ConditionTypeDataRestored records that this Project's data came from a
+	// backup rather than from a Node that held it, and how recent it is. Replay
+	// stops at the last WAL segment that reached the repository, so the message
+	// is the only place that says how much was recovered.
+	ConditionTypeDataRestored ConditionType = "DataRestored"
 	// ConditionTypeEvictionBackup is how the agent reports the fresh backup a
 	// planned move asked for: True when it is committed and the Project has
 	// been left stopped for the move, False when it failed and the Project
@@ -139,6 +229,22 @@ const (
 	// the Agent's reported Capacity and Allocatable values.
 	ConditionTypeMemoryPressure ConditionType = "MemoryPressure"
 )
+
+// BackupActive reasons.
+const (
+	// ReasonNoAcceptedBackup: the Project's selected strategy has not had a
+	// backup accepted by the server yet.
+	ReasonNoAcceptedBackup = "NoAcceptedBackup"
+	// ReasonBackupAccepted: the server has accepted at least one backup of
+	// the Project's current lifetime.
+	ReasonBackupAccepted = "BackupAccepted"
+)
+
+// ReasonBackupAttemptFailed is the reason of BackupFailing.
+const ReasonBackupAttemptFailed = "BackupAttemptFailed"
+
+// ReasonRestoredFromBackup is the reason of DataRestored.
+const ReasonRestoredFromBackup = "RestoredFromBackup"
 
 // MaintenanceStaleAfter is how long a Maintenance condition stays meaningful.
 // An agent that dies mid-backup leaves the condition behind with nothing to

@@ -17,6 +17,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -28,6 +29,10 @@ var ErrNotFound = errors.New("resource not found")
 // ErrAlreadyExists is returned when a Create call targets a name that is
 // already in use.
 var ErrAlreadyExists = errors.New("resource already exists")
+
+// ErrWrongNode is returned when a Node-bound token is presented for a different
+// Node than the one it was issued for.
+var ErrWrongNode = errors.New("the token was issued for another Node")
 
 // ErrConflictState is returned when an operation is not allowed because the
 // resource is in a state that conflicts with the request (e.g. updating a
@@ -57,6 +62,22 @@ var ErrVersionConflict = errors.New("resource version conflict")
 // HTTP 409 without exposing the underlying identity mismatch.
 var ErrStaleAssignment = errors.New("stale assignment fence")
 
+// FinalizationBlockedError is returned when a Project's record may not be
+// deleted yet: the predicate the delete was guarded by did not hold on the row
+// the store locked. It matches ErrConflictState, since the operation is not
+// allowed in the current state; Reason says what it waits for.
+type FinalizationBlockedError struct {
+	Name   string
+	Reason string
+}
+
+func (e *FinalizationBlockedError) Error() string {
+	return fmt.Sprintf("project %q cannot be finalized: %s", e.Name, e.Reason)
+}
+
+// Is makes errors.Is(err, ErrConflictState) true.
+func (e *FinalizationBlockedError) Is(target error) bool { return target == ErrConflictState }
+
 // AssignmentRef is the ownership fence an Agent presents on every write: the
 // Project UID it was told to run, the Node it believes it is, and the
 // assignment generation that authorised it.  The store validates all three
@@ -82,6 +103,45 @@ type Store interface {
 	ProjectStore
 	SecretStore
 	PreAuthKeyStore
+	APITokenStore
+}
+
+// ============================================================
+// APIToken
+// ============================================================
+
+// APITokenStore persists the bearer tokens that identify API callers
+// (ADR-0031). It sees only token hashes, never tokens.
+type APITokenStore interface {
+	// CreateAPIToken records a token by its hash.
+	CreateAPIToken(ctx context.Context, kind v1.APITokenKind, name, tokenHash, createdBy string) (v1.APIToken, error)
+
+	// LookupAPIToken returns the token with this hash. It returns ErrNotFound
+	// for an unknown hash and for a revoked token alike.
+	LookupAPIToken(ctx context.Context, tokenHash string) (v1.APIToken, error)
+
+	// ListAPITokens returns every token, revoked ones included, oldest first.
+	ListAPITokens(ctx context.Context) ([]v1.APIToken, error)
+
+	// RevokeAPIToken stops the token with this ID from authenticating.
+	// Revoking a revoked token is a no-op; an unknown ID returns ErrNotFound.
+	RevokeAPIToken(ctx context.Context, id int64) error
+
+	// CreateNodeJoinToken records a one-time token, by its hash, that enrols
+	// an Agent as nodeName until expiresAt (CARA-138).
+	CreateNodeJoinToken(ctx context.Context, nodeName, tokenHash, createdBy string, expiresAt time.Time) (v1.NodeJoinToken, error)
+
+	// RedeemNodeJoinToken trades the join token with joinHash for a Node token
+	// stored by nodeTokenHash, in one transaction, so a join token is redeemed
+	// at most once. It returns ErrNotFound when the join token is unknown,
+	// used, revoked or expired at now, and ErrWrongNode, without using the
+	// token, when it was issued for a Node other than nodeName.
+	RedeemNodeJoinToken(ctx context.Context, joinHash, nodeName, nodeTokenHash string, now time.Time) (v1.APIToken, error)
+
+	// RevokeNodeTokens revokes every Node token of nodeName and every join
+	// token for it that is still unused, and reports how many of each it
+	// revoked. Revoking a Node with none is not an error.
+	RevokeNodeTokens(ctx context.Context, nodeName string) (nodeTokens, joinTokens int, err error)
 }
 
 // ============================================================
@@ -183,6 +243,13 @@ type NodeStore interface {
 // ============================================================
 
 // ProjectStore covers all Project persistence operations.
+// TakeoverAudit is what the API layer knows about an operator takeover request.
+type TakeoverAudit struct {
+	RequestID string
+	Caller    string
+	Note      string
+}
+
 type ProjectStore interface {
 	// CreateProject persists a new Project.  Returns ErrAlreadyExists if a
 	// Project with the same name already exists.
@@ -207,9 +274,20 @@ type ProjectStore interface {
 	// Returns ErrNotFound if it does not exist.
 	UpdateProject(ctx context.Context, project *v1.Project) error
 
-	// DeleteProject removes a Project by name.
-	// Returns ErrNotFound if it does not exist.
+	// DeleteProject removes a Project by name with no other check. Only the
+	// unaudited force delete uses it; every other delete goes through
+	// FinalizeProject. Returns ErrNotFound if it does not exist.
 	DeleteProject(ctx context.Context, name string) error
+
+	// FinalizeProject deletes the Project record of lifetime uid, but only if
+	// blocker returns "" for the record as it is at the moment of deletion.
+	//
+	// The check and the delete cannot be separated: the row is locked before
+	// blocker reads it and stays locked until the delete commits, so no write
+	// can land in between. Returns ErrNotFound if there is no such Project,
+	// ErrStaleAssignment if the name now belongs to another lifetime, and a
+	// *FinalizationBlockedError (matching ErrConflictState) if blocker refuses.
+	FinalizeProject(ctx context.Context, name, uid string, blocker func(*v1.Project) string) error
 
 	// UpdateProjectStatus writes only the status sub-object of the named
 	// Project.  Used by the Controller Manager to avoid overwriting Spec
@@ -251,6 +329,15 @@ type ProjectStore interface {
 	// version, publishes no event, and returns nil.
 	UpdateProjectStatusWithRetry(ctx context.Context, name string, mutate func(*v1.ProjectStatus) error) error
 
+	// UpdateProjectStatusForUID is UpdateProjectStatusWithRetry pinned to one
+	// Project lifetime: the read must find uid under name, and the swap
+	// matches uid as well as the version read. Use it when the caller decided
+	// what to write from an earlier read of a specific lifetime, so a
+	// delete-and-recreate in between cannot redirect the write to a same-name
+	// successor. Returns ErrStaleAssignment when name now holds another
+	// lifetime, and ErrNotFound when it holds none.
+	UpdateProjectStatusForUID(ctx context.Context, name, uid string, mutate func(*v1.ProjectStatus) error) error
+
 	// PatchProjectCondition replaces exactly one named condition inside a
 	// Project's status.conditions, leaving phase and every other status field
 	// untouched.  Used by the agent to publish Maintenance while controllers
@@ -288,6 +375,76 @@ type ProjectStore interface {
 	// PatchProjectConditionFenced.
 	ClearProjectConditionFenced(ctx context.Context, name string, ref AssignmentRef, conditionType v1.ConditionType) error
 
+	// TakeoverProject applies an operator's override for the assignment in ref
+	// and appends audit in one transaction, so neither can commit alone. It
+	// accepts a Scheduled or Running Project marked TakeoverRequired, and a
+	// Pending Project whose latest assignment left a blocking obligation.
+	//
+	// A RequestID already recorded for this assignment returns the original
+	// record with replayed true and changes nothing. Returns ErrStaleAssignment
+	// when ref is not the Project's latest assignment, ErrConflictState when the
+	// Project is in no state to take over or the RequestID belongs to another
+	// decision, and ErrNotFound when it is gone.
+	TakeoverProject(ctx context.Context, name string, ref AssignmentRef, audit TakeoverAudit) (record v1.TakeoverAuditRecord, replayed bool, err error)
+
+	// ListTakeoverAudit returns the recorded takeovers of the named Project,
+	// oldest first, whether or not the Project still exists.
+	ListTakeoverAudit(ctx context.Context, name string) ([]v1.TakeoverAuditRecord, error)
+
+	// RecordWorkloadStopped stores the currently assigned Agent's evidence that
+	// every Project container is stopped. The fence and the phase (Scheduled,
+	// Running, Failed or Terminating) are checked on the same snapshot the
+	// compare-and-swap is versioned against. The evidence identity is taken
+	// from ref, never from the caller separately. The first evidence for an
+	// assignment wins: re-recording it is a no-op that keeps the original
+	// ObservedAt and bumps no version. Returns ErrStaleAssignment for a fence
+	// that is not current, ErrConflictState for a disallowed phase, and
+	// ErrNotFound when the Project is gone.
+	RecordWorkloadStopped(ctx context.Context, name string, ref AssignmentRef, observedAt time.Time) error
+
+	// RecordManagedDataQuarantined records that owner's Node moved its local
+	// Managed data out of the active path (ADR-0024 C2). owner must be a cleanup
+	// obligation in the Project's list. The first evidence wins. Returns
+	// ErrStaleAssignment when there is no such obligation and ErrNotFound when
+	// the Project is gone.
+	RecordManagedDataQuarantined(ctx context.Context, name string, owner AssignmentRef, observedAt time.Time) error
+
+	// RecordCommittedBackup makes backupID the generation a new placement
+	// restores from (ADR-0024 C1). The fence and the phase (Scheduled, Running
+	// or Failed) are checked on the same snapshot the compare-and-swap is
+	// versioned against, so a released assignment cannot commit. Committing the
+	// current generation again is a no-op. Returns ErrStaleAssignment for a
+	// fence that is not current, ErrConflictState for a disallowed phase, and
+	// ErrNotFound when the Project is gone.
+	RecordCommittedBackup(ctx context.Context, name string, ref AssignmentRef, backupID string, committedAt time.Time) error
+
+	// RecordResourcesRemoved resolves one cleanup obligation: owner must be
+	// the assignment of an obligation in the Project's list, for the same
+	// Project UID. Ownership is checked on the snapshot the UID- and
+	// version-pinned swap is based on, so an obligation list or Project that
+	// changes in between turns the swap into a retry that re-checks. The first
+	// evidence for an obligation wins. Returns ErrStaleAssignment when owner
+	// matches no obligation, and ErrNotFound when the Project is gone. It grants
+	// no status-write or workload-start authority.
+	RecordResourcesRemoved(ctx context.Context, name string, owner AssignmentRef, observedAt time.Time) error
+
+	// RecordStanza records that the assigned Agent is about to create the
+	// pgBackRest stanza for volume, named from the Project UID. The fence is
+	// checked atomically with the write and the Project must be Scheduled or
+	// Running. Recording a stanza already listed is a no-op. Returns
+	// ErrStaleAssignment for a fence that is not current.
+	RecordStanza(ctx context.Context, name string, ref AssignmentRef, volume string, observedAt time.Time) error
+
+	// RecordBackupCompletion accepts a backup the assigned Agent completed.
+	// A completion whose backupID is already recorded for the lifetime is
+	// accepted again unchanged, even after a reassignment, so an Agent whose
+	// response was lost can retry. Otherwise ref must be the current
+	// assignment of a Running Project; the completion is appended (keeping at
+	// most v1.MaxBackupCompletions) and BackupActive becomes True. Returns
+	// ErrStaleAssignment for a fence that is not current, and ErrConflictState
+	// when the Project is not Running.
+	RecordBackupCompletion(ctx context.Context, name string, ref AssignmentRef, completion v1.BackupCompletion) error
+
 	// UpdateProjectSpec writes only the user-mutable fields of a Project
 	// (spec, labels, annotations). Status is preserved. The update is only
 	// allowed when the project's current phase is Pending or Failed; returns
@@ -297,9 +454,15 @@ type ProjectStore interface {
 
 	// ListProjectsByNodeRef returns all Projects assigned to the given node
 	// whose phase is one of the supplied phases.  Used by
-	// ProjectReschedulerController to find work that needs to be moved or
-	// force-terminated when a node goes NotReady.
+	// ProjectReschedulerController to find work that needs to be moved, or
+	// deletions that are blocked, when a node goes NotReady.
 	ListProjectsByNodeRef(ctx context.Context, nodeRef string, phases []v1.ProjectPhase) ([]*v1.Project, error)
+
+	// ListProjectsOwingCleanup returns every Project whose cleanup obligation
+	// list has an entry for nodeName, resolved or not, in any phase. Use
+	// Project.CleanupTasksFor to pick the entries that are tasks for that
+	// Node.
+	ListProjectsOwingCleanup(ctx context.Context, nodeName string) ([]*v1.Project, error)
 }
 
 // ============================================================

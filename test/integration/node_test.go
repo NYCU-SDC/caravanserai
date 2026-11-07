@@ -23,10 +23,13 @@ import (
 	"NYCU-SDC/caravanserai/internal/server/adapter"
 	"NYCU-SDC/caravanserai/internal/server/agentdialer"
 	"NYCU-SDC/caravanserai/internal/server/apiserver"
+	"NYCU-SDC/caravanserai/internal/server/auth"
+	"NYCU-SDC/caravanserai/internal/server/authz"
 	"NYCU-SDC/caravanserai/internal/server/handler"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
 	projecthandler "NYCU-SDC/caravanserai/internal/server/handler/project"
 	secrethandler "NYCU-SDC/caravanserai/internal/server/handler/secret"
+	tokenhandler "NYCU-SDC/caravanserai/internal/server/handler/token"
 	pgstore "NYCU-SDC/caravanserai/internal/store/postgres"
 
 	"github.com/NYCU-SDC/summer/pkg/middleware"
@@ -115,14 +118,20 @@ func run(m *testing.M) int {
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
 	agentDialer := agentdialer.New(agentdialer.Config{Nodes: pgStore})
 	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, pgStore, agentDialer, problemWriter))
-	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter, false))
+	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter))
 	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
+	apiSrv.Register(tokenhandler.NewHandler(logger, pgStore, problemWriter))
+	apiSrv.RequireAuthentication(auth.NewAuthenticator(logger, pgStore, testAdminToken))
+	apiSrv.RequireAuthorization(authz.New(logger, pgStore))
 
 	ts := httptest.NewServer(apiSrv.Handler())
 	defer ts.Close()
 
 	suite.serverURL = ts.URL
+	// Requests act as the break-glass admin unless they set their own
+	// Authorization header; the auth tests do.
 	suite.client = ts.Client()
+	suite.client.Transport = defaultBearer{token: testAdminToken, base: suite.client.Transport}
 	suite.store = pgStore
 
 	return m.Run()
@@ -738,4 +747,22 @@ func TestNodeReadinessIsRecorded(t *testing.T) {
 	resp = doRequest(t, http.MethodDelete, "/api/v1/nodes/"+nodeName, nil)
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 	drainBody(resp)
+}
+
+// testAdminToken is the break-glass token of the integration server.
+const testAdminToken = "test-admin-token"
+
+// defaultBearer authenticates a request as token unless it already carries an
+// Authorization header.
+type defaultBearer struct {
+	token string
+	base  http.RoundTripper
+}
+
+func (d defaultBearer) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Header.Get("Authorization") == "" {
+		r = r.Clone(r.Context())
+		r.Header.Set("Authorization", "Bearer "+d.token)
+	}
+	return d.base.RoundTrip(r)
 }

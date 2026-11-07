@@ -18,10 +18,14 @@ import (
 
 // fakeEvictionProject is one Project in fakeEvictionStore.
 type fakeEvictionProject struct {
-	Phase       v1.ProjectPhase
-	NodeRef     string
-	Size        v1.ProjectSize
-	Managed     bool
+	Phase   v1.ProjectPhase
+	NodeRef string
+	Size    v1.ProjectSize
+	Managed bool
+	PgDiff  bool
+	// Stopped is the Agent's workload-stopped evidence for the current
+	// assignment, which the release needs.
+	Stopped     bool
 	Eviction    *v1.ProjectEviction
 	Conditions  []v1.Condition
 	Failure     *EvictionFailure
@@ -38,6 +42,7 @@ type fakeEvictionStore struct {
 
 	backupsAsked []string
 	requests     []string
+	released     []string
 }
 
 func newFakeEvictionStore(clock *fakeClock) *fakeEvictionStore {
@@ -61,9 +66,21 @@ func (f *fakeEvictionStore) agentReports(name string, status v1.ConditionStatus,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p := f.projects[name]
+	// The Agent records the stop evidence before it reports success.
+	if status == v1.ConditionTrue {
+		p.Stopped = true
+	}
 	p.Conditions = append(p.Conditions, v1.Condition{
 		Type: v1.ConditionTypeEvictionBackup, Status: status, Message: message, LastTransitionTime: f.clock.Now(),
 	})
+}
+
+// agentConfirmsStopped records only the stop evidence, as when the Agent's
+// result report is lost.
+func (f *fakeEvictionStore) agentConfirmsStopped(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.projects[name].Stopped = true
 }
 
 // schedule places a Pending Project as the scheduler would.
@@ -109,6 +126,7 @@ func (f *fakeEvictionStore) ListEvictions(context.Context) ([]*EvictionSnapshot,
 		}
 		out = append(out, &EvictionSnapshot{
 			Name: n, Phase: p.Phase, NodeRef: p.NodeRef, Size: p.Size, HasManagedVolumes: p.Managed,
+			HasPostgresDifferential: p.PgDiff, WorkloadStopped: p.Stopped,
 			Eviction: *p.Eviction, Conditions: slices.Clone(p.Conditions),
 		})
 	}
@@ -129,16 +147,20 @@ func (f *fakeEvictionStore) StartEvictionBackup(_ context.Context, name, fromNod
 	return nil
 }
 
-func (f *fakeEvictionStore) MoveEvictedProject(_ context.Context, name, fromNode, _ string) error {
+// MoveEvictedProject mirrors the adapter's release gate: no stop evidence,
+// no release.
+func (f *fakeEvictionStore) MoveEvictedProject(_ context.Context, e *EvictionSnapshot, _ string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	p := f.projects[name]
-	if p.Eviction == nil || p.Phase != v1.ProjectPhaseRunning || p.NodeRef != fromNode {
-		return nil
+	p := f.projects[e.Name]
+	if p.Eviction == nil || p.Phase != v1.ProjectPhaseRunning || p.NodeRef != e.NodeRef || !p.Stopped {
+		return false, nil
 	}
 	p.Eviction.State, p.Eviction.StateSince = v1.EvictionStateMoving, f.clock.Now()
 	p.Phase, p.NodeRef = v1.ProjectPhasePending, ""
-	return nil
+	p.Stopped = false
+	f.released = append(f.released, e.Name)
+	return true, nil
 }
 
 // RequestEviction mirrors the adapter's guards.
@@ -252,16 +274,22 @@ func TestEvictionController_SingleMove(t *testing.T) {
 	assert.Nil(t, p.Failure)
 }
 
-func TestEvictionController_ProjectWithoutDataSkipsTheBackup(t *testing.T) {
+func TestEvictionController_ProjectWithoutDataIsStoppedButNotBackedUp(t *testing.T) {
 	env := newEvictionEnv(t, 1, "node-a", "node-b")
 	env.store.running("app", "node-a", v1.ProjectSizeSmall, false)
 	env.store.request("app", "FailBack", 0)
 
+	// No data to carry, but the release gate still needs the Agent to stop
+	// it, so the old copy is not running beside the new one.
+	env.reconcile(t)
+	assert.Equal(t, v1.EvictionStateBackingUp, stateOf(env.store.get("app")))
+	assert.Equal(t, v1.ProjectPhaseRunning, env.store.get("app").Phase)
+
+	env.store.agentReports("app", v1.ConditionTrue, "")
 	env.reconcile(t)
 	p := env.store.get("app")
 	assert.Equal(t, v1.EvictionStateMoving, stateOf(p))
 	assert.Equal(t, v1.ProjectPhasePending, p.Phase)
-	assert.Empty(t, env.store.backupsAsked)
 }
 
 func TestEvictionController_MaxInFlight(t *testing.T) {
@@ -424,7 +452,6 @@ func TestEvictionController_Waits(t *testing.T) {
 		env := newEvictionEnv(t, 1, "node-a", "node-b")
 		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
 		env.store.request("app", "Drain", 0)
-		env.store.agentReports("app", v1.ConditionTrue, "old")
 		env.advance(time.Second)
 		env.reconcile(t)
 		// StartEvictionBackup cleared it; write a stale one back by hand.
@@ -561,4 +588,62 @@ func TestEvictionController_AvoidNodes(t *testing.T) {
 		env.reconcile(t)
 		assert.Equal(t, v1.EvictionStateBackingUp, stateOf(env.store.get("app")))
 	})
+}
+
+func TestEvictionController_ReleaseNeedsStopEvidence(t *testing.T) {
+	t.Run("a success report without the evidence does not release", func(t *testing.T) {
+		env := newEvictionEnv(t, 1, "node-a", "node-b")
+		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+		env.store.request("app", "Drain", 0)
+		env.reconcile(t)
+
+		// What the gate rests on is the evidence, not the report.
+		env.store.mu.Lock()
+		env.store.projects["app"].Conditions = append(env.store.projects["app"].Conditions, v1.Condition{
+			Type: v1.ConditionTypeEvictionBackup, Status: v1.ConditionTrue, LastTransitionTime: env.clock.Now(),
+		})
+		env.store.mu.Unlock()
+		env.reconcile(t)
+
+		assert.Equal(t, v1.EvictionStateBackingUp, stateOf(env.store.get("app")))
+		assert.Empty(t, env.store.released)
+	})
+
+	t.Run("the evidence releases even when the report was lost", func(t *testing.T) {
+		env := newEvictionEnv(t, 1, "node-a", "node-b")
+		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+		env.store.request("app", "Drain", 0)
+		env.reconcile(t)
+
+		env.store.agentConfirmsStopped("app")
+		env.reconcile(t)
+		assert.Equal(t, []string{"app"}, env.store.released)
+		assert.Equal(t, v1.EvictionStateMoving, stateOf(env.store.get("app")))
+	})
+
+	t.Run("once stopped the move is not timed out", func(t *testing.T) {
+		env := newEvictionEnv(t, 1, "node-a", "node-b")
+		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+		env.store.request("app", "Drain", 0)
+		env.reconcile(t)
+		env.store.agentConfirmsStopped("app")
+		env.advance(evictionStartTimeout + time.Minute)
+		env.reconcile(t)
+		assert.Nil(t, env.store.get("app").Failure, "a stopped project is moved, never abandoned")
+	})
+}
+
+func TestEvictionController_PostgresDifferentialIsRefused(t *testing.T) {
+	env := newEvictionEnv(t, 1, "node-a", "node-b")
+	env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+	env.store.projects["app"].PgDiff = true
+	env.store.request("app", "Drain", 0)
+
+	env.reconcile(t)
+	p := env.store.get("app")
+	assert.Nil(t, p.Eviction)
+	require.NotNil(t, p.Failure)
+	assert.Equal(t, EvictionFailedUnsupportedBackupStrategy, p.Failure.Reason)
+	assert.Equal(t, v1.ProjectPhaseRunning, p.Phase, "left running where it is")
+	assert.Empty(t, env.store.backupsAsked, "nothing is stopped")
 }

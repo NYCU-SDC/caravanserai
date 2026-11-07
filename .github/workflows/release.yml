@@ -1,0 +1,82 @@
+name: Release
+
+# Packages cara (CARA-143). A pull request that touches packaging builds the
+# packages and installs them on the runner; a v* tag also publishes them as a
+# GitHub Release. Both use scripts/release/package.sh, as test/vm does.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+    paths:
+      - packaging/**
+      - scripts/release/**
+      - version.mk
+      - Makefile
+      - cmd/*/Makefile
+      - .github/workflows/release.yml
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build and check packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # version.sh reads the tags.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run unit tests
+        if: startsWith(github.ref, 'refs/tags/')
+        run: make test
+
+      - name: Build packages
+        run: |
+          scripts/release/package.sh amd64 dist
+          scripts/release/package.sh arm64 dist
+
+      - name: Install the amd64 packages on the runner
+        run: sudo scripts/release/check-install.sh dist amd64
+
+      - name: Write checksums
+        run: cd dist && sha256sum -- * > SHA256SUMS
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          prerelease=()
+          case $TAG in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --generate-notes "${prerelease[@]}"

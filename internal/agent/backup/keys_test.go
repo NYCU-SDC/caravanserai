@@ -20,12 +20,6 @@ func TestKeyLayout(t *testing.T) {
 		assert.Equal(t, "cara/v1/projects/default/blog", got)
 	})
 
-	t.Run("LatestKey", func(t *testing.T) {
-		got, err := LatestKey(ns, project)
-		require.NoError(t, err)
-		assert.Equal(t, "cara/v1/projects/default/blog/latest.json", got)
-	})
-
 	t.Run("GenerationPrefix", func(t *testing.T) {
 		got, err := GenerationPrefix(ns, project, backupID)
 		require.NoError(t, err)

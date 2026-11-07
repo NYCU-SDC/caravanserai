@@ -10,11 +10,13 @@ import (
 // writes, mirroring the object store layout in the CARA design doc:
 //
 //	cara/v1/projects/{namespace}/{project}/
-//	├── snapshots/{backupID}/
-//	│   ├── {volume}.tar.gz
-//	│   └── manifest.json
-//	└── latest.json
+//	└── snapshots/{backupID}/
+//	    ├── {volume}.tar.gz
+//	    └── manifest.json
 const keyPrefix = "cara/v1/projects"
+
+// manifestFileName is the object a generation is complete only once it holds.
+const manifestFileName = "manifest.json"
 
 // ProjectPrefix returns the root key under which every generation of a
 // Project's backups lives.
@@ -26,17 +28,6 @@ func ProjectPrefix(namespace, project string) (string, error) {
 		return "", fmt.Errorf("backup: project %q: %w", project, err)
 	}
 	return fmt.Sprintf("%s/%s/%s", keyPrefix, namespace, project), nil
-}
-
-// LatestKey returns the key of the small, mutable pointer to the newest
-// complete generation. See Latest for why this is the only object CARA-59
-// overwrites in place.
-func LatestKey(namespace, project string) (string, error) {
-	prefix, err := ProjectPrefix(namespace, project)
-	if err != nil {
-		return "", err
-	}
-	return prefix + "/latest.json", nil
 }
 
 // GenerationPrefix returns the key prefix for one backup generation: every
@@ -58,7 +49,7 @@ func ManifestKey(namespace, project, backupID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return prefix + "/manifest.json", nil
+	return prefix + "/" + manifestFileName, nil
 }
 
 // ArchiveKey returns the key of one volume's archive within a generation.

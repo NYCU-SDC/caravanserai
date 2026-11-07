@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"slices"
 	"time"
 
 	"github.com/invopop/jsonschema"
@@ -166,6 +167,10 @@ type ServiceDef struct {
 	// Image is the Docker image reference, e.g. "postgres:15".
 	Image string `json:"image" yaml:"image"`
 
+	// Command overrides the image's CMD, as in Docker Compose; the image's
+	// ENTRYPOINT still applies. Empty keeps the image's default.
+	Command []string `json:"command,omitempty" yaml:"command,omitempty"`
+
 	// Env are extra environment variables injected at runtime.
 	Env []EnvVar `json:"env,omitempty" yaml:"env,omitempty"`
 
@@ -270,6 +275,35 @@ type IngressDef struct {
 	Access IngressAccess `json:"access,omitempty" yaml:"access,omitempty"`
 }
 
+// TakeoverOutcome is what an operator takeover changed.
+type TakeoverOutcome string
+
+const (
+	// TakeoverReleased: the assignment was still held and is now released.
+	TakeoverReleased TakeoverOutcome = "AssignmentReleased"
+	// TakeoverObligationOverridden: the assignment was already released and
+	// its obligation was blocking the next assignment.
+	TakeoverObligationOverridden TakeoverOutcome = "ObligationOverridden"
+)
+
+// TakeoverAuditRecord is one operator takeover decision. It outlives the
+// Project it is about.
+type TakeoverAuditRecord struct {
+	RequestID   string             `json:"requestID" yaml:"requestID"`
+	Namespace   string             `json:"namespace" yaml:"namespace"`
+	ProjectName string             `json:"projectName" yaml:"projectName"`
+	Assignment  AssignmentIdentity `json:"assignment" yaml:"assignment"`
+	// Evidence is the machine evidence available when the decision was made:
+	// "WorkloadStopped" or "None".
+	Evidence string          `json:"evidence" yaml:"evidence"`
+	Outcome  TakeoverOutcome `json:"outcome" yaml:"outcome"`
+	// Caller is what the server observed about the request. It does not
+	// identify a person.
+	Caller    string    `json:"caller" yaml:"caller"`
+	Note      string    `json:"note,omitempty" yaml:"note,omitempty"`
+	CreatedAt time.Time `json:"createdAt" yaml:"createdAt"`
+}
+
 // ProjectBackupConfig configures periodic object-store backup of a Project's
 // Managed volumes.
 //
@@ -286,6 +320,128 @@ type ProjectBackupConfig struct {
 	// OnMissing selects behaviour when no backup exists at restore time.
 	// Defaults to InitializeEmpty when empty.
 	OnMissing VolumeOnMissing `json:"onMissing,omitempty" yaml:"onMissing,omitempty"`
+
+	// Items selects a backup strategy per Managed volume. A Managed volume not
+	// listed here uses BackupStrategyOffline. Items are fixed when the Project
+	// is created: switching a live volume between strategies would leave two
+	// backup histories for the same data, and nothing can yet choose between
+	// them at restore time.
+	Items []BackupItem `json:"items,omitempty" yaml:"items,omitempty"`
+}
+
+// BackupStrategy selects how one Managed volume is backed up.
+type BackupStrategy string
+
+const (
+	// BackupStrategyOffline stops the Project's services and archives the
+	// volume directory. It is the default for a Managed volume.
+	BackupStrategyOffline BackupStrategy = "Offline"
+
+	// BackupStrategyPostgresDifferential takes pgBackRest full and
+	// differential backups with continuous WAL archiving while PostgreSQL
+	// keeps running. It requires the volume to be the PGDATA of exactly one
+	// service running PostgresDifferentialImage.
+	BackupStrategyPostgresDifferential BackupStrategy = "PostgresDifferential"
+)
+
+// JSONSchema returns a JSON Schema with the allowed BackupStrategy values.
+func (BackupStrategy) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Enum:        []any{string(BackupStrategyOffline), string(BackupStrategyPostgresDifferential)},
+		Description: "How a Managed volume is backed up.",
+	}
+}
+
+// The PostgreSQL image a PostgresDifferential volume must be the PGDATA of.
+// Cara starts it, creates the pgBackRest stanza and enables archiving in it, so
+// it relies on this image's PostgreSQL major, PGDATA path, pgBackRest version
+// and process tree.
+const (
+	PostgresDifferentialImage    = "ghcr.io/nycu-sdc/cara-postgres:16"
+	PostgresDifferentialDataPath = "/var/lib/postgresql/data"
+)
+
+// Bounds and default of BackupItem.RetainFull.
+const (
+	MinRetainFull     = 1
+	MaxRetainFull     = 12
+	DefaultRetainFull = 4
+)
+
+// BackupItem selects the backup strategy of one Managed volume.
+type BackupItem struct {
+	// Volume names a Managed volume declared in spec.volumes.
+	Volume string `json:"volume" yaml:"volume"`
+
+	// Strategy is how the volume is backed up.
+	Strategy BackupStrategy `json:"strategy" yaml:"strategy"`
+
+	// RetainFull is how many full backups pgBackRest keeps, each with the
+	// differential backups that depend on it. Only valid for
+	// PostgresDifferential; DefaultRetainFull when omitted. It is a count, not
+	// a time guarantee: extra full backups and failed runs change how far back
+	// the retained backups reach.
+	RetainFull *int `json:"retainFull,omitempty" yaml:"retainFull,omitempty"`
+}
+
+// EffectiveRetainFull returns RetainFull, or DefaultRetainFull when omitted.
+func (i BackupItem) EffectiveRetainFull() int {
+	if i.RetainFull == nil {
+		return DefaultRetainFull
+	}
+	return *i.RetainFull
+}
+
+// BackupStrategyFor returns the strategy a Managed volume is backed up with:
+// the one its item selects, or BackupStrategyOffline when no item names it.
+func (s ProjectSpec) BackupStrategyFor(volume string) BackupStrategy {
+	if s.Backup != nil {
+		for _, item := range s.Backup.Items {
+			if item.Volume == volume {
+				return item.Strategy
+			}
+		}
+	}
+	return BackupStrategyOffline
+}
+
+// SameBackupItems reports whether a and b select the same backup items, in the
+// same order. A missing backup section and an empty item list are the same.
+func SameBackupItems(a, b ProjectSpec) bool {
+	var ai, bi []BackupItem
+	if a.Backup != nil {
+		ai = a.Backup.Items
+	}
+	if b.Backup != nil {
+		bi = b.Backup.Items
+	}
+	if len(ai) != len(bi) {
+		return false
+	}
+	for i := range ai {
+		if ai[i].Volume != bi[i].Volume || ai[i].Strategy != bi[i].Strategy {
+			return false
+		}
+		if (ai[i].RetainFull == nil) != (bi[i].RetainFull == nil) {
+			return false
+		}
+		if ai[i].RetainFull != nil && *ai[i].RetainFull != *bi[i].RetainFull {
+			return false
+		}
+	}
+	return true
+}
+
+// HasPostgresDifferential reports whether any Managed volume of the spec uses
+// BackupStrategyPostgresDifferential.
+func (s ProjectSpec) HasPostgresDifferential() bool {
+	for _, v := range s.Volumes {
+		if v.Type == VolumeTypeManaged && s.BackupStrategyFor(v.Name) == BackupStrategyPostgresDifferential {
+			return true
+		}
+	}
+	return false
 }
 
 // ProjectSize is a t-shirt size declaring a Project's resource footprint. Each
@@ -449,6 +605,18 @@ type ProjectEviction struct {
 	StateSince time.Time `json:"stateSince" yaml:"stateSince"`
 }
 
+// InitialProjectStatus is the status every Project is created with: Pending,
+// generation zero, NeverAssigned, and nothing else. It is a whole value rather
+// than a list of fields to clear, so a field added to ProjectStatus later starts
+// empty on create without anyone remembering to reset it.
+func InitialProjectStatus() ProjectStatus {
+	return ProjectStatus{
+		Phase:                ProjectPhasePending,
+		AssignmentGeneration: 0,
+		AssignmentHistory:    AssignmentHistoryNeverAssigned,
+	}
+}
+
 // ProjectStatus is written by the Controller Manager and Agent.
 type ProjectStatus struct {
 	// Phase is the high-level lifecycle state.
@@ -493,6 +661,508 @@ type ProjectStatus struct {
 
 	// Conditions is a list of granular observable states.
 	Conditions []Condition `json:"conditions,omitempty" yaml:"conditions,omitempty"`
+
+	// Recovery is the durable state of cross-Node recovery: retry bookkeeping
+	// and the evidence that lets an assignment be released or a record be
+	// deleted. It lives here rather than in Condition messages because it must
+	// survive server restarts and duplicate controller events, and because code
+	// must never recover a counter or an identity by parsing a message.
+	//
+	// Server-owned; not a user manifest field. Nil until recovery first records
+	// something.
+	Recovery *ProjectRecoveryStatus `json:"recovery,omitempty" yaml:"recovery,omitempty"`
+
+	// Backup is the backup state of this Project lifetime. Server-owned: the
+	// API resets it on create and only the assigned Agent's fenced reports
+	// change it.
+	Backup *ProjectBackupStatus `json:"backup,omitempty" yaml:"backup,omitempty"`
+}
+
+// ProjectBackupStatus is the backup state of one Project lifetime.
+type ProjectBackupStatus struct {
+	// Stanzas lists every pgBackRest stanza this lifetime has created,
+	// including those of volumes later removed from the spec. It only grows:
+	// deleting a lifetime's backups has to find every stanza it ever wrote.
+	Stanzas []StanzaRecord `json:"stanzas,omitempty" yaml:"stanzas,omitempty"`
+
+	// Completions lists the most recent backups the server accepted from this
+	// lifetime's assigned Agents, oldest first, at most MaxBackupCompletions.
+	// Accepted means the backup completed under the assignment current at
+	// the time; it does not make the backup a restore source.
+	Completions []BackupCompletion `json:"completions,omitempty" yaml:"completions,omitempty"`
+}
+
+// MaxBackupCompletions bounds ProjectBackupStatus.Completions. A retry of a
+// backupID older than the bound is no longer recognised as accepted.
+const MaxBackupCompletions = 20
+
+// BackupCompletion is one backup the server accepted.
+type BackupCompletion struct {
+	BackupID string `json:"backupID" yaml:"backupID"`
+	// NodeRef and AssignmentGeneration are the assignment it completed under.
+	NodeRef              string    `json:"nodeRef" yaml:"nodeRef"`
+	AssignmentGeneration int64     `json:"assignmentGeneration" yaml:"assignmentGeneration"`
+	AcceptedAt           time.Time `json:"acceptedAt" yaml:"acceptedAt"`
+	// ManifestKey is where the Agent wrote the backup's manifest.
+	ManifestKey string                 `json:"manifestKey" yaml:"manifestKey"`
+	Items       []BackupCompletionItem `json:"items" yaml:"items"`
+}
+
+// BackupCompletionItem is the backup of one volume within a completion.
+type BackupCompletionItem struct {
+	Volume string `json:"volume" yaml:"volume"`
+	Stanza string `json:"stanza" yaml:"stanza"`
+	// Label is the pgBackRest backup label.
+	Label string `json:"label" yaml:"label"`
+	// Type is full or diff.
+	Type string `json:"type" yaml:"type"`
+}
+
+// BackupManifestKey is the object key of a backup's manifest. Like every key of
+// a Project's backups it is derived from the Project UID, never its name.
+func BackupManifestKey(projectUID, backupID string) string {
+	return "cara/v2/projects/" + projectUID + "/generations/" + backupID + "/manifest.json"
+}
+
+// Completion returns the accepted completion with backupID, or nil.
+func (b *ProjectBackupStatus) Completion(backupID string) *BackupCompletion {
+	if b == nil {
+		return nil
+	}
+	for i := range b.Completions {
+		if b.Completions[i].BackupID == backupID {
+			return &b.Completions[i]
+		}
+	}
+	return nil
+}
+
+// LastCompletion returns the most recently accepted completion, or nil.
+func (b *ProjectBackupStatus) LastCompletion() *BackupCompletion {
+	if b == nil || len(b.Completions) == 0 {
+		return nil
+	}
+	return &b.Completions[len(b.Completions)-1]
+}
+
+// StanzaRecord is one pgBackRest stanza a Project lifetime created.
+type StanzaRecord struct {
+	Name       string    `json:"name" yaml:"name"`
+	Volume     string    `json:"volume" yaml:"volume"`
+	RecordedAt time.Time `json:"recordedAt" yaml:"recordedAt"`
+}
+
+// StanzaName is the pgBackRest stanza for a volume of a Project lifetime. It
+// is derived from the Project UID, never its name, so a same-name successor
+// never writes into its predecessor's backups.
+func StanzaName(projectUID, volume string) string {
+	return projectUID + "-" + volume
+}
+
+// HasStanza reports whether name is already recorded.
+func (b *ProjectBackupStatus) HasStanza(name string) bool {
+	if b == nil {
+		return false
+	}
+	for _, s := range b.Stanzas {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// DeepCopy returns an independent copy.
+func (b *ProjectBackupStatus) DeepCopy() *ProjectBackupStatus {
+	if b == nil {
+		return nil
+	}
+	out := *b
+	out.Stanzas = slices.Clone(b.Stanzas)
+	out.Completions = slices.Clone(b.Completions)
+	for i := range out.Completions {
+		out.Completions[i].Items = slices.Clone(b.Completions[i].Items)
+	}
+	return &out
+}
+
+// ProjectRecoveryStatus is the structured recovery state of a Project.
+//
+// The retry, backoff, preference and healthy-window fields are written only by
+// server-side controllers. The evidence fields are written only through
+// dedicated guarded mutations that validate the reporting Agent's identity; an
+// ordinary Agent status report can set or clear none of them.
+type ProjectRecoveryStatus struct {
+	// RescheduleAttempts counts cross-Node reschedules in the current incident.
+	RescheduleAttempts int `json:"rescheduleAttempts,omitempty" yaml:"rescheduleAttempts,omitempty"`
+
+	// LastAttemptAt is when the most recent reschedule was attempted. Backoff
+	// is computed from it.
+	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty" yaml:"lastAttemptAt,omitempty"`
+
+	// HealthySince is when the Project was last seen continuously healthy. It
+	// is meaningful only while HealthySinceGeneration equals the current
+	// assignment generation: a window observed under an older assignment says
+	// nothing about the current one.
+	HealthySince *time.Time `json:"healthySince,omitempty" yaml:"healthySince,omitempty"`
+
+	// HealthySinceGeneration is the assignment generation HealthySince was
+	// observed under.
+	HealthySinceGeneration int64 `json:"healthySinceGeneration,omitempty" yaml:"healthySinceGeneration,omitempty"`
+
+	// PreferredNode is a scheduler hint only. Status.NodeRef remains the
+	// authoritative assignment.
+	PreferredNode string `json:"preferredNode,omitempty" yaml:"preferredNode,omitempty"`
+
+	// WorkloadStopped is the durable no-start latch for one assignment
+	// generation: the assigned Agent confirmed that every Project container is
+	// stopped. It is not proof that runtime resources were removed, and it
+	// alone never authorizes final deletion. Only a committed newer assignment
+	// clears it; time alone does not.
+	WorkloadStopped *WorkloadStoppedEvidence `json:"workloadStopped,omitempty" yaml:"workloadStopped,omitempty"`
+
+	// CleanupObligations lists every assignment this Project has given up
+	// whose Node may still hold its runtime resources. An entry is appended in
+	// the same write that releases an assignment or moves the Project to
+	// Terminating, so the list is the complete set of Nodes that may still
+	// hold resources. Final deletion requires every entry to be resolved.
+	CleanupObligations []CleanupObligation `json:"cleanupObligations,omitempty" yaml:"cleanupObligations,omitempty"`
+
+	// CommittedBackup is the generation a new placement restores from
+	// (ADR-0024 C1). Only the assignment current at the time can set it, so once
+	// an assignment is released its Agent can no longer change where the next
+	// one restores from, even if it can still reach the object store. A new
+	// assignment keeps it. Nil means no backup has ever been committed.
+	CommittedBackup *CommittedBackup `json:"committedBackup,omitempty" yaml:"committedBackup,omitempty"`
+}
+
+// CommittedBackup records one backup generation accepted as the restore source.
+type CommittedBackup struct {
+	// BackupID names the generation in the object store.
+	BackupID string `json:"backupID" yaml:"backupID"`
+	// Assignment is the assignment that produced and committed it.
+	Assignment AssignmentIdentity `json:"assignment" yaml:"assignment"`
+	// CommittedAt is when the server accepted it.
+	CommittedAt time.Time `json:"committedAt" yaml:"committedAt"`
+}
+
+// CommittedBackupID returns the generation a new placement restores from, or
+// "" if no backup has been committed. It is safe on a nil receiver.
+func (r *ProjectRecoveryStatus) CommittedBackupID() string {
+	if r == nil || r.CommittedBackup == nil {
+		return ""
+	}
+	return r.CommittedBackup.BackupID
+}
+
+// ReleaseAuthorizationKind records what permitted an assignment to be given
+// up. It answers "why could another Node take over", never "has this Node
+// cleaned up" — that is ResourcesRemoved, recorded separately.
+type ReleaseAuthorizationKind string
+
+const (
+	// ReleaseByWorkloadStopped: the assigned Agent confirmed every container
+	// of that generation stopped.
+	ReleaseByWorkloadStopped ReleaseAuthorizationKind = "WorkloadStopped"
+	// ReleaseByDeletion: the Project entered Terminating; the assignment's
+	// runtime resources are to be removed, not handed to another Node.
+	ReleaseByDeletion ReleaseAuthorizationKind = "Deletion"
+	// ReleaseByProviderFencing: a provider API proved the Node powered off or
+	// isolated. Not implemented yet.
+	ReleaseByProviderFencing ReleaseAuthorizationKind = "ProviderFencing"
+	// ReleaseByOperatorOverride: an operator accepted the risk of takeover
+	// without machine evidence. Never fencing or cleanup evidence: the old
+	// Node still owes cleanup if it ever returns.
+	ReleaseByOperatorOverride ReleaseAuthorizationKind = "OperatorOverride"
+	// ReleaseByGraceExpired: the Node stayed NotReady past its grace period, and
+	// the Project either has no Managed volume or has a committed backup to
+	// restore from. The transitional authorization of ADR-0024: a partitioned
+	// Node keeps running its copy until it reconnects. Never evidence the
+	// workload stopped.
+	ReleaseByGraceExpired ReleaseAuthorizationKind = "GraceExpired"
+	// ReleaseByLeaseExpired: the Node's lease expired under the self-fencing
+	// contract proposed in ADR-0023. Not implemented yet; never cleanup
+	// evidence.
+	ReleaseByLeaseExpired ReleaseAuthorizationKind = "LeaseExpired"
+)
+
+// CleanupObligation is one released assignment whose Node may still hold the
+// Project's runtime resources.
+type CleanupObligation struct {
+	// Assignment is the released assignment. Its Agent is the cleanup owner.
+	Assignment AssignmentIdentity `json:"assignment" yaml:"assignment"`
+
+	// ReleasedAt is when the assignment was given up.
+	ReleasedAt time.Time `json:"releasedAt" yaml:"releasedAt"`
+
+	// ReleaseAuthorization is what permitted giving the assignment up.
+	ReleaseAuthorization ReleaseAuthorizationKind `json:"releaseAuthorization" yaml:"releaseAuthorization"`
+
+	// ResourcesRemoved is the cleanup owner's evidence that every
+	// deletion-scoped runtime resource it held for this assignment is gone.
+	// Nil means the obligation is unresolved.
+	ResourcesRemoved *ResourcesRemovedEvidence `json:"resourcesRemoved,omitempty" yaml:"resourcesRemoved,omitempty"`
+
+	// ManagedDataOwed records that the Project moved away while declaring a
+	// Managed volume, so this Node's local data has to leave the active path
+	// (ADR-0024 C2) before the Node may hold the Project again. A deletion does
+	// not set it: local Managed data is retained then.
+	ManagedDataOwed bool `json:"managedDataOwed,omitempty" yaml:"managedDataOwed,omitempty"`
+
+	// ManagedDataQuarantined is the cleanup owner's evidence that it did so. It
+	// is separate from ResourcesRemoved because each can be true without the
+	// other.
+	ManagedDataQuarantined *ManagedDataQuarantinedEvidence `json:"managedDataQuarantined,omitempty" yaml:"managedDataQuarantined,omitempty"`
+}
+
+// Resolved reports whether the cleanup owner has reported ResourcesRemoved.
+func (o CleanupObligation) Resolved() bool {
+	return o.ResourcesRemoved != nil
+}
+
+// DataOutstanding reports whether local Managed data is still owed.
+func (o CleanupObligation) DataOutstanding() bool {
+	return o.ManagedDataOwed && o.ManagedDataQuarantined == nil
+}
+
+// FindObligation returns the obligation for assignment, or nil.
+func (r *ProjectRecoveryStatus) FindObligation(assignment AssignmentIdentity) *CleanupObligation {
+	if r == nil {
+		return nil
+	}
+	for i := range r.CleanupObligations {
+		if r.CleanupObligations[i].Assignment == assignment {
+			return &r.CleanupObligations[i]
+		}
+	}
+	return nil
+}
+
+// AddObligation records that assignment was given up under authorization and
+// its Node now owes cleanup. An assignment already in the list keeps its
+// original entry: an obligation records the first release, and re-releasing
+// the same assignment must not reset its evidence.
+func (r *ProjectRecoveryStatus) AddObligation(assignment AssignmentIdentity, releasedAt time.Time, authorization ReleaseAuthorizationKind) {
+	if r.FindObligation(assignment) != nil {
+		return
+	}
+	r.CleanupObligations = append(r.CleanupObligations, CleanupObligation{
+		Assignment:           assignment,
+		ReleasedAt:           releasedAt,
+		ReleaseAuthorization: authorization,
+	})
+}
+
+// OverrideRelease records an operator's takeover of assignment. An obligation
+// already standing for it, from a WorkloadStopped release whose Node never
+// came back to clean up, changes authorization rather than gaining a second
+// entry. Either way it stays unresolved: the override permits a new assignment
+// and says nothing about what the old Node still holds.
+func (r *ProjectRecoveryStatus) OverrideRelease(assignment AssignmentIdentity, releasedAt time.Time) {
+	if o := r.FindObligation(assignment); o != nil {
+		o.ReleaseAuthorization = ReleaseByOperatorOverride
+		return
+	}
+	r.AddObligation(assignment, releasedAt, ReleaseByOperatorOverride)
+}
+
+// OweManagedData records that assignment's Node must also quarantine its local
+// Managed data. It does nothing without an obligation to attach it to.
+func (r *ProjectRecoveryStatus) OweManagedData(assignment AssignmentIdentity) {
+	if o := r.FindObligation(assignment); o != nil {
+		o.ManagedDataOwed = true
+	}
+}
+
+// NodesOwingCleanup returns the Nodes that still owe runtime cleanup or local
+// Managed data for this Project. None of them may be given a new assignment of
+// it (ADR-0024 C3).
+func (r *ProjectRecoveryStatus) NodesOwingCleanup() []string {
+	if r == nil {
+		return nil
+	}
+	var nodes []string
+	for _, o := range r.CleanupObligations {
+		if !o.Resolved() || o.DataOutstanding() {
+			nodes = append(nodes, o.Assignment.NodeName)
+		}
+	}
+	return nodes
+}
+
+// HasManagedVolume reports whether the spec declares a Managed volume.
+func (s ProjectSpec) HasManagedVolume() bool {
+	for _, v := range s.Volumes {
+		if v.Type == VolumeTypeManaged {
+			return true
+		}
+	}
+	return false
+}
+
+// PermitsAssignment reports whether this obligation lets the Project be
+// assigned again. A resolved obligation does. An unresolved one does only when
+// its release was authorized by evidence that the old Node can no longer run
+// the workload — provider fencing or an audited operator override. A
+// WorkloadStopped release does not: the containers are stopped but still
+// present, and a restarted Agent or Docker restart policy could bring them back
+// while the new assignment runs.
+//
+// LeaseExpired is refused only because no lease is implemented yet and nothing
+// can record that kind. It is not a decision: the lease design separates
+// "another Node may take over" from "the old Node still owes cleanup", so its
+// answer here is to be set when the lease itself is implemented.
+func (o CleanupObligation) PermitsAssignment() bool {
+	if o.Resolved() {
+		return true
+	}
+	switch o.ReleaseAuthorization {
+	case ReleaseByProviderFencing, ReleaseByOperatorOverride, ReleaseByGraceExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+// BlockingObligation returns the first obligation that forbids assigning the
+// Project, or nil when none does.
+func (r *ProjectRecoveryStatus) BlockingObligation() *CleanupObligation {
+	if r == nil {
+		return nil
+	}
+	for i := range r.CleanupObligations {
+		if !r.CleanupObligations[i].PermitsAssignment() {
+			return &r.CleanupObligations[i]
+		}
+	}
+	return nil
+}
+
+// ResourcesRemovedFor reports whether the cleanup obligation of the assignment
+// held on node at generation carries ResourcesRemoved. It is what lets that
+// assignment's Agent report the Project Terminated: the phase may say the
+// resources are gone only after the evidence that they are has been recorded.
+//
+// It matches by Node and generation rather than by full identity because the
+// list belongs to one Project record, and create resets status, so every entry
+// in it is of that record's lifetime.
+func (r *ProjectRecoveryStatus) ResourcesRemovedFor(node string, generation int64) bool {
+	if r == nil {
+		return false
+	}
+	for _, o := range r.CleanupObligations {
+		if o.Assignment.NodeName == node && o.Assignment.AssignmentGeneration == generation {
+			return o.Resolved()
+		}
+	}
+	return false
+}
+
+// WorkloadStoppedFor reports whether WorkloadStopped evidence is recorded for
+// exactly assignment. Evidence for any other generation, Node or lifetime says
+// nothing about this one.
+func (r *ProjectRecoveryStatus) WorkloadStoppedFor(assignment AssignmentIdentity) bool {
+	return r != nil && r.WorkloadStopped != nil && r.WorkloadStopped.Assignment == assignment
+}
+
+// EnsureRecovery returns s.Recovery, allocating it first if needed.
+func (s *ProjectStatus) EnsureRecovery() *ProjectRecoveryStatus {
+	if s.Recovery == nil {
+		s.Recovery = &ProjectRecoveryStatus{}
+	}
+	return s.Recovery
+}
+
+// AssignmentIdentity names one assignment of one Project lifetime. All three
+// parts are needed: UID separates lifetimes that share a name, and the
+// generation separates assignments that reuse a Node (A→B→A).
+type AssignmentIdentity struct {
+	ProjectUID           string `json:"projectUID" yaml:"projectUID"`
+	NodeName             string `json:"nodeName" yaml:"nodeName"`
+	AssignmentGeneration int64  `json:"assignmentGeneration" yaml:"assignmentGeneration"`
+}
+
+// WorkloadStoppedEvidence records that the Agent of Assignment confirmed every
+// Project container stopped. ObservedAt is when that verification completed.
+type WorkloadStoppedEvidence struct {
+	Assignment AssignmentIdentity `json:"assignment" yaml:"assignment"`
+	ObservedAt time.Time          `json:"observedAt" yaml:"observedAt"`
+}
+
+// ManagedDataQuarantinedEvidence records when the cleanup owner of an obligation
+// moved its local Managed data out of the active path, or found none there.
+type ManagedDataQuarantinedEvidence struct {
+	ObservedAt time.Time `json:"observedAt" yaml:"observedAt"`
+}
+
+// ResourcesRemovedEvidence records when the cleanup owner of an obligation
+// finished removing every deletion-scoped runtime resource it held. The
+// assignment it is about is the obligation's own.
+type ResourcesRemovedEvidence struct {
+	ObservedAt time.Time `json:"observedAt" yaml:"observedAt"`
+}
+
+// ClearForNewAssignment drops the state a newly committed assignment
+// invalidates: the previous generation's no-start latch and its healthy
+// window. It is the only operation that clears WorkloadStopped, and it must run
+// inside the same compare-and-swap that commits the new assignment.
+func (r *ProjectRecoveryStatus) ClearForNewAssignment() {
+	if r == nil {
+		return
+	}
+	r.WorkloadStopped = nil
+	r.ClearHealthyWindow()
+}
+
+// ClearHealthyWindow forgets the current healthy window, as any new failure or
+// assignment must.
+func (r *ProjectRecoveryStatus) ClearHealthyWindow() {
+	if r == nil {
+		return
+	}
+	r.HealthySince = nil
+	r.HealthySinceGeneration = 0
+}
+
+// DeepCopy returns a ProjectRecoveryStatus sharing no pointer with r.
+func (r *ProjectRecoveryStatus) DeepCopy() *ProjectRecoveryStatus {
+	if r == nil {
+		return nil
+	}
+	out := *r
+	out.LastAttemptAt = copyTime(r.LastAttemptAt)
+	out.HealthySince = copyTime(r.HealthySince)
+	if r.WorkloadStopped != nil {
+		ws := *r.WorkloadStopped
+		out.WorkloadStopped = &ws
+	}
+	if r.CommittedBackup != nil {
+		cb := *r.CommittedBackup
+		out.CommittedBackup = &cb
+	}
+	if r.CleanupObligations != nil {
+		out.CleanupObligations = make([]CleanupObligation, len(r.CleanupObligations))
+		for i, o := range r.CleanupObligations {
+			if o.ResourcesRemoved != nil {
+				rr := *o.ResourcesRemoved
+				o.ResourcesRemoved = &rr
+			}
+			if o.ManagedDataQuarantined != nil {
+				q := *o.ManagedDataQuarantined
+				o.ManagedDataQuarantined = &q
+			}
+			out.CleanupObligations[i] = o
+		}
+	}
+	return &out
+}
+
+func copyTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	return &c
 }
 
 // Project is the central workload resource. It groups one or more containers
@@ -529,4 +1199,57 @@ func (Project) JSONSchemaExtend(s *jsonschema.Schema) {
 type ProjectList struct {
 	TypeMeta `json:",inline"  yaml:",inline"`
 	Items    []Project `json:"items" yaml:"items"`
+}
+
+// CleanupTask is one unresolved cleanup obligation, addressed to the Agent of
+// the Node that owes it. It authorizes that Agent to stop and remove the
+// runtime resources of exactly Assignment and to report ResourcesRemoved for
+// it; it grants no status-write or workload-start authority.
+type CleanupTask struct {
+	Namespace            string                   `json:"namespace" yaml:"namespace"`
+	ProjectName          string                   `json:"projectName" yaml:"projectName"`
+	Assignment           AssignmentIdentity       `json:"assignment" yaml:"assignment"`
+	ReleaseAuthorization ReleaseAuthorizationKind `json:"releaseAuthorization" yaml:"releaseAuthorization"`
+}
+
+// CleanupTaskList is the response of the Node cleanup-obligation listing.
+type CleanupTaskList struct {
+	TypeMeta `json:",inline" yaml:",inline"`
+	Items    []CleanupTask `json:"items" yaml:"items"`
+}
+
+// CleanupTasksFor returns the cleanup obligations node still owes for p, as tasks
+// for that Node's Agent: unresolved ones, and resolved ones whose local Managed
+// data is still owed.
+//
+// None is returned while node holds p's current assignment. That Node's Agent
+// is acting on the Project under its assignment — tearing it down if it is
+// Terminating — and a cleanup task running beside it could remove what the
+// assignment is still using. The Deletion obligation of a Terminating Project
+// is resolved by the teardown itself, not by a task.
+//
+// An obligation for another lifetime cannot be in p's list (the UID check
+// guards every write to it), but the UID is compared anyway: a task is only
+// ever about the lifetime it names.
+func (p *Project) CleanupTasksFor(node string) []CleanupTask {
+	if p.Status.Recovery == nil || p.Status.NodeRef == node {
+		return nil
+	}
+	namespace := p.Namespace
+	if namespace == "" {
+		namespace = DefaultNamespace
+	}
+	var tasks []CleanupTask
+	for _, o := range p.Status.Recovery.CleanupObligations {
+		if (o.Resolved() && !o.DataOutstanding()) || o.Assignment.NodeName != node || o.Assignment.ProjectUID != p.ObjectMeta.UID {
+			continue
+		}
+		tasks = append(tasks, CleanupTask{
+			Namespace:            namespace,
+			ProjectName:          p.Name,
+			Assignment:           o.Assignment,
+			ReleaseAuthorization: o.ReleaseAuthorization,
+		})
+	}
+	return tasks
 }

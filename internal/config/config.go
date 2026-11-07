@@ -48,6 +48,9 @@ func (cl *LogBuffer) FlushToZap(logger *zap.Logger) {
 }
 
 func (c *Config) Validate() error {
+	if c.configFileError != nil {
+		return c.configFileError
+	}
 	if c.DatabaseURL == "" {
 		return errors.New("database_url is required")
 	}
@@ -64,6 +67,12 @@ func (c *Config) Validate() error {
 	// mistake that would otherwise silently disable the endpoints, so reject it.
 	if (c.HeadscaleAPIURL == "") != (c.HeadscaleAPIKey == "") {
 		return errors.New("headscale_api_url and headscale_api_key must be set together (or both left empty to disable overlay administration)")
+	}
+	if c.TerminatingTimeout < 0 {
+		return errors.New("terminating_timeout must not be negative")
+	}
+	if c.RunningGracePeriod < 0 {
+		return errors.New("running_grace_period must not be negative")
 	}
 	if c.MaxInFlightEvictions < 0 {
 		return errors.New("max_inflight_evictions must not be negative")
@@ -96,6 +105,9 @@ func (c *Config) Validate() error {
 }
 
 func (c *AgentConfig) Validate() error {
+	if c.configFileError != nil {
+		return c.configFileError
+	}
 	if c.ServerURL == "" {
 		return errors.New("server_url is required")
 	}

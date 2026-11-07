@@ -35,6 +35,15 @@ type AgentConfig struct {
 	OtelCollectorUrl  string        `yaml:"otel_collector_url"  envconfig:"OTEL_COLLECTOR_URL"`
 	NodeName          string        `yaml:"node_name"           envconfig:"NODE_NAME"`
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"  envconfig:"HEARTBEAT_INTERVAL"`
+	// TokenFile names a file holding the Node token the agent presents to
+	// cara-server on every request (ADR-0031). The server answers 401 without
+	// one.
+	TokenFile string `yaml:"token_file" envconfig:"AGENT_TOKEN_FILE"`
+	// JoinTokenFile names a file holding a one-time join token (CARA-138).
+	// On first start the agent trades it for a Node token, which it keeps
+	// under {DataRoot}/identity and uses from then on. TokenFile, when set,
+	// takes precedence.
+	JoinTokenFile string `yaml:"join_token_file" envconfig:"JOIN_TOKEN_FILE"`
 	// DockerHost is the Docker daemon endpoint used by the agent to manage
 	// containers.  Defaults to the Unix socket path on Linux/macOS.
 	// Can be overridden with a tcp:// URL for remote Docker daemons.
@@ -89,15 +98,9 @@ type AgentConfig struct {
 	// OverlayHostname optionally overrides the hostname the agent registers
 	// with Headscale.  Defaults to NodeName (the OS hostname) when empty.
 	OverlayHostname string `yaml:"overlay_hostname" envconfig:"OVERLAY_HOSTNAME"`
-	// UIDEnforcement turns on Project UID ownership fencing (CARA-82). When
-	// false (the default, "compatibility mode") new Docker resources are still
-	// labelled with their Project UID but ownership decisions fall back to
-	// (namespace, name), so an agent upgraded ahead of the fleet does not
-	// quarantine still-valid pre-UID containers. Enable it cluster-wide only
-	// after every agent understands UID-bearing reconcile payloads: a same-name
-	// container carrying a different or missing UID is then treated as not owned
-	// (refused for adoption and quarantined by the orphan sweep).
-	UIDEnforcement bool `yaml:"uid_enforcement" envconfig:"UID_ENFORCEMENT"`
+
+	// configFileError is why a config file named explicitly could not be used.
+	configFileError error
 	// S3 configures the object store used for Managed volume backups.
 	// Leaving Endpoint empty disables backups; see S3Config.
 	S3 S3Config `yaml:"s3"`
@@ -122,6 +125,10 @@ type S3Config struct {
 	Region    string `yaml:"region"`
 	AccessKey string `yaml:"access_key"`
 	SecretKey string `yaml:"secret_key"`
+	// CAFile is a CA certificate the endpoint's certificate is signed by, for
+	// an object store with a private CA. Both the Agent's own uploads and
+	// pgBackRest, which reaches the store only over HTTPS, trust it.
+	CAFile string `yaml:"ca_file"`
 }
 
 // Enabled reports whether object-store backups are configured.  Managed
@@ -153,6 +160,9 @@ func mergeS3(base, override S3Config) S3Config {
 	if override.SecretKey != "" {
 		base.SecretKey = override.SecretKey
 	}
+	if override.CAFile != "" {
+		base.CAFile = override.CAFile
+	}
 	return base
 }
 
@@ -178,10 +188,12 @@ func LoadAgent() (AgentConfig, *LogBuffer) {
 
 	var err error
 
-	cfg, err = AgentFromFile("config.yaml", cfg, logger)
+	path, explicit := resolveConfigPath(os.Args[1:])
+	cfg, err = AgentFromFile(path, cfg, logger)
 	if err != nil {
-		logger.Warn("Failed to load agent config from file", err, map[string]string{"path": "config.yaml"})
+		logger.Warn("Failed to load agent config from file", err, map[string]string{"path": path})
 	}
+	fileErr := explicitFileError(explicit, err)
 
 	cfg, err = AgentFromEnv(cfg, logger)
 	if err != nil {
@@ -193,6 +205,7 @@ func LoadAgent() (AgentConfig, *LogBuffer) {
 		logger.Warn("Failed to load agent config from flags", err, nil)
 	}
 
+	cfg.configFileError = fileErr
 	return *cfg, logger
 }
 
@@ -255,6 +268,8 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 	envConfig := &AgentConfig{
 		Debug:            os.Getenv("DEBUG") == "true",
 		ServerURL:        os.Getenv("SERVER_URL"),
+		TokenFile:        os.Getenv("AGENT_TOKEN_FILE"),
+		JoinTokenFile:    os.Getenv("JOIN_TOKEN_FILE"),
 		OtelCollectorUrl: os.Getenv("OTEL_COLLECTOR_URL"),
 		NodeName:         os.Getenv("NODE_NAME"),
 		DockerHost:       os.Getenv("DOCKER_HOST"),
@@ -264,7 +279,6 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 		HeadscaleURL:     os.Getenv("HEADSCALE_URL"),
 		PreauthKeyFile:   os.Getenv("HEADSCALE_PREAUTH_KEY_FILE"),
 		OverlayHostname:  os.Getenv("OVERLAY_HOSTNAME"),
-		UIDEnforcement:   os.Getenv("UID_ENFORCEMENT") == "true",
 		ReservedCPU:      os.Getenv("AGENT_RESERVED_CPU"),
 		ReservedMemory:   os.Getenv("AGENT_RESERVED_MEMORY"),
 		S3: S3Config{
@@ -273,6 +287,7 @@ func AgentFromEnv(cfg *AgentConfig, logger *LogBuffer) (*AgentConfig, error) {
 			Region:    os.Getenv("S3_REGION"),
 			AccessKey: os.Getenv("S3_ACCESS_KEY"),
 			SecretKey: os.Getenv("S3_SECRET_KEY"),
+			CAFile:    os.Getenv("S3_CA_FILE"),
 		},
 	}
 
@@ -291,6 +306,8 @@ func AgentFromFlags(cfg *AgentConfig) (*AgentConfig, error) {
 	flagConfig := &AgentConfig{}
 	flag.BoolVar(&flagConfig.Debug, "debug", false, "enable debug mode")
 	flag.StringVar(&flagConfig.ServerURL, "server-url", "", "cara-server URL")
+	flag.StringVar(&flagConfig.TokenFile, "token-file", "", "file holding the Node token presented to cara-server")
+	flag.StringVar(&flagConfig.JoinTokenFile, "join-token-file", "", "file holding a one-time join token, traded for a Node token on first start")
 	flag.StringVar(&flagConfig.OtelCollectorUrl, "otel_collector_url", "", "OpenTelemetry collector URL")
 	flag.StringVar(&flagConfig.NodeName, "node-name", "", "node name to register with the control plane (default: hostname)")
 	flag.DurationVar(&flagConfig.HeartbeatInterval, "heartbeat-interval", 0, "interval between heartbeats (default: 30s)")
@@ -301,9 +318,9 @@ func AgentFromFlags(cfg *AgentConfig) (*AgentConfig, error) {
 	flag.StringVar(&flagConfig.HeadscaleURL, "headscale-url", "", "Headscale control-plane URL to join on startup (enables overlay networking)")
 	flag.StringVar(&flagConfig.PreauthKeyFile, "preauth-key-file", "", "path to a file containing the Headscale pre-auth key")
 	flag.StringVar(&flagConfig.OverlayHostname, "overlay-hostname", "", "hostname to register with Headscale (default: node name)")
-	flag.BoolVar(&flagConfig.UIDEnforcement, "uid-enforcement", false, "enforce Project UID ownership fencing (default: false, compatibility mode)")
 	flag.StringVar(&flagConfig.ReservedCPU, "reserved-cpu", "", "CPU held back from node capacity for the system (default: 500m)")
 	flag.StringVar(&flagConfig.ReservedMemory, "reserved-memory", "", "memory held back from node capacity for the system (default: 512Mi)")
+	flag.String(configFlag, "", configFlagUsage)
 	flag.Parse()
 	return configutil.Merge[AgentConfig](cfg, flagConfig)
 }

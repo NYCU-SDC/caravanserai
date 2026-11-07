@@ -7,8 +7,8 @@
 //     the project spec maps to exactly one container.
 //   - Container names follow the deterministic format "{project}-{service}",
 //     which allows idempotent reconciliation without persisting container IDs.
-//   - Ephemeral volumes are created as Docker named volumes and removed when
-//     RemoveProject is called.
+//   - Ephemeral volumes are created as Docker named volumes, labelled with the
+//     Project UID, and removed with the lifetime that created them.
 package docker
 
 import (
@@ -56,8 +56,8 @@ func (e *VolumeUnavailableError) Unwrap() error { return ErrRecoveryVolumeUnavai
 
 // ErrContainerNotOwned reports that the container found under a service's
 // deterministic name does not belong to the assignment being recovered: it
-// carries another Project's labels, or — with UID enforcement on — another
-// lifetime's UID or an earlier grant's assignment generation.
+// carries another Project's labels, another lifetime's UID, or an earlier
+// grant's assignment generation.
 //
 // Container names are derived from (project, service), so a name alone proves
 // nothing about ownership: a container left by generation 7 has exactly the
@@ -67,8 +67,8 @@ func (e *VolumeUnavailableError) Unwrap() error { return ErrRecoveryVolumeUnavai
 // recovery refuses both and leaves the container where it is.
 //
 // What removes it depends on which label differs. A container from a previous
-// lifetime carries another UID, so under UID enforcement the orphan sweep sees
-// it as another Project's and reclaims it. One left by an earlier grant of the
+// lifetime carries another UID, so the orphan sweep sees it as another
+// Project's and reclaims it. One left by an earlier grant of the
 // same lifetime carries the same UID, so the sweep sees the Project it still
 // has assigned here and leaves it; nothing reclaims such a container yet, and
 // until that is decided an operator has to remove it.
@@ -113,8 +113,7 @@ type StaleContainer struct {
 // UID is the immutable server-generated Project identity (CARA-82). It fences
 // ownership across Project lifetimes: a leftover container from a previous
 // lifetime of the same (namespace, name) carries a different UID, and a pre-UID
-// (legacy) container carries an empty UID. UID is empty for identities built in
-// compatibility mode, where ownership falls back to (namespace, name).
+// (legacy) container carries an empty UID.
 type ProjectIdentity struct {
 	Namespace string
 	Name      string
@@ -164,14 +163,6 @@ type Runtime interface {
 	// The network and any Ephemeral volumes are also created on demand.
 	ReconcileProject(ctx context.Context, project *v1.Project) error
 
-	// RemoveProject tears down all resources that were created for the project:
-	// containers (stop + remove), the bridge network, and Ephemeral volumes.
-	// Managed volume host directories are deliberately retained; their paths are
-	// logged so an operator can reclaim them. namespace is needed to locate
-	// those directories. It is safe to call even if the project was only
-	// partially created.
-	RemoveProject(ctx context.Context, namespace, projectName string, spec v1.ProjectSpec) error
-
 	// InspectProject returns the current state of every service container for
 	// the project.  If a container for a service does not exist yet, it is
 	// omitted from the returned slice (the caller can detect this by comparing
@@ -184,20 +175,23 @@ type Runtime interface {
 	// containers can be started again by StartProject.  Containers are stopped
 	// in reverse spec order, so a service is stopped before whatever it
 	// depends on.  Used by the backup flow, which needs the volumes quiesced
-	// but the containers intact.  Missing containers are not an error.
+	// but the containers intact.  Missing containers are not an error.  If any
+	// container belongs to another assignment, none is stopped and the error is
+	// ErrContainerNotOwned.
 	StopProject(ctx context.Context, project *v1.Project) error
 
 	// StartProject starts every existing service container in spec order,
 	// undoing StopProject.  It does not create missing containers — that is
-	// ReconcileProject's job.  Missing containers are not an error.
+	// ReconcileProject's job.  Missing containers are not an error.  If any
+	// container belongs to another assignment, none is started and the error is
+	// ErrContainerNotOwned.
 	StartProject(ctx context.Context, project *v1.Project) error
 
 	// RecoverServices puts the named services back, and touches nothing else.
 	//
 	// It exists because ReconcileProject cannot be used on a Project that is
-	// already serving traffic: when any step fails it rolls back by calling
-	// RemoveProject, which deletes every container, the network and the
-	// Ephemeral volumes. That is right for a Project being created — the
+	// already serving traffic: when any step fails it rolls back, deleting the
+	// assignment's containers, the network and the Ephemeral volumes. That is right for a Project being created — the
 	// rollback removes a half-built thing — and catastrophic for one being
 	// repaired, where a failure to recreate one container would take the
 	// healthy ones and their data with it.
@@ -215,8 +209,7 @@ type Runtime interface {
 	//
 	// Every existing container is checked against the assignment before it is
 	// started, removed, or counted as already recovered: the project, service
-	// and namespace labels always, and with UID enforcement on, the UID and
-	// assignment generation too. A container that fails the check is left
+	// and namespace labels, the UID, and the assignment generation. A container that fails the check is left
 	// exactly as it is and the call returns ErrContainerNotOwned.
 	//
 	// Because Docker creates a volume it cannot find — at start as readily as
@@ -287,9 +280,9 @@ type Runtime interface {
 	// project — containers, the bridge network, and named volumes — without
 	// needing its spec.
 	//
-	// RemoveProject cannot be used for an orphan: it derives volume handling
-	// from the spec, and the spec of a project the server no longer returns is
-	// exactly what the agent does not have. Working from labels alone also
+	// A spec-driven removal cannot be used for an orphan: the spec of a
+	// project the server no longer returns is exactly what the agent does not
+	// have. Working from labels alone also
 	// keeps Managed volume data safe by construction, because Managed volumes
 	// are host bind directories rather than Docker volumes and so are not
 	// reachable through a label filter at all.
