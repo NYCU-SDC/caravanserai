@@ -23,11 +23,8 @@ type SchedulerProjectStore interface {
 	// ListProjectNamesByPhase returns the names of all Projects in the given phase.
 	ListProjectNamesByPhase(ctx context.Context, phase v1.ProjectPhase) ([]string, error)
 
-	// GetProjectPhase returns the current phase and nodeRef of the named Project.
-	GetProjectPhase(ctx context.Context, name string) (v1.ProjectPhase, string, error)
-
 	// GetProjectPlacement returns what the scheduler needs to know about the
-	// named Project beyond its phase.
+	// named Project, its lifetime and phase included, from one read.
 	GetProjectPlacement(ctx context.Context, name string) (ProjectPlacement, error)
 
 	// CapacityProjectStore lets the scheduler's capacity ledger see what is
@@ -39,17 +36,28 @@ type SchedulerProjectStore interface {
 	// re-asserting the same Node on a Scheduled Project is a no-op. It returns
 	// ErrConflictState, writing nothing, for any other phase or Node, and
 	// while a cleanup obligation forbids a new assignment.
-	SetProjectScheduled(ctx context.Context, name, nodeRef string) error
+	//
+	// The write is pinned to uid, the lifetime the scheduler read: a same-name
+	// Project created since is refused with ErrStaleAssignment, writing
+	// nothing (CARA-81 stage 3).
+	SetProjectScheduled(ctx context.Context, name, uid, nodeRef string) error
 
 	// SetSchedulingBlocked records why a Pending Project could not be placed.
-	// It writes nothing for a Project no longer Pending, or when the reason has
-	// not changed.
-	SetSchedulingBlocked(ctx context.Context, name, reason, message string) error
+	// It writes nothing for a Project no longer Pending, for another lifetime
+	// than uid, or when the reason has not changed.
+	SetSchedulingBlocked(ctx context.Context, name, uid, reason, message string) error
 }
 
 // ProjectPlacement is what the scheduler needs to know about a Project to
 // choose a Node for it.
 type ProjectPlacement struct {
+	// UID is the lifetime the placement was read from; the assignment is
+	// written for it alone.
+	UID string
+
+	// Phase is the Project's phase at that read.
+	Phase v1.ProjectPhase
+
 	// Size is the declared size; empty when the Project declared none.
 	Size v1.ProjectSize
 
@@ -139,7 +147,9 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		return Result{}, nil
 	}
 
-	phase, _, err := c.projects.GetProjectPhase(ctx, name)
+	// One read gives the phase, the lifetime and what placement needs, so the
+	// assignment below is written for exactly the Project that was judged.
+	placement, err := c.projects.GetProjectPlacement(ctx, name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			log.Debug("Project not found, skipping")
@@ -148,8 +158,8 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		return Result{}, err
 	}
 
-	if phase != v1.ProjectPhasePending {
-		log.Debug("Project is not Pending, nothing to do", zap.String("phase", string(phase)))
+	if placement.Phase != v1.ProjectPhasePending {
+		log.Debug("Project is not Pending, nothing to do", zap.String("phase", string(placement.Phase)))
 		return Result{}, nil
 	}
 
@@ -160,17 +170,8 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 
 	if len(readyNodes) == 0 {
 		log.Warn("No Ready nodes available, will retry")
-		c.reportBlocked(ctx, log, name, "NoReadyNodes", "no Node is Ready")
+		c.reportBlocked(ctx, log, name, placement.UID, "NoReadyNodes", "no Node is Ready")
 		return Result{Requeue: true}, nil
-	}
-
-	placement, err := c.projects.GetProjectPlacement(ctx, name)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			log.Debug("Project not found, skipping")
-			return Result{}, nil
-		}
-		return Result{}, err
 	}
 
 	size := placement.Size
@@ -183,7 +184,7 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		log.Warn("No node can host the project, will retry",
 			zap.String("size", string(v1.ProjectSpec{Size: size}.EffectiveSize())),
 			zap.Strings("rejected", rejected))
-		c.reportBlocked(ctx, log, name, "NoSuitableNode", strings.Join(rejected, "; "))
+		c.reportBlocked(ctx, log, name, placement.UID, "NoSuitableNode", strings.Join(rejected, "; "))
 		return Result{Requeue: true}, nil
 	}
 
@@ -196,14 +197,20 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 		zap.Float64("score", score),
 		zap.Int("candidates", len(candidates)))
 
-	if err := c.projects.SetProjectScheduled(ctx, name, target); err != nil {
+	if err := c.projects.SetProjectScheduled(ctx, name, placement.UID, target); err != nil {
+		// Deleted and created again since the read: the new lifetime is
+		// judged on its own pass, and nothing is reported on it from this one.
+		if errors.Is(err, store.ErrStaleAssignment) {
+			log.Info("Project was recreated after it was read; not assigning it", zap.Error(err))
+			return Result{Requeue: true}, nil
+		}
 		// Refused, not failed: a previous Node still owes cleanup, or the
 		// Project left Pending after it was read. Neither clears by retrying
 		// now; the periodic resync of Pending Projects tries again later, and
 		// a Project no longer Pending is not listed by it.
 		if errors.Is(err, store.ErrConflictState) {
 			log.Info("Project not schedulable yet", zap.Error(err))
-			c.reportBlocked(ctx, log, name, "AssignmentRefused", err.Error())
+			c.reportBlocked(ctx, log, name, placement.UID, "AssignmentRefused", err.Error())
 			return Result{}, nil
 		}
 		return Result{}, err
@@ -216,8 +223,9 @@ func (c *ProjectSchedulerController) Reconcile(ctx context.Context, name string)
 // reportBlocked makes the reason visible on the Project. A failure only costs
 // the explanation, and the next attempt reports it again, so it does not fail
 // the reconcile.
-func (c *ProjectSchedulerController) reportBlocked(ctx context.Context, log *zap.Logger, name, reason, message string) {
-	if err := c.projects.SetSchedulingBlocked(ctx, name, reason, message); err != nil && !errors.Is(err, store.ErrNotFound) {
+func (c *ProjectSchedulerController) reportBlocked(ctx context.Context, log *zap.Logger, name, uid, reason, message string) {
+	if err := c.projects.SetSchedulingBlocked(ctx, name, uid, reason, message); err != nil &&
+		!errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrStaleAssignment) {
 		log.Warn("Failed to record why the project is not scheduled", zap.Error(err))
 	}
 }

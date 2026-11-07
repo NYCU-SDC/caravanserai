@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"NYCU-SDC/caravanserai/test/integration/testhelper"
 	"context"
 	"errors"
 	"fmt"
@@ -122,8 +123,8 @@ func TestAssignedSpecChangesAreRefused(t *testing.T) {
 		require.Equal(t, http.StatusOK, code)
 	})
 
-	require.NoError(t, projects.SetProjectScheduled(ctx, name, "node-a"))
-	require.NoError(t, projects.SetProjectPhase(ctx, name, v1.ProjectPhaseRunning, "Test", ""))
+	require.NoError(t, projects.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-a"))
+	require.NoError(t, testhelper.ForcePhase(ctx, suite.store, name, v1.ProjectPhaseRunning, "Test", ""))
 	before := getProject(t, name)
 	require.Equal(t, "node-a", before.Status.NodeRef)
 
@@ -169,7 +170,7 @@ func TestAssignedSpecChangesAreRefused(t *testing.T) {
 	})
 
 	t.Run("Failed with its nodeRef is still assigned", func(t *testing.T) {
-		require.NoError(t, projects.SetProjectPhase(ctx, name, v1.ProjectPhaseFailed, "Test", ""))
+		require.NoError(t, testhelper.ForcePhase(ctx, suite.store, name, v1.ProjectPhaseFailed, "Test", ""))
 		code, _ := putSpec(t, name, resize, v1.ObjectMeta{})
 		assert.Equal(t, http.StatusBadRequest, code)
 	})
