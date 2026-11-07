@@ -74,9 +74,14 @@ func (a *ProjectStoreAdapter) GetProjectPlacement(ctx context.Context, name stri
 	}
 	// A Node still owing cleanup is left out: SetProjectScheduled would refuse
 	// it, and choosing it would stall a Project another Node could host.
+	excluded := slices.Concat(project.Status.FailedNodes, project.Status.Recovery.NodesOwingCleanup())
+	// A Project being moved off a Node on purpose must not land back on it.
+	if e := project.Status.Eviction; e != nil && e.State == v1.EvictionStateMoving {
+		excluded = append(excluded, e.FromNode)
+	}
 	return controller.ProjectPlacement{
 		Size:          project.Spec.Size,
-		ExcludedNodes: slices.Concat(project.Status.FailedNodes, project.Status.Recovery.NodesOwingCleanup()),
+		ExcludedNodes: excluded,
 	}, nil
 }
 

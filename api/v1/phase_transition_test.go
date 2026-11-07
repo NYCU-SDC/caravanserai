@@ -11,7 +11,7 @@ import (
 func TestPhaseTransitionPolicy(t *testing.T) {
 	writers := []PhaseWriter{
 		WriterAdmission, WriterDeleteAPI, WriterScheduler, WriterRescheduler,
-		WriterFailedRescheduler, WriterOperatorTakeover, WriterAgent,
+		WriterFailedRescheduler, WriterEvictor, WriterOperatorTakeover, WriterAgent,
 	}
 	phases := []ProjectPhase{
 		"", ProjectPhasePending, ProjectPhaseScheduled, ProjectPhaseRunning,
@@ -32,6 +32,9 @@ func TestPhaseTransitionPolicy(t *testing.T) {
 		"Rescheduler: Running -> Pending":   true,
 
 		"FailedRescheduler: Failed -> Pending": true,
+
+		// A planned move only ever takes a Project that is running.
+		"Evictor: Running -> Pending": true,
 
 		"OperatorTakeover: Scheduled -> Pending": true,
 		"OperatorTakeover: Running -> Pending":   true,

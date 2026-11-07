@@ -166,6 +166,7 @@ func NewBackupSupport(
 
 	return &BackupSupport{
 		Supervisor:  backup.NewSupervisor(strategies, logger).WithHealthReporter(conditionReporter{client: client}),
+		Runner:      runner,
 		Coordinator: coordinator,
 		Restorer:    restorer,
 		DataRoot:    cfg.DataRoot,

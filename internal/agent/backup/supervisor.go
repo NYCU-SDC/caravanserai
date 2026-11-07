@@ -240,10 +240,17 @@ func backupFailingOn(project *v1.Project) bool {
 }
 
 // shouldSupervise reports whether a Project needs a backup goroutine: it must
-// be Running on this node, declare a backup policy, and have at least one
-// Managed volume to capture, offline or with PostgresDifferential.
+// be Running on this node, not in the middle of a planned move, declare a
+// backup policy, and have at least one Managed volume to capture, offline or
+// with PostgresDifferential.
 func shouldSupervise(p *v1.Project) bool {
 	if p.Status.Phase != v1.ProjectPhaseRunning {
+		return false
+	}
+	// A Project being moved off this node gets its fresh backup from the move
+	// itself. A periodic run now would restart the containers the move left
+	// stopped, and lose whatever is written before the Project leaves.
+	if e := p.Status.Eviction; e != nil && e.State == v1.EvictionStateBackingUp {
 		return false
 	}
 	if p.Spec.Backup == nil {

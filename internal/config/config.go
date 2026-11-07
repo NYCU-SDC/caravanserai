@@ -72,6 +72,9 @@ func (c *Config) Validate() error {
 	if c.RunningGracePeriod < 0 {
 		return errors.New("running_grace_period must not be negative")
 	}
+	if c.MaxInFlightEvictions < 0 {
+		return errors.New("max_inflight_evictions must not be negative")
+	}
 	return nil
 }
 

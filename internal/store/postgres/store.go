@@ -1429,6 +1429,10 @@ func copyProjectStatus(src v1.ProjectStatus) v1.ProjectStatus {
 	dst.Conditions = slices.Clone(src.Conditions)
 	dst.Recovery = src.Recovery.DeepCopy()
 	dst.FailedNodes = slices.Clone(src.FailedNodes)
+	if src.Eviction != nil {
+		e := *src.Eviction
+		dst.Eviction = &e
+	}
 	dst.Backup = src.Backup.DeepCopy()
 	return dst
 }

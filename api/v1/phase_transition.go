@@ -19,6 +19,10 @@ const (
 	// it can be moved to another Node. ADR-0016 calls it the Recovery
 	// Controller.
 	WriterFailedRescheduler PhaseWriter = "FailedRescheduler"
+	// WriterEvictor releases the assignment of a Running Project on a healthy
+	// Node for a planned move (drain, fail-back; CARA-119), once its Agent has
+	// taken a fresh backup and confirmed the workload stopped.
+	WriterEvictor PhaseWriter = "Evictor"
 	// WriterOperatorTakeover releases the assignment of a Project whose Node
 	// will not report back, on an operator's audited override.
 	WriterOperatorTakeover PhaseWriter = "OperatorTakeover"
@@ -64,6 +68,9 @@ var phaseTransitions = map[PhaseWriter]map[phaseTransition]bool{
 	},
 	WriterFailedRescheduler: {
 		{ProjectPhaseFailed, ProjectPhasePending}: true,
+	},
+	WriterEvictor: {
+		{ProjectPhaseRunning, ProjectPhasePending}: true,
 	},
 	WriterOperatorTakeover: {
 		{ProjectPhaseScheduled, ProjectPhasePending}: true,

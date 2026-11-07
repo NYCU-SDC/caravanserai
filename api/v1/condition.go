@@ -206,6 +206,18 @@ const (
 	// stops at the last WAL segment that reached the repository, so the message
 	// is the only place that says how much was recovered.
 	ConditionTypeDataRestored ConditionType = "DataRestored"
+	// ConditionTypeEvictionBackup is how the agent reports the fresh backup a
+	// planned move asked for: True when it is committed and the Project has
+	// been left stopped for the move, False when it failed and the Project
+	// was started again where it is. Written by the agent; cleared by the
+	// server whenever a move starts or ends.
+	ConditionTypeEvictionBackup ConditionType = "EvictionBackup"
+
+	// ConditionTypeEvictionFailed is True on a Project whose planned move was
+	// abandoned: no other Node had room, the backup failed, the agent never
+	// started it, or the Project could not be placed afterwards. The Reason
+	// says which. It is cleared when another move is asked for.
+	ConditionTypeEvictionFailed ConditionType = "EvictionFailed"
 
 	// ConditionTypeDiskPressure indicates whether the node's disk usage is
 	// approaching capacity. Set by the NodeConditionController based on
