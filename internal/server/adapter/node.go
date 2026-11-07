@@ -120,7 +120,9 @@ func (a *NodeReadyAdapter) ListReadyNodes(ctx context.Context) ([]controller.Rea
 	}
 	var ready []controller.ReadyNode
 	for _, n := range nodes {
-		if n.Status.State == v1.NodeStateReady && !n.Spec.Unschedulable {
+		// A Node being drained takes no new Projects even if it was not
+		// cordoned as well.
+		if n.Status.State == v1.NodeStateReady && !n.Spec.Unschedulable && !n.Spec.Drain {
 			ready = append(ready, controller.ReadyNode{
 				Name:        n.Name,
 				Labels:      n.Labels,

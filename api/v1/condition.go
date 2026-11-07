@@ -213,6 +213,11 @@ const (
 	// server whenever a move starts or ends.
 	ConditionTypeEvictionBackup ConditionType = "EvictionBackup"
 
+	// ConditionTypeNodeDrainIncomplete is True on a Node being drained while
+	// at least one Project cannot leave it without help. The message lists
+	// them and why; Status.Drain carries the same list.
+	ConditionTypeNodeDrainIncomplete ConditionType = "NodeDrainIncomplete"
+
 	// ConditionTypeEvictionFailed is True on a Project whose planned move was
 	// abandoned: no other Node had room, the backup failed, the agent never
 	// started it, or the Project could not be placed afterwards. The Reason

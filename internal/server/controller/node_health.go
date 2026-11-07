@@ -103,11 +103,6 @@ func (c *NodeHealthController) Reconcile(ctx context.Context, name string) (Resu
 	age := c.clock.Since(snap.LastHeartbeat)
 
 	switch {
-	case snap.State == v1.NodeStateDraining:
-		// Draining is an admin-set state; the health controller does not touch it.
-		log.Debug("Node is draining, skipping health check")
-		return Result{}, nil
-
 	case age > NodeHeartbeatTimeout && snap.State != v1.NodeStateNotReady:
 		log.Info("Node heartbeat timed out, marking NotReady",
 			zap.Duration("age", age),

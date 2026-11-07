@@ -132,6 +132,12 @@ func describeNode(w io.Writer, node *v1.Node) {
 	fmt.Fprintln(w, "Spec:")
 	printField(w, "  Hostname", stringOrNone(node.Spec.Hostname))
 	printField(w, "  Unschedulable", fmt.Sprintf("%t", node.Spec.Unschedulable))
+	printField(w, "  Drain", describeNodeDrain(node.Spec, node.Status.Drain))
+	if d := node.Status.Drain; d != nil {
+		for _, b := range d.Blocking {
+			fmt.Fprintf(w, "    - %s\n", b)
+		}
+	}
 
 	// Status
 	fmt.Fprintln(w)

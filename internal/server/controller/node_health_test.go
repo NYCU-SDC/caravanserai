@@ -60,7 +60,10 @@ func TestNodeHealthReconcile(t *testing.T) {
 		assert.Empty(t, s.SetNodeStateCalls, "should not call SetNodeState when already NotReady")
 	})
 
-	t.Run("Draining node is skipped regardless of heartbeat", func(t *testing.T) {
+	t.Run("a Node in the legacy Draining state still goes NotReady when its heartbeat stops", func(t *testing.T) {
+		// Draining is a request on the spec now (CARA-120). A node being
+		// drained that dies must still be marked NotReady, or nothing would
+		// ever fail its Projects over.
 		clk := newFakeClock()
 		s := newFakeNodeStore()
 		s.nodes["node-1"] = NodeStatusSnapshot{
@@ -69,10 +72,10 @@ func TestNodeHealthReconcile(t *testing.T) {
 		}
 		ctrl := NewNodeHealthController(zap.NewNop(), s, nil, WithClock(clk))
 
-		res, err := ctrl.Reconcile(context.Background(), "node-1")
+		_, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
-		assert.False(t, res.Requeue)
-		assert.Empty(t, s.SetNodeStateCalls, "should not touch Draining nodes")
+		require.Len(t, s.SetNodeStateCalls, 1)
+		assert.Equal(t, v1.NodeStateNotReady, s.SetNodeStateCalls[0].State)
 	})
 
 	t.Run("recovered heartbeat transitions back to Ready", func(t *testing.T) {
