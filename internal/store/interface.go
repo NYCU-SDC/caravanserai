@@ -462,8 +462,8 @@ type ProjectStore interface {
 	// labels, annotations). When the spec's content changed it increments
 	// metadata.specRevision and sets SpecApplied False in the same write; the
 	// rest of the status is preserved, except that the retry budget starts
-	// over. The update is only allowed when the project's current phase is
-	// Pending or Failed. Returns ErrConflictState for another phase, for a
+	// over. The update is allowed while the Project is Pending, Scheduled,
+	// Running or Failed. Returns ErrConflictState for another phase, for a
 	// change of backup items, and, while the Project is assigned to a Node,
 	// for a change v1.CheckAssignedSpecChange refuses; ErrNotFound if it does
 	// not exist. On success project.SpecRevision and ResourceVersion hold the

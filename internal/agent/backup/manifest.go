@@ -79,10 +79,12 @@ type Manifest struct {
 	// SourceNode is the node that produced this generation, for operator
 	// diagnosis; restore does not depend on it.
 	SourceNode string `json:"sourceNode"`
-	// ProjectResourceVersion pins the Project spec revision the volumes were
-	// captured under, so an operator inspecting an old generation can tell
-	// whether the spec has since changed.
-	ProjectResourceVersion int64 `json:"projectResourceVersion"`
+	// ProjectSpecRevision is the Project's metadata.specRevision when the
+	// volumes were captured, so an operator inspecting an old generation can
+	// tell whether the spec has since changed. It used to record the
+	// resourceVersion, which moves on every status write; a manifest written
+	// then has zero here.
+	ProjectSpecRevision int64 `json:"projectSpecRevision"`
 
 	CaraVersion  string `json:"caraVersion"`
 	BackupMethod string `json:"backupMethod"`
@@ -94,18 +96,18 @@ type Manifest struct {
 // no I/O and does not itself enforce "only after every volume succeeded" —
 // the caller (BackupManager) must only call this once every VolumeManifestEntry
 // it collected represents a verified upload.
-func BuildManifest(backupID, namespace, project, sourceNode, caraVersion string, projectResourceVersion int64, now time.Time, volumes []VolumeManifestEntry) Manifest {
+func BuildManifest(backupID, namespace, project, sourceNode, caraVersion string, projectSpecRevision int64, now time.Time, volumes []VolumeManifestEntry) Manifest {
 	return Manifest{
-		FormatVersion:          formatVersion,
-		BackupID:               backupID,
-		Namespace:              namespace,
-		Project:                project,
-		CreatedAt:              now.UTC(),
-		SourceNode:             sourceNode,
-		ProjectResourceVersion: projectResourceVersion,
-		CaraVersion:            caraVersion,
-		BackupMethod:           backupMethod,
-		Volumes:                volumes,
+		FormatVersion:       formatVersion,
+		BackupID:            backupID,
+		Namespace:           namespace,
+		Project:             project,
+		CreatedAt:           now.UTC(),
+		SourceNode:          sourceNode,
+		ProjectSpecRevision: projectSpecRevision,
+		CaraVersion:         caraVersion,
+		BackupMethod:        backupMethod,
+		Volumes:             volumes,
 	}
 }
 

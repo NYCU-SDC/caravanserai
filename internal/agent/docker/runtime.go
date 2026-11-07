@@ -287,4 +287,18 @@ type Runtime interface {
 	// are host bind directories rather than Docker volumes and so are not
 	// reachable through a label filter at all.
 	RemoveOrphanProject(ctx context.Context, project ProjectIdentity) error
+
+	// SpecDrift compares the Project's containers on this Node with its spec
+	// (ADR-0026): which services' containers were built from another
+	// configuration, which have no container, and which containers belong to
+	// services no longer in the spec. It reports only on containers of the
+	// current assignment and fails with ErrContainerNotOwned when a service's
+	// name is held by another assignment's container.
+	SpecDrift(ctx context.Context, project *v1.Project) (SpecDrift, error)
+
+	// UpdateServices brings the containers in drift to the spec of project,
+	// whose Secret references are already resolved. It pulls every image it
+	// needs before it stops anything; a failed pull wraps ErrImagePull and
+	// leaves the old containers running.
+	UpdateServices(ctx context.Context, project *v1.Project, drift SpecDrift) error
 }

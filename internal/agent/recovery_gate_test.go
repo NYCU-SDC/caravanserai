@@ -68,6 +68,16 @@ type gateServer struct {
 	// completionStatus, when non-zero, is the response to it.
 	completions      []completionPut
 	completionStatus int
+
+	// specApplied records every spec-applied PUT, in order.
+	specApplied []specAppliedRequest
+}
+
+// specReports returns the spec-applied reports received so far.
+func (gs *gateServer) specReports() []specAppliedRequest {
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+	return append([]specAppliedRequest(nil), gs.specApplied...)
 }
 
 type completionPut struct {
@@ -216,6 +226,18 @@ func newGateServer(t *testing.T, current *v1.Project) (*gateServer, *Client) {
 			http.Error(w, "injected", gs.completionStatus)
 			return
 		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("PUT /api/v1/projects/{name}/status/spec-applied", func(w http.ResponseWriter, r *http.Request) {
+		var req specAppliedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		gs.mu.Lock()
+		gs.specApplied = append(gs.specApplied, req)
+		gs.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
 
