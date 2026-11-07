@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 
@@ -213,4 +214,21 @@ func withoutSetup(mutations []string) []string {
 		out = append(out, m)
 	}
 	return out
+}
+
+func TestRolloutRestartChangesEveryServiceHash(t *testing.T) {
+	svc, spec := hashSpec()
+	other := v1.ServiceDef{Name: "api", Image: "api:1"}
+	spec.Services = append(spec.Services, other)
+	before := []string{ServiceSpecHash(svc, spec), ServiceSpecHash(other, spec)}
+
+	at := time.Date(2026, 11, 7, 15, 0, 0, 0, time.UTC)
+	spec.RestartedAt = &at
+	after := []string{ServiceSpecHash(svc, spec), ServiceSpecHash(other, spec)}
+	assert.NotEqual(t, before[0], after[0])
+	assert.NotEqual(t, before[1], after[1])
+
+	later := at.Add(time.Second)
+	spec.RestartedAt = &later
+	assert.NotEqual(t, after[0], ServiceSpecHash(svc, spec), "each restart is a new hash")
 }

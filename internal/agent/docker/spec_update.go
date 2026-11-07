@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 
@@ -38,6 +39,9 @@ type serviceHashInput struct {
 	Command []string       `json:"command,omitempty"`
 	Env     []envHashInput `json:"env,omitempty"`
 	Mounts  []mountHash    `json:"volumeMounts,omitempty"`
+	// RestartedAt is spec.restartedAt, shared by every service: a rollout
+	// restart changes every hash.
+	RestartedAt string `json:"restartedAt,omitempty"`
 }
 
 // envHashInput names a Secret by reference, never by value: a value's hash in
@@ -69,6 +73,9 @@ func ServiceSpecHash(svc v1.ServiceDef, spec v1.ProjectSpec) string {
 		types[vol.Name] = vol.Type
 	}
 	in := serviceHashInput{Image: svc.Image, Command: svc.Command}
+	if spec.RestartedAt != nil {
+		in.RestartedAt = spec.RestartedAt.UTC().Format(time.RFC3339Nano)
+	}
 	for _, e := range svc.Env {
 		h := envHashInput{Name: e.Name}
 		if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {

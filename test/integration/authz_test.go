@@ -108,6 +108,8 @@ func TestNodeAuthorization(t *testing.T) {
 		// And its own report still works.
 		assert.Equal(t, http.StatusNoContent, status(bearerA, http.MethodPatch, "/api/v1/projects/"+projA+"/status",
 			fence(a, nodeA, map[string]any{"phase": "Running"})))
+		// Restarting a Project is a user's decision, even its own Project's.
+		assert.Equal(t, http.StatusForbidden, status(bearerA, http.MethodPost, "/api/v1/projects/"+projA+"/restart", nil))
 	})
 
 	t.Run("a Node sees only its own Projects", func(t *testing.T) {

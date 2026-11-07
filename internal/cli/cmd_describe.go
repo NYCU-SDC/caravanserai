@@ -219,6 +219,9 @@ func describeProject(w io.Writer, project *v1.Project) {
 
 	// Size
 	printField(w, "  Size", describeProjectSize(project.Spec))
+	if project.Spec.RestartedAt != nil {
+		printField(w, "  Restarted", formatTimestamp(*project.Spec.RestartedAt))
+	}
 
 	// Services
 	fmt.Fprintln(w, "  Services:")

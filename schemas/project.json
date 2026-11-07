@@ -563,6 +563,11 @@
           "type": "string",
           "format": "date-time",
           "description": "ExpireAt, when set, causes the GC controller to delete the Project\nafter this time. Useful for ephemeral preview environments."
+        },
+        "restartedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RestartedAt is when `caractl rollout restart` last asked for every\nservice to be recreated. It is part of every service's spec hash, so a\nnew value recreates them all; that is how a rotated Secret reaches the\ncontainers (ADR-0026). An update that leaves it out keeps the stored\nvalue, so applying a manifest after a restart does not restart again."
         }
       },
       "additionalProperties": false,
