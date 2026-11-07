@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"NYCU-SDC/caravanserai/test/integration/testhelper"
 	"context"
 	"net/http"
 	"strings"
@@ -54,7 +55,7 @@ func TestNodeAuthorization(t *testing.T) {
 		}))
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
 		drainBody(resp)
-		require.NoError(t, sched.SetProjectScheduled(ctx, name, node))
+		require.NoError(t, sched.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), node))
 		t.Cleanup(func() { drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+name+"?force=true", nil)) })
 		return getProject(t, name)
 	}

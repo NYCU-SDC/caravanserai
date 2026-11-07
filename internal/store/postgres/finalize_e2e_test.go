@@ -192,7 +192,7 @@ func TestImmediateDeletionRacesFirstAssignment(t *testing.T) {
 	require.Empty(t, v1.ImmediateDeletionBlocker(p), "the API's read must nominate it for direct deletion")
 
 	// The first assignment commits between the API's read and its delete.
-	require.NoError(t, adapter.NewProjectStoreAdapter(s).SetProjectScheduled(ctx, p.Name, "node-a"))
+	require.NoError(t, adapter.NewProjectStoreAdapter(s).SetProjectScheduled(ctx, p.Name, p.ObjectMeta.UID, "node-a"))
 
 	err := s.FinalizeProject(ctx, p.Name, p.ObjectMeta.UID, v1.ImmediateDeletionBlocker)
 
