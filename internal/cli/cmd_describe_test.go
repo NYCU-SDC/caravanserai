@@ -83,6 +83,8 @@ var describeNodeCoveredFields = newStringSet(
 	"UID",
 	"Namespace",
 	"ResourceVersion",
+	// Always zero on a Node; not printed.
+	"SpecRevision",
 	"Labels",
 	"Annotations",
 	"CreatedAt",
@@ -122,6 +124,7 @@ var describeProjectCoveredFields = newStringSet(
 	"UID",
 	"Namespace",
 	"ResourceVersion",
+	"SpecRevision",
 	"Labels",
 	"Annotations",
 	"CreatedAt",
@@ -140,6 +143,7 @@ var describeProjectCoveredFields = newStringSet(
 	"Status.NodeRef",
 	"Status.FailedNodes",
 	"Status.AssignmentGeneration",
+	"Status.ObservedSpecRevision",
 	"Status.AssignmentHistory",
 	"Status.Recovery.CleanupObligations",
 	"Status.Recovery.HealthySinceGeneration",
@@ -170,6 +174,8 @@ var describeSecretCoveredFields = newStringSet(
 	"UID",
 	"Namespace",
 	"ResourceVersion",
+	// Always zero on a Secret; not printed.
+	"SpecRevision",
 	"Labels",
 	"Annotations",
 	"CreatedAt",

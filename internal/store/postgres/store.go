@@ -442,8 +442,8 @@ func (s *Store) CreateProject(ctx context.Context, project *v1.Project) error {
 	}
 
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO resources (kind, name, namespace, uid, phase, spec, status, labels, annotations, created_at, updated_at, resource_version)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1)`,
+		INSERT INTO resources (kind, name, namespace, uid, phase, spec, status, labels, annotations, created_at, updated_at, resource_version, spec_revision)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, 1)`,
 		kindProject, project.Name, project.ObjectMeta.Namespace, project.ObjectMeta.UID, string(project.Status.Phase),
 		spec, status, labels, annotations,
 		now, now,
@@ -455,6 +455,7 @@ func (s *Store) CreateProject(ctx context.Context, project *v1.Project) error {
 		return fmt.Errorf("postgres: create project %q: %w", project.Name, err)
 	}
 	project.ObjectMeta.ResourceVersion = 1
+	project.ObjectMeta.SpecRevision = 1
 	s.publish(event.TopicProjectCreated, project.Name)
 	return nil
 }
@@ -478,7 +479,7 @@ type rowQuerier interface {
 // transaction ends.
 func readProject(ctx context.Context, q rowQuerier, name, lock string) (*v1.Project, error) {
 	row := q.QueryRow(ctx, `
-		SELECT namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT namespace, uid, resource_version, spec_revision, spec, status, labels, annotations, created_at, updated_at
 		FROM resources
 		WHERE kind = $1 AND namespace = $2 AND name = $3 `+lock,
 		kindProject, defaultNamespace, name,
@@ -486,11 +487,11 @@ func readProject(ctx context.Context, q rowQuerier, name, lock string) (*v1.Proj
 
 	var (
 		namespace, uid                                string
-		resourceVersion                               int64
+		resourceVersion, specRevision                 int64
 		rawSpec, rawStatus, rawLabels, rawAnnotations []byte
 		createdAt, updatedAt                          time.Time
 	)
-	if err := row.Scan(&namespace, &uid, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&namespace, &uid, &resourceVersion, &specRevision, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
@@ -501,7 +502,7 @@ func readProject(ctx context.Context, q rowQuerier, name, lock string) (*v1.Proj
 		TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindProject},
 		ObjectMeta: v1.ObjectMeta{
 			Name: name, UID: uid, Namespace: namespace, ResourceVersion: resourceVersion,
-			CreatedAt: createdAt, UpdatedAt: updatedAt,
+			SpecRevision: specRevision, CreatedAt: createdAt, UpdatedAt: updatedAt,
 		},
 	}
 	if err := unmarshalFields(name, rawSpec, &project.Spec, rawStatus, &project.Status, rawLabels, &project.Labels, rawAnnotations, &project.Annotations); err != nil {
@@ -513,7 +514,7 @@ func readProject(ctx context.Context, q rowQuerier, name, lock string) (*v1.Proj
 // ListProjects implements store.ProjectStore.
 func (s *Store) ListProjects(ctx context.Context) ([]*v1.Project, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, uid, resource_version, spec_revision, spec, status, labels, annotations, created_at, updated_at
 		FROM resources WHERE kind = $1 AND namespace = $2`, kindProject, defaultNamespace)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list projects: %w", err)
@@ -527,7 +528,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]*v1.Project, error) {
 // Uses the promoted phase column + idx_resources_kind_phase index.
 func (s *Store) ListProjectsByPhase(ctx context.Context, phase v1.ProjectPhase) ([]*v1.Project, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, uid, resource_version, spec_revision, spec, status, labels, annotations, created_at, updated_at
 		FROM resources WHERE kind = $1 AND namespace = $2 AND phase = $3`,
 		kindProject, defaultNamespace, string(phase),
 	)
@@ -553,7 +554,7 @@ func (s *Store) ListProjectsByPhases(ctx context.Context, phases []v1.ProjectPha
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, uid, resource_version, spec_revision, spec, status, labels, annotations, created_at, updated_at
 		FROM resources WHERE kind = $1 AND namespace = $2 AND phase = ANY($3)`,
 		kindProject, defaultNamespace, phaseStrings,
 	)
@@ -581,7 +582,7 @@ func (s *Store) ListProjectsByNodeRef(ctx context.Context, nodeRef string, phase
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, uid, resource_version, spec_revision, spec, status, labels, annotations, created_at, updated_at
 		FROM resources
 		WHERE kind = $1 AND namespace = $2 AND phase = ANY($3) AND status->>'nodeRef' = $4`,
 		kindProject, defaultNamespace, phaseStrings, nodeRef,
@@ -602,7 +603,7 @@ func (s *Store) ListProjectsByNodeRef(ctx context.Context, nodeRef string, phase
 // rather than being split between SQL and Go.
 func (s *Store) ListProjectsOwingCleanup(ctx context.Context, nodeName string) ([]*v1.Project, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
+		SELECT name, namespace, uid, resource_version, spec_revision, spec, status, labels, annotations, created_at, updated_at
 		FROM resources
 		WHERE kind = $1 AND namespace = $2
 		  AND status->'recovery'->'cleanupObligations' @> jsonb_build_array(
@@ -878,6 +879,21 @@ func (s *Store) ReportProjectStatusFenced(
 	ref store.AssignmentRef,
 	mutate func(*v1.ProjectStatus) error,
 ) error {
+	return s.reportProjectStatusFenced(ctx, name, ref, func(_ v1.ObjectMeta, status *v1.ProjectStatus) error {
+		return mutate(status)
+	})
+}
+
+// reportProjectStatusFenced is ReportProjectStatusFenced for a mutation that
+// also reads the metadata of the snapshot it changes. The swap is guarded by
+// resource_version, which every spec update bumps, so the metadata cannot
+// move between the read and the write.
+func (s *Store) reportProjectStatusFenced(
+	ctx context.Context,
+	name string,
+	ref store.AssignmentRef,
+	mutate func(v1.ObjectMeta, *v1.ProjectStatus) error,
+) error {
 	var lastConflict error
 
 	for attempt := 0; attempt < maxStatusUpdateAttempts; attempt++ {
@@ -897,7 +913,7 @@ func (s *Store) ReportProjectStatusFenced(
 
 		current := project.Status
 		next := copyProjectStatus(current)
-		if err := mutate(&next); err != nil {
+		if err := mutate(project.ObjectMeta, &next); err != nil {
 			return err
 		}
 
@@ -1594,10 +1610,13 @@ func retryProjectStatusUpdate(
 }
 
 // UpdateProjectSpec implements store.ProjectStore.
-// Only the spec, labels, annotations, and updated_at columns are written;
-// status and phase are untouched. The update is only allowed when the
-// project's current phase is Pending or Failed; returns ErrConflictState
-// otherwise.
+//
+// It writes spec, labels and annotations, and bumps metadata.specRevision
+// when the spec's content changed. The checks and the write run in one
+// transaction holding the row, so a concurrent update, assignment or status
+// write cannot slip between them: the phase, the backup items and, for an
+// assigned Project, the fields ADR-0026 freezes are checked against the row
+// that is written.
 func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) error {
 	now := time.Now().UTC()
 	if project.ObjectMeta.Namespace == "" {
@@ -1616,53 +1635,138 @@ func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) erro
 	if err != nil {
 		return fmt.Errorf("postgres: marshal project annotations: %w", err)
 	}
-	// Backup items are fixed at creation. Comparing them inside the UPDATE,
-	// rather than only in the handler beforehand, is what keeps two concurrent
-	// updates from changing a strategy between one's check and the other's
-	// write. NULL on both sides means neither has items.
-	var items any
-	if project.Spec.Backup != nil && len(project.Spec.Backup.Items) > 0 {
-		if items, err = json.Marshal(project.Spec.Backup.Items); err != nil {
-			return fmt.Errorf("postgres: marshal project backup items: %w", err)
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin update project spec %q: %w", project.Name, err)
+	}
+	// A no-op once Commit has succeeded.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	current, err := readProject(ctx, tx, project.Name, "FOR UPDATE")
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%w: project %q", store.ErrNotFound, project.Name)
+		}
+		return err
+	}
+	if !slices.Contains(specUpdatablePhases, current.Status.Phase) {
+		return fmt.Errorf("%w: project %q is not in Pending or Failed phase", store.ErrConflictState, project.Name)
+	}
+	if !v1.SameBackupItems(current.Spec, project.Spec) {
+		return fmt.Errorf("%w: project %q: spec.backup.items cannot change after the Project is created",
+			store.ErrConflictState, project.Name)
+	}
+	if current.Status.NodeRef != "" {
+		if refusal := v1.CheckAssignedSpecChange(current.Spec, project.Spec); refusal != nil {
+			return fmt.Errorf("%w: project %q: %s", store.ErrConflictState, project.Name, refusal)
 		}
 	}
+
+	// Compared as this code encodes both, so a field an older server stored
+	// differently, or a key order, is not a change.
+	oldSpec, err := json.Marshal(current.Spec)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal stored project spec: %w", err)
+	}
+	specChanged := !bytes.Equal(oldSpec, spec)
 
 	// Applying a Project again starts its retry budget over: whoever applies it
 	// has seen it fail and may have fixed what was wrong, so the nodes it failed
 	// on are no longer ruled out and the moves it spent are given back. The
 	// exhausted marker goes with them, or a Project that can be retried would
 	// still read as one that cannot.
-	tag, err := s.pool.Exec(ctx, `
+	status := copyProjectStatus(current.Status)
+	status.FailedNodes = nil
+	status.Conditions = v1.RemoveConditions(status.Conditions, v1.ConditionTypeRescheduleExhausted)
+
+	revision := current.ObjectMeta.SpecRevision
+	if specChanged {
+		revision++
+		// Said in the same write that changes the spec, so no reader sees the
+		// new revision next to a SpecApplied that still vouches for the old.
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypeSpecApplied,
+			Status:             v1.ConditionFalse,
+			Reason:             v1.ReasonSpecUpdatePending,
+			Message:            fmt.Sprintf("spec revision %d is not running yet", revision),
+			LastTransitionTime: now,
+		}, true)
+	}
+	rawStatus, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal project status: %w", err)
+	}
+
+	err = tx.QueryRow(ctx, `
 		UPDATE resources
-		SET spec = $1, labels = $2, annotations = $3, updated_at = $4, resource_version = resource_version + 1,
-		    status = (status - 'failedNodes') || jsonb_build_object('conditions',
-		        COALESCE((SELECT jsonb_agg(c) FROM jsonb_array_elements(COALESCE(status->'conditions', '[]'::jsonb)) c
-		                  WHERE c->>'type' <> $9), '[]'::jsonb))
-		WHERE kind = $5 AND namespace = $6 AND name = $7 AND phase = ANY($8)
-		  AND spec->'backup'->'items' IS NOT DISTINCT FROM $10::jsonb`,
-		spec, labels, annotations, now, kindProject, project.ObjectMeta.Namespace, project.Name,
-		[]string{string(v1.ProjectPhasePending), string(v1.ProjectPhaseFailed)},
-		string(v1.ConditionTypeRescheduleExhausted),
-		items,
-	)
+		SET spec = $1, labels = $2, annotations = $3, status = $4, spec_revision = $5,
+		    updated_at = $6, resource_version = resource_version + 1
+		WHERE kind = $7 AND namespace = $8 AND name = $9
+		RETURNING resource_version`,
+		spec, labels, annotations, rawStatus, revision, now,
+		kindProject, current.ObjectMeta.Namespace, project.Name,
+	).Scan(&project.ObjectMeta.ResourceVersion)
 	if err != nil {
 		return fmt.Errorf("postgres: update project spec %q: %w", project.Name, err)
 	}
-	if tag.RowsAffected() == 0 {
-		// Distinguish "not found", "items changed" and "wrong phase".
-		current, getErr := s.getProject(ctx, project.Name)
-		if getErr != nil {
-			return fmt.Errorf("%w: project %q", store.ErrNotFound, project.Name)
-		}
-		if !v1.SameBackupItems(current.Spec, project.Spec) {
-			return fmt.Errorf("%w: project %q: spec.backup.items cannot change after the Project is created",
-				store.ErrConflictState, project.Name)
-		}
-		return fmt.Errorf("%w: project %q is not in Pending or Failed phase", store.ErrConflictState, project.Name)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit update project spec %q: %w", project.Name, err)
 	}
+	project.ObjectMeta.SpecRevision = revision
 	s.publish(event.TopicProjectUpdated, project.Name)
 	return nil
 }
+
+// RecordSpecApplied implements store.ProjectStore.
+func (s *Store) RecordSpecApplied(ctx context.Context, name string, ref store.AssignmentRef, report store.SpecAppliedReport) error {
+	return s.reportProjectStatusFenced(ctx, name, ref, func(meta v1.ObjectMeta, status *v1.ProjectStatus) error {
+		switch status.Phase {
+		case v1.ProjectPhaseScheduled, v1.ProjectPhaseRunning, v1.ProjectPhaseFailed:
+		default:
+			return fmt.Errorf("%w: project %q is %s; only an assigned, live Project reports its spec",
+				store.ErrConflictState, name, status.Phase)
+		}
+		if report.Revision > meta.SpecRevision {
+			return fmt.Errorf("%w: project %q: spec revision %d is newer than the Project's %d",
+				store.ErrConflictState, name, report.Revision, meta.SpecRevision)
+		}
+		if report.Applied && report.Revision > status.ObservedSpecRevision {
+			status.ObservedSpecRevision = report.Revision
+		}
+		// A report about a revision that has since been superseded says nothing
+		// about the latest one, so the condition stays as the newer update set it.
+		if report.Revision != meta.SpecRevision {
+			return nil
+		}
+		cond := v1.Condition{
+			Type:               v1.ConditionTypeSpecApplied,
+			Status:             v1.ConditionFalse,
+			Reason:             report.Reason,
+			Message:            report.Message,
+			LastTransitionTime: report.At,
+		}
+		if report.Applied {
+			cond.Status = v1.ConditionTrue
+			cond.Reason = v1.ReasonSpecApplied
+			cond.Message = fmt.Sprintf("spec revision %d runs on every service", report.Revision)
+		}
+		transitioned := true
+		for _, c := range status.Conditions {
+			if c.Type == v1.ConditionTypeSpecApplied {
+				transitioned = c.Status != cond.Status
+			}
+		}
+		status.Conditions = v1.UpsertCondition(status.Conditions, cond, transitioned)
+		return nil
+	})
+}
+
+// specUpdatablePhases are the phases in which UpdateProjectSpec accepts a
+// spec. Scheduled and Running join once the Agent recreates outdated
+// containers (CARA-134 stage 2); accepting them before would answer an update
+// with success while the containers keep running the old spec.
+var specUpdatablePhases = []v1.ProjectPhase{v1.ProjectPhasePending, v1.ProjectPhaseFailed}
 
 // ============================================================
 // SecretStore
@@ -1857,18 +1961,18 @@ func scanProjects(rows pgx.Rows) ([]*v1.Project, error) {
 	for rows.Next() {
 		var (
 			name, namespace, uid                          string
-			resourceVersion                               int64
+			resourceVersion, specRevision                 int64
 			rawSpec, rawStatus, rawLabels, rawAnnotations []byte
 			createdAt, updatedAt                          time.Time
 		)
-		if err := rows.Scan(&name, &namespace, &uid, &resourceVersion, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&name, &namespace, &uid, &resourceVersion, &specRevision, &rawSpec, &rawStatus, &rawLabels, &rawAnnotations, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("postgres: scan project row: %w", err)
 		}
 		project := &v1.Project{
 			TypeMeta: v1.TypeMeta{APIVersion: v1.APIVersion, Kind: kindProject},
 			ObjectMeta: v1.ObjectMeta{
 				Name: name, UID: uid, Namespace: namespace, ResourceVersion: resourceVersion,
-				CreatedAt: createdAt, UpdatedAt: updatedAt,
+				SpecRevision: specRevision, CreatedAt: createdAt, UpdatedAt: updatedAt,
 			},
 		}
 		if err := unmarshalFields(name, rawSpec, &project.Spec, rawStatus, &project.Status, rawLabels, &project.Labels, rawAnnotations, &project.Annotations); err != nil {

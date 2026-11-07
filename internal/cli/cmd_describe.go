@@ -204,6 +204,7 @@ func describeProject(w io.Writer, project *v1.Project) {
 	printField(w, "Namespace", stringOrNone(project.Namespace))
 	printField(w, "Kind", project.Kind)
 	printField(w, "Resource Version", fmt.Sprintf("%d", project.ResourceVersion))
+	printField(w, "Spec Revision", fmt.Sprintf("%d", project.SpecRevision))
 	printField(w, "Created", formatTimestamp(project.CreatedAt))
 
 	// Labels
@@ -321,6 +322,7 @@ func describeProject(w io.Writer, project *v1.Project) {
 	printField(w, "  Node", stringOrNone(project.Status.NodeRef))
 	printField(w, "  Failed Nodes", stringOrNone(strings.Join(project.Status.FailedNodes, ", ")))
 	printField(w, "  Assignment Generation", fmt.Sprintf("%d", project.Status.AssignmentGeneration))
+	printField(w, "  Observed Spec Revision", fmt.Sprintf("%d", project.Status.ObservedSpecRevision))
 	printField(w, "  Assignment History", stringOrNone(string(project.Status.AssignmentHistory)))
 	if b := project.Status.Backup; b != nil && len(b.Stanzas) > 0 {
 		names := make([]string, 0, len(b.Stanzas))
