@@ -18,6 +18,7 @@ import (
 //	caractl node set-tier <name> primary|backup
 //	caractl node token create <name> [--ttl 1h]
 //	caractl node revoke <name>
+//	caractl node cordon|uncordon|drain <name>
 //
 // Additional node subcommands can be added over time; the tree is intentionally
 // separate from `get nodes` / `describe nodes` because those are read-only
@@ -32,6 +33,9 @@ func NewNodeCmd() *cobra.Command {
 	cmd.AddCommand(newNodeSetTierCmd())
 	cmd.AddCommand(newNodeTokenCmd())
 	cmd.AddCommand(newNodeRevokeCmd())
+	cmd.AddCommand(newNodeCordonCmd())
+	cmd.AddCommand(newNodeUncordonCmd())
+	cmd.AddCommand(newNodeDrainCmd())
 	return cmd
 }
 

@@ -35,6 +35,23 @@ A physical or virtual machine running `cara-agent`. Nodes self-register with
 the control plane on startup. The Scheduler only assigns work to nodes whose
 state is `Ready`.
 
+To take a node out of service:
+
+```bash
+caractl node cordon pve1     # take no new projects; the ones there keep running
+caractl node drain pve1      # cordon, and move every project off it
+caractl describe node pve1   # Drain: Draining | Incomplete (lists why) | Drained
+caractl node uncordon pve1   # take projects again, calling off any drain
+```
+
+A drain moves each project with a planned move: stopped, backed up first if it
+has Managed data, and placed on another node, so nothing written before the
+move is lost. `Drained` means nothing is assigned to the node and it has
+cleaned up after the projects that left; it can be powered off. A project that
+cannot leave without help — a Failed one, one with a `PostgresDifferential`
+volume, one with nowhere to go — is listed under `Incomplete`; a move that
+failed only for want of room is asked for again every 5 minutes.
+
 ### Project
 A workload definition — a set of containers (services) that must be
 co-located on a single node. Services share a Docker bridge network and
@@ -373,7 +390,7 @@ The agent calls `POST /api/v1/nodes/{name}/join` with the join token as its bear
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/v1/nodes` | Register a node. A Node token may register only its own name (403 otherwise) |
-| `PUT` | `/api/v1/nodes/{name}` | Update a node's spec and labels. The `cara.io/tier` label must be `primary` or `backup` (an unlabeled node is treated as `backup`); `POST` validates it too. Set it with `caractl node set-tier <name> primary\|backup`. |
+| `PUT` | `/api/v1/nodes/{name}` | Update a node's spec and labels. `spec.unschedulable` cordons it and `spec.drain` drains it (`caractl node cordon\|drain\|uncordon <name>`). The `cara.io/tier` label must be `primary` or `backup` (an unlabeled node is treated as `backup`); `POST` validates it too. Set it with `caractl node set-tier <name> primary\|backup`. |
 | `GET` | `/api/v1/nodes` | List all nodes |
 | `GET` | `/api/v1/nodes/{name}` | Get a single node |
 | `DELETE` | `/api/v1/nodes/{name}` | Delete a node |

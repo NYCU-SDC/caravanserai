@@ -90,6 +90,10 @@ var describeNodeCoveredFields = newStringSet(
 	// Spec
 	"Spec.Hostname",
 	"Spec.Unschedulable",
+	"Spec.Drain",
+	"Status.Drain.Phase",
+	"Status.Drain.Remaining",
+	"Status.Drain.Blocking",
 	// Status
 	"Status.State",
 	"Status.LastHeartbeat",

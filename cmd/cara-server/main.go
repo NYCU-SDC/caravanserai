@@ -249,6 +249,10 @@ func main() {
 	if maxInFlightEvictions == 0 {
 		maxInFlightEvictions = controller.DefaultMaxInFlightEvictions
 	}
+	ctrlManager.Add(controller.NewDrainController(logger,
+		adapter.NewDrainStoreAdapter(pgStore),
+		eventBus,
+	))
 	ctrlManager.Add(controller.NewEvictionController(logger,
 		projectAdapter,
 		adapter.NewNodeReadyAdapter(pgStore),
