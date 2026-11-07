@@ -109,7 +109,7 @@ func (p *Printer) printProjectTable(projects []v1.Project) error {
 		if node == "" {
 			node = "<none>"
 		}
-		conditions := latestConditionReason(proj.Status.Conditions)
+		conditions := conditionSummary(proj.Status.Conditions)
 		age := humanAge(proj.CreatedAt)
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", name, phase, node, conditions, age)
 	}
@@ -186,13 +186,28 @@ func (p *Printer) printSecretTable(secrets []v1.Secret) error {
 	return w.Flush()
 }
 
-// latestConditionReason returns the Reason of the last condition in the slice,
-// or "-" if there are none.
-func latestConditionReason(conditions []v1.Condition) string {
+// conditionSummary returns the Phase condition's Reason, falling back to the
+// most recently transitioned condition when Phase is absent. Ties favor the
+// lexicographically smallest Type. No conditions or an empty Reason yield "-".
+func conditionSummary(conditions []v1.Condition) string {
 	if len(conditions) == 0 {
 		return "-"
 	}
-	return conditions[len(conditions)-1].Reason
+	selected := conditions[0]
+	for _, condition := range conditions {
+		if condition.Type == v1.ConditionTypePhase {
+			selected = condition
+			break
+		}
+		if condition.LastTransitionTime.After(selected.LastTransitionTime) ||
+			(condition.LastTransitionTime.Equal(selected.LastTransitionTime) && condition.Type < selected.Type) {
+			selected = condition
+		}
+	}
+	if selected.Reason == "" {
+		return "-"
+	}
+	return selected.Reason
 }
 
 // printNodeTable writes a human-readable table with columns:
