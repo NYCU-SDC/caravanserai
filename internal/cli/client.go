@@ -375,6 +375,28 @@ func (c *Client) GetProject(ctx context.Context, name string) (v1.Project, error
 	return project, nil
 }
 
+// RestartProject asks the server to recreate every service of a project and
+// returns the project as stored.
+func (c *Client) RestartProject(ctx context.Context, name string) (v1.Project, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/projects/"+name+"/restart", nil)
+	if err != nil {
+		return v1.Project{}, fmt.Errorf("build request: %w", err)
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return v1.Project{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkStatus(resp); err != nil {
+		return v1.Project{}, err
+	}
+	var project v1.Project
+	if err := json.NewDecoder(resp.Body).Decode(&project); err != nil {
+		return v1.Project{}, fmt.Errorf("decode response: %w", err)
+	}
+	return project, nil
+}
+
 // DeleteProject removes a project by name.
 // It returns (true, nil) when the project was deleted immediately (204 No Content)
 // and (false, nil) when the project has been marked for graceful termination

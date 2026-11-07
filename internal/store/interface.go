@@ -470,6 +470,12 @@ type ProjectStore interface {
 	// stored values.
 	UpdateProjectSpec(ctx context.Context, project *v1.Project) error
 
+	// RestartProject sets spec.restartedAt to at, which changes the spec
+	// hash of every service, so the Agent recreates them all (`caractl rollout
+	// restart`, ADR-0026). It goes through the same transaction and phase
+	// check as UpdateProjectSpec and returns the stored Project.
+	RestartProject(ctx context.Context, name string, at time.Time) (*v1.Project, error)
+
 	// RecordSpecApplied is the assigned Agent's report on a spec revision,
 	// through the same fence as ReportProjectStatusFenced. An applied report
 	// raises status.observedSpecRevision (it never goes back); a report about

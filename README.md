@@ -387,8 +387,11 @@ The agent calls `POST /api/v1/nodes/{name}/join` with the join token as its bear
 | `POST` | `/api/v1/projects` | Create a project |
 | `GET` | `/api/v1/projects` | List projects (`?phase=`, `?nodeRef=`) |
 | `GET` | `/api/v1/projects/{name}` | Get a single project |
+| `PUT` | `/api/v1/projects/{name}` | Replace a project's spec; a Running or Scheduled project's agent recreates only the services that changed (ADR-0026). While assigned, `size`, removing a volume, a volume's type and `backup.items` cannot change |
 | `DELETE` | `/api/v1/projects/{name}` | Delete a project |
 | `PATCH` | `/api/v1/projects/{name}/status` | Update project status (agent only) |
+| `PUT` | `/api/v1/projects/{name}/status/spec-applied` | Report whether a spec revision runs (currently assigned agent only; requires the assignment fence) |
+| `POST` | `/api/v1/projects/{name}/restart` | Recreate every service by recording `spec.restartedAt` (users only; `caractl rollout restart`) |
 | `PUT` | `/api/v1/projects/{name}/recovery/workload-stopped` | Record that every container is stopped (currently assigned agent only; requires the assignment fence) |
 | `PUT` | `/api/v1/projects/{name}/recovery/managed-data-quarantined` | Record that local Managed data left the active path (the obligation's agent only) |
 | `PUT` | `/api/v1/projects/{name}/recovery/committed-backup` | Make a backup generation the restore source (currently assigned agent only; requires the assignment fence) |

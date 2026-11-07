@@ -1618,56 +1618,94 @@ func retryProjectStatusUpdate(
 // assigned Project, the fields ADR-0026 freezes are checked against the row
 // that is written.
 func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) error {
-	now := time.Now().UTC()
-	if project.ObjectMeta.Namespace == "" {
-		project.ObjectMeta.Namespace = defaultNamespace
+	stored, err := s.changeSpec(ctx, project.Name, func(current *v1.Project) (*v1.Project, error) {
+		if !v1.SameBackupItems(current.Spec, project.Spec) {
+			return nil, fmt.Errorf("%w: project %q: spec.backup.items cannot change after the Project is created",
+				store.ErrConflictState, project.Name)
+		}
+		if current.Status.NodeRef != "" {
+			if refusal := v1.CheckAssignedSpecChange(current.Spec, project.Spec); refusal != nil {
+				return nil, fmt.Errorf("%w: project %q: %s", store.ErrConflictState, project.Name, refusal)
+			}
+		}
+		next := *current
+		next.Spec = project.Spec
+		next.Labels = project.Labels
+		next.Annotations = project.Annotations
+		// A manifest does not carry the last rollout restart; dropping it would
+		// recreate every container again on the next apply.
+		if next.Spec.RestartedAt == nil {
+			next.Spec.RestartedAt = current.Spec.RestartedAt
+		}
+		return &next, nil
+	})
+	if err != nil {
+		return err
 	}
+	project.ObjectMeta.Namespace = stored.ObjectMeta.Namespace
+	project.ObjectMeta.ResourceVersion = stored.ObjectMeta.ResourceVersion
+	project.ObjectMeta.SpecRevision = stored.ObjectMeta.SpecRevision
+	project.Spec.RestartedAt = stored.Spec.RestartedAt
+	return nil
+}
 
-	spec, err := json.Marshal(project.Spec)
-	if err != nil {
-		return fmt.Errorf("postgres: marshal project spec: %w", err)
-	}
-	labels, err := json.Marshal(project.Labels)
-	if err != nil {
-		return fmt.Errorf("postgres: marshal project labels: %w", err)
-	}
-	annotations, err := json.Marshal(project.Annotations)
-	if err != nil {
-		return fmt.Errorf("postgres: marshal project annotations: %w", err)
-	}
+// RestartProject implements store.ProjectStore.
+func (s *Store) RestartProject(ctx context.Context, name string, at time.Time) (*v1.Project, error) {
+	return s.changeSpec(ctx, name, func(current *v1.Project) (*v1.Project, error) {
+		next := *current
+		at := at.UTC()
+		next.Spec.RestartedAt = &at
+		return &next, nil
+	})
+}
+
+// changeSpec writes the spec, labels and annotations change returns for the
+// Project, and bumps metadata.specRevision when the spec's content changed.
+// The read, change's checks and the write run in one transaction holding the
+// row, so a concurrent update, assignment or status write cannot slip between
+// them. It returns the Project as stored.
+func (s *Store) changeSpec(ctx context.Context, name string, change func(current *v1.Project) (*v1.Project, error)) (*v1.Project, error) {
+	now := time.Now().UTC()
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("postgres: begin update project spec %q: %w", project.Name, err)
+		return nil, fmt.Errorf("postgres: begin update project spec %q: %w", name, err)
 	}
 	// A no-op once Commit has succeeded.
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	current, err := readProject(ctx, tx, project.Name, "FOR UPDATE")
+	current, err := readProject(ctx, tx, name, "FOR UPDATE")
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%w: project %q", store.ErrNotFound, project.Name)
+			return nil, fmt.Errorf("%w: project %q", store.ErrNotFound, name)
 		}
-		return err
+		return nil, err
 	}
 	if !slices.Contains(specUpdatablePhases, current.Status.Phase) {
-		return fmt.Errorf("%w: project %q is %s; its spec can no longer change", store.ErrConflictState, project.Name, current.Status.Phase)
+		return nil, fmt.Errorf("%w: project %q is %s; its spec can no longer change", store.ErrConflictState, name, current.Status.Phase)
 	}
-	if !v1.SameBackupItems(current.Spec, project.Spec) {
-		return fmt.Errorf("%w: project %q: spec.backup.items cannot change after the Project is created",
-			store.ErrConflictState, project.Name)
-	}
-	if current.Status.NodeRef != "" {
-		if refusal := v1.CheckAssignedSpecChange(current.Spec, project.Spec); refusal != nil {
-			return fmt.Errorf("%w: project %q: %s", store.ErrConflictState, project.Name, refusal)
-		}
+	next, err := change(current)
+	if err != nil {
+		return nil, err
 	}
 
+	spec, err := json.Marshal(next.Spec)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: marshal project spec: %w", err)
+	}
+	labels, err := json.Marshal(next.Labels)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: marshal project labels: %w", err)
+	}
+	annotations, err := json.Marshal(next.Annotations)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: marshal project annotations: %w", err)
+	}
 	// Compared as this code encodes both, so a field an older server stored
 	// differently, or a key order, is not a change.
 	oldSpec, err := json.Marshal(current.Spec)
 	if err != nil {
-		return fmt.Errorf("postgres: marshal stored project spec: %w", err)
+		return nil, fmt.Errorf("postgres: marshal stored project spec: %w", err)
 	}
 	specChanged := !bytes.Equal(oldSpec, spec)
 
@@ -1695,9 +1733,13 @@ func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) erro
 	}
 	rawStatus, err := json.Marshal(status)
 	if err != nil {
-		return fmt.Errorf("postgres: marshal project status: %w", err)
+		return nil, fmt.Errorf("postgres: marshal project status: %w", err)
 	}
 
+	stored := *next
+	stored.Status = status
+	stored.ObjectMeta.SpecRevision = revision
+	stored.ObjectMeta.UpdatedAt = now
 	err = tx.QueryRow(ctx, `
 		UPDATE resources
 		SET spec = $1, labels = $2, annotations = $3, status = $4, spec_revision = $5,
@@ -1705,17 +1747,16 @@ func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) erro
 		WHERE kind = $7 AND namespace = $8 AND name = $9
 		RETURNING resource_version`,
 		spec, labels, annotations, rawStatus, revision, now,
-		kindProject, current.ObjectMeta.Namespace, project.Name,
-	).Scan(&project.ObjectMeta.ResourceVersion)
+		kindProject, current.ObjectMeta.Namespace, name,
+	).Scan(&stored.ObjectMeta.ResourceVersion)
 	if err != nil {
-		return fmt.Errorf("postgres: update project spec %q: %w", project.Name, err)
+		return nil, fmt.Errorf("postgres: update project spec %q: %w", name, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("postgres: commit update project spec %q: %w", project.Name, err)
+		return nil, fmt.Errorf("postgres: commit update project spec %q: %w", name, err)
 	}
-	project.ObjectMeta.SpecRevision = revision
-	s.publish(event.TopicProjectUpdated, project.Name)
-	return nil
+	s.publish(event.TopicProjectUpdated, name)
+	return &stored, nil
 }
 
 // RecordSpecApplied implements store.ProjectStore.

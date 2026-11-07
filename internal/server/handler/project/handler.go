@@ -4,6 +4,7 @@
 //
 //	POST   /api/v1/projects                  — create a Project
 //	PUT    /api/v1/projects/{name}           — update a Project's spec
+//	POST   /api/v1/projects/{name}/restart   — recreate every service (rollout restart)
 //	GET    /api/v1/projects                  — list Projects (supports ?phase= and ?nodeRef= filters)
 //	GET    /api/v1/projects/{name}           — get a single Project
 //	DELETE /api/v1/projects/{name}           — delete a Project (supports ?force=true for immediate hard-delete)
@@ -89,6 +90,7 @@ func WithPostgresDifferentialImage(ref string) Option {
 func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("POST /api/v1/projects", mid.HandlerFunc(h.createProject))
 	mux.HandleFunc("PUT /api/v1/projects/{name}", mid.HandlerFunc(h.updateProject))
+	mux.HandleFunc("POST /api/v1/projects/{name}/restart", mid.HandlerFunc(h.restartProject))
 	mux.HandleFunc("GET /api/v1/projects", mid.HandlerFunc(h.listProjects))
 	mux.HandleFunc("GET /api/v1/projects/{name}", mid.HandlerFunc(h.getProject))
 	mux.HandleFunc("DELETE /api/v1/projects/{name}", mid.HandlerFunc(h.deleteProject))
@@ -606,6 +608,36 @@ func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	handlerutil.WriteJSONResponse(w, http.StatusOK, updated)
+}
+
+// restartProject handles POST /api/v1/projects/{name}/restart.
+//
+// It records the time in spec.restartedAt, inside the same transaction an
+// update uses, so every service's spec hash changes and the Agent recreates
+// them. This is how a rotated Secret reaches the containers. Doing it server
+// side keeps it from racing an apply the way a read-modify-write would.
+func (h *Handler) restartProject(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "restartProject")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	project, err := h.store.RestartProject(traceCtx, name, time.Now())
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		}
+		if !errors.Is(err, store.ErrConflictState) {
+			logger.Error("RestartProject failed", zap.String("name", name), zap.Error(err))
+		}
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+	logger.Info("Project restart requested", zap.String("project", name), zap.Int64("specRevision", project.SpecRevision))
+	project.TypeMeta = v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"}
+	handlerutil.WriteJSONResponse(w, http.StatusOK, project)
 }
 
 // listProjects handles GET /api/v1/projects.

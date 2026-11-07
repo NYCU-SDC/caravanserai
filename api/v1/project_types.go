@@ -527,6 +527,13 @@ type ProjectSpec struct {
 	// ExpireAt, when set, causes the GC controller to delete the Project
 	// after this time. Useful for ephemeral preview environments.
 	ExpireAt *time.Time `json:"expireAt,omitempty" yaml:"expireAt,omitempty"`
+
+	// RestartedAt is when `caractl rollout restart` last asked for every
+	// service to be recreated. It is part of every service's spec hash, so a
+	// new value recreates them all; that is how a rotated Secret reaches the
+	// containers (ADR-0026). An update that leaves it out keeps the stored
+	// value, so applying a manifest after a restart does not restart again.
+	RestartedAt *time.Time `json:"restartedAt,omitempty" yaml:"restartedAt,omitempty"`
 }
 
 // EffectiveSize returns the declared Size, or DefaultProjectSize when none was

@@ -138,6 +138,7 @@ var describeProjectCoveredFields = newStringSet(
 	"Spec.Backup.Items",
 	"Spec.Ingress",
 	"Spec.ExpireAt",
+	"Spec.RestartedAt",
 	// Status
 	"Status.Phase",
 	"Status.NodeRef",
