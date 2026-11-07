@@ -60,6 +60,20 @@ type gateServer struct {
 	// Each one is also applied to current, so the next GET sees it the way a
 	// real server's would — which is what the dedupe tests depend on.
 	conditionWrites []conditionWrite
+
+	// stanzas records the volume of every stanza PUT, in order.
+	stanzas []string
+
+	// completions records every backup completion PUT, in order;
+	// completionStatus, when non-zero, is the response to it.
+	completions      []completionPut
+	completionStatus int
+}
+
+type completionPut struct {
+	BackupID string
+	Fence    AssignmentFence
+	Items    []v1.BackupCompletionItem
 }
 
 type conditionWrite struct {
@@ -169,6 +183,39 @@ func newGateServer(t *testing.T, current *v1.Project) (*gateServer, *Client) {
 			UID: r.URL.Query().Get("uid"), NodeRef: r.URL.Query().Get("nodeRef"),
 		})
 		gs.current.Status.Conditions = withoutCondition(gs.current.Status.Conditions, condType)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("PUT /api/v1/projects/{name}/backup/stanzas", func(w http.ResponseWriter, r *http.Request) {
+		var req stanzaRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		gs.mu.Lock()
+		gs.stanzas = append(gs.stanzas, req.Volume)
+		gs.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("PUT /api/v1/projects/{name}/backup/completions/{backupID}", func(w http.ResponseWriter, r *http.Request) {
+		var req completionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		gs.mu.Lock()
+		defer gs.mu.Unlock()
+		put := completionPut{BackupID: r.PathValue("backupID"), Items: req.Items,
+			Fence: AssignmentFence{UID: req.UID, NodeRef: req.NodeRef}}
+		if req.AssignmentGeneration != nil {
+			put.Fence.Generation = *req.AssignmentGeneration
+		}
+		gs.completions = append(gs.completions, put)
+		if gs.completionStatus != 0 {
+			http.Error(w, "injected", gs.completionStatus)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 

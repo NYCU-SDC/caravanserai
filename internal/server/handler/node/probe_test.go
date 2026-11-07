@@ -55,6 +55,10 @@ func (fakeNodeStore) UpdateNodeStatus(context.Context, string, v1.NodeStatus) er
 
 type fakeProjectLister struct{}
 
+func (fakeProjectLister) ListProjectsOwingCleanup(context.Context, string) ([]*v1.Project, error) {
+	return nil, nil
+}
+
 func (fakeProjectLister) ListProjectsByNodeRef(context.Context, string, []v1.ProjectPhase) ([]*v1.Project, error) {
 	return nil, nil
 }

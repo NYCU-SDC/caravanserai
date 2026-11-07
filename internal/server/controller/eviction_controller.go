@@ -60,15 +60,26 @@ type EvictionRequester interface {
 
 // EvictionSnapshot is the view of a Project with a planned move in progress.
 type EvictionSnapshot struct {
-	Name        string
-	Phase       v1.ProjectPhase
-	NodeRef     string
-	Size        v1.ProjectSize
-	FailedNodes []string
+	Name                 string
+	UID                  string
+	Phase                v1.ProjectPhase
+	NodeRef              string
+	AssignmentGeneration int64
+	Size                 v1.ProjectSize
+	FailedNodes          []string
+
+	// WorkloadStopped reports whether the Agent of the current assignment
+	// has confirmed the workload stopped, which is what lets the move release
+	// the assignment.
+	WorkloadStopped bool
 
 	// HasManagedVolumes reports whether the Project has data the move must
 	// carry, which is what the fresh backup is for.
 	HasManagedVolumes bool
+
+	// HasPostgresDifferential reports whether a Managed volume is backed up
+	// with PostgresDifferential, which a move cannot take a fresh backup of.
+	HasPostgresDifferential bool
 
 	Eviction   v1.ProjectEviction
 	Conditions []v1.Condition
@@ -86,6 +97,11 @@ const (
 	EvictionFailedBackupFailed     = "BackupFailed"
 	EvictionFailedAgentDidNotStart = "AgentDidNotStart"
 	EvictionFailedNotPlaced        = "NotPlaced"
+
+	// EvictionFailedUnsupportedBackupStrategy: the Project has a
+	// PostgresDifferential volume. A move takes an offline backup, and moving
+	// without a fresh one would lose what was written since the last.
+	EvictionFailedUnsupportedBackupStrategy = "UnsupportedBackupStrategy"
 )
 
 // EvictionStore is the store surface needed by EvictionController.
@@ -103,10 +119,12 @@ type EvictionStore interface {
 	// Running on fromNode.
 	StartEvictionBackup(ctx context.Context, name, fromNode string) error
 
-	// MoveEvictedProject returns the Project to Pending off fromNode, with
-	// message as the reason shown. It does nothing unless the Project is
-	// still Running on fromNode.
-	MoveEvictedProject(ctx context.Context, name, fromNode, message string) error
+	// MoveEvictedProject releases the assignment the snapshot holds, returning
+	// the Project to Pending, with message as the reason shown. It reports
+	// whether it did: it does nothing unless the Project is still Running on
+	// the source Node under the same generation and its Agent has confirmed the
+	// workload stopped.
+	MoveEvictedProject(ctx context.Context, e *EvictionSnapshot, message string) (bool, error)
 
 	// EndEviction clears the move; a non-nil failure records why it was
 	// abandoned.
@@ -246,6 +264,11 @@ func (c *EvictionController) Reconcile(ctx context.Context, _ string) (Result, e
 // could take the Project, starts it. It reports whether the move now holds a
 // slot.
 func (c *EvictionController) start(ctx context.Context, log *zap.Logger, e *EvictionSnapshot) (bool, error) {
+	if e.HasPostgresDifferential {
+		return false, c.raiseEvictionFailedAlert(ctx, log, e, EvictionFailedUnsupportedBackupStrategy,
+			"A planned move cannot yet take a fresh backup of a PostgresDifferential volume; the project stays where it is")
+	}
+
 	nodes, err := c.nodes.ListReadyNodes(ctx)
 	if err != nil {
 		return false, err
@@ -263,33 +286,52 @@ func (c *EvictionController) start(ctx context.Context, log *zap.Logger, e *Evic
 		return false, c.raiseEvictionFailedAlert(ctx, log, e, EvictionFailedNoCapacity, message)
 	}
 
-	if !e.HasManagedVolumes {
-		log.Info("Moving project with no data to carry")
-		return true, ignoreNotFound(c.projects.MoveEvictedProject(ctx, e.Name, e.Eviction.FromNode, moveMessage(e, "it has no Managed volume")))
-	}
-
-	log.Info("Starting planned move: asking the agent for a fresh backup")
+	// Every Project is stopped by its Agent before it is released, data or
+	// not: the release gate requires the Agent's word that the workload
+	// stopped, so the old copy cannot run beside the new one. A Project with
+	// Managed data is also backed up while it is stopped.
+	log.Info("Starting planned move: asking the agent to stop the project",
+		zap.Bool("freshBackup", e.HasManagedVolumes))
 	return true, ignoreNotFound(c.projects.StartEvictionBackup(ctx, e.Name, e.Eviction.FromNode))
 }
 
-// reconcileBackingUp waits for the agent's backup result and moves the Project
-// once the backup is committed. It reports whether the move still holds a slot.
+// reconcileBackingUp waits for the Agent to stop the Project — and to commit
+// the fresh backup, when it has Managed data — and releases it once the Agent
+// has confirmed the workload stopped. It reports whether the move still holds
+// a slot.
 func (c *EvictionController) reconcileBackingUp(ctx context.Context, log *zap.Logger, e *EvictionSnapshot) (bool, error) {
 	if !onSourceNode(e) {
 		return false, c.abandonQuietly(ctx, log, e)
 	}
 
-	if result, ok := evictionBackupResult(e); ok {
-		if result.Status == v1.ConditionTrue {
-			log.Info("Fresh backup committed, returning project to Pending", zap.String("backup", result.Message))
-			err := c.projects.MoveEvictedProject(ctx, e.Name, e.Eviction.FromNode, moveMessage(e, "restored from backup "+result.Message))
-			return true, ignoreNotFound(err)
-		}
+	result, reported := evictionBackupResult(e)
+	if reported && result.Status != v1.ConditionTrue && !e.WorkloadStopped {
 		return false, c.raiseEvictionFailedAlert(ctx, log, e, EvictionFailedBackupFailed,
-			"The fresh backup failed and the project was started again where it is: "+result.Message)
+			"The project could not be stopped and backed up for the move, and was started again where it is: "+result.Message)
 	}
 
-	started := v1.IsMaintenanceActive(e.Conditions, c.clock.Now())
+	// The stop evidence is what the release rests on. Once it is recorded the
+	// Agent will not start this generation again, so the move must go on
+	// even if its own report was lost.
+	if e.WorkloadStopped {
+		how := "it has no Managed volume"
+		if e.HasManagedVolumes {
+			how = "restored from its fresh backup"
+			if reported && result.Message != "" {
+				how = "restored from backup " + result.Message
+			}
+		}
+		moved, err := c.projects.MoveEvictedProject(ctx, e, moveMessage(e, how))
+		if err != nil {
+			return true, ignoreNotFound(err)
+		}
+		if moved {
+			log.Info("Project stopped on its node; released for the scheduler to place elsewhere")
+		}
+		return true, nil
+	}
+
+	started := v1.IsMaintenanceActive(e.Conditions, c.clock.Now()) || reported
 	if waited := c.clock.Since(e.Eviction.StateSince); !started && waited >= evictionStartTimeout {
 		return false, c.raiseEvictionFailedAlert(ctx, log, e, EvictionFailedAgentDidNotStart,
 			fmt.Sprintf("The agent on node %q did not start the fresh backup within %s", e.Eviction.FromNode, evictionStartTimeout))

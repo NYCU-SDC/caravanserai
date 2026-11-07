@@ -60,6 +60,7 @@ func TestBlockedPlacementReportsAConditionNotFailure(t *testing.T) {
 		Restorer:    restore.NewRestorer(missingStore{}, restore.Config{DataRoot: dataRoot, NodeName: gateNode}, zap.NewNop()),
 		DataRoot:    dataRoot,
 		NodeName:    gateNode,
+		ObjectStore: true,
 	}
 
 	logs, logger := recordedLogger()
@@ -119,8 +120,9 @@ func TestBlockedPlacementConvergesOnceTheCauseIsCleared(t *testing.T) {
 		Coordinator: backup.NewCoordinator(),
 		Restorer: restore.NewRestorer(missingStore{},
 			restore.Config{DataRoot: dataRoot, NodeName: gateNode}, zap.NewNop()),
-		DataRoot: dataRoot,
-		NodeName: gateNode,
+		DataRoot:    dataRoot,
+		NodeName:    gateNode,
+		ObjectStore: true,
 	}
 
 	// Tick 1: unproven bytes on disk.

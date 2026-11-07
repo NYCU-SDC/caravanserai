@@ -29,7 +29,7 @@ func TestBuildBinds(t *testing.T) {
 			},
 		}
 
-		binds, managed, err := r.buildBinds("default", "blog", svc, vols)
+		binds, managed, err := r.buildBinds("default", "blog", "uid-1", svc, v1.ProjectSpec{Volumes: vols})
 		require.NoError(t, err)
 		assert.Equal(t, []string{
 			"/var/lib/cara/volumes/default/blog/db-data/data:/var/lib/postgresql/data",
@@ -45,7 +45,7 @@ func TestBuildBinds(t *testing.T) {
 			},
 		}
 
-		binds, managed, err := r.buildBinds("default", "blog", svc, vols)
+		binds, managed, err := r.buildBinds("default", "blog", "uid-1", svc, v1.ProjectSpec{Volumes: vols})
 		require.NoError(t, err)
 		// Named volume, not a host path — the pre-fix behaviour for Ephemeral.
 		assert.Equal(t, []string{"cara-blog-scratch:/scratch"}, binds)
@@ -61,7 +61,7 @@ func TestBuildBinds(t *testing.T) {
 			},
 		}
 
-		binds, managed, err := r.buildBinds("default", "blog", svc, vols)
+		binds, managed, err := r.buildBinds("default", "blog", "uid-1", svc, v1.ProjectSpec{Volumes: vols})
 		require.NoError(t, err)
 		assert.Equal(t, []string{
 			"/var/lib/cara/volumes/default/blog/db-data/data:/data",
@@ -78,12 +78,12 @@ func TestBuildBinds(t *testing.T) {
 			},
 		}
 
-		_, _, err := r.buildBinds("default", "blog", svc, vols)
+		_, _, err := r.buildBinds("default", "blog", "uid-1", svc, v1.ProjectSpec{Volumes: vols})
 		assert.ErrorContains(t, err, "undeclared volume")
 	})
 
 	t.Run("no mounts yields no binds", func(t *testing.T) {
-		binds, managed, err := r.buildBinds("default", "blog", v1.ServiceDef{Name: "web"}, vols)
+		binds, managed, err := r.buildBinds("default", "blog", "uid-1", v1.ServiceDef{Name: "web"}, v1.ProjectSpec{Volumes: vols})
 		require.NoError(t, err)
 		assert.Empty(t, binds)
 		assert.Empty(t, managed)
@@ -251,8 +251,7 @@ func TestContainerOwnershipFilters_IncludeUIDWhenPresent(t *testing.T) {
 		"cara.uid=uid-1",
 	}, withUID)
 
-	// Compatibility mode: no UID in the identity means no UID filter, matching
-	// pre-CARA-82 behaviour.
+	// A legacy identity has no UID, so there is no UID filter.
 	noUID := containerOwnershipFilters(ProjectIdentity{Namespace: "team-a", Name: "payments"}).Get("label")
 	assert.ElementsMatch(t, []string{
 		"cara.project=payments",
@@ -270,38 +269,30 @@ func TestResourceOwnershipFilters_IncludeUIDWhenPresent(t *testing.T) {
 	}, withUID)
 }
 
-// CARA-82: UID fencing on network adoption. When enforcing, an existing network
-// must carry the current Project's UID; a different or missing value is refused.
-// When not enforcing, UID is ignored so mixed-rollout networks keep working.
+// CARA-82: UID fencing on network adoption. An existing network must carry the
+// current Project's UID; a different or missing value is refused.
 func TestValidateNetworkOwnership_UID(t *testing.T) {
 	project := ProjectIdentity{Namespace: "team-a", Name: "payments", UID: "uid-new"}
 
 	tests := []struct {
-		name       string
-		enforceUID bool
-		labels     map[string]string
-		wantErr    bool
+		name    string
+		labels  map[string]string
+		wantErr bool
 	}{
-		{name: "enforce: matching UID", enforceUID: true, labels: map[string]string{
+		{name: "matching UID", labels: map[string]string{
 			labelProject: "payments", labelNamespace: "team-a", labelUID: "uid-new",
 		}},
-		{name: "enforce: different UID rejected", enforceUID: true, labels: map[string]string{
+		{name: "different UID rejected", labels: map[string]string{
 			labelProject: "payments", labelNamespace: "team-a", labelUID: "uid-old",
 		}, wantErr: true},
-		{name: "enforce: legacy missing UID rejected", enforceUID: true, labels: map[string]string{
+		{name: "legacy missing UID rejected", labels: map[string]string{
 			labelProject: "payments", labelNamespace: "team-a",
 		}, wantErr: true},
-		{name: "compat: different UID tolerated", enforceUID: false, labels: map[string]string{
-			labelProject: "payments", labelNamespace: "team-a", labelUID: "uid-old",
-		}},
-		{name: "compat: legacy missing UID tolerated", enforceUID: false, labels: map[string]string{
-			labelProject: "payments", labelNamespace: "team-a",
-		}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &DockerRuntime{enforceUID: tt.enforceUID}
+			r := &DockerRuntime{}
 			err := r.validateNetworkOwnership("cara-payments", tt.labels, project)
 			assert.Equal(t, tt.wantErr, err != nil)
 		})
@@ -403,4 +394,35 @@ func TestPreflightVolumesEdgeCases(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "unsupported type")
 	})
+}
+
+// A service whose volume is PostgresDifferential also mounts the lifetime's
+// pgBackRest configuration and identity, both as directories under the data
+// root keyed by Project UID. Other services do not.
+func TestBuildBindsMountsThePgBackRestClientDirs(t *testing.T) {
+	r := &DockerRuntime{dataRoot: "/var/lib/cara"}
+	spec := v1.ProjectSpec{
+		Volumes: []v1.VolumeDef{{Name: "pgdata", Type: v1.VolumeTypeManaged}},
+		Backup: &v1.ProjectBackupConfig{Interval: "24h", Items: []v1.BackupItem{
+			{Volume: "pgdata", Strategy: v1.BackupStrategyPostgresDifferential},
+		}},
+	}
+	db := v1.ServiceDef{Name: "db", VolumeMounts: []v1.VolumeMount{{Name: "pgdata", MountPath: "/var/lib/postgresql/data"}}}
+
+	binds, _, err := r.buildBinds("default", "blog", "uid-1", db, spec)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"/var/lib/cara/volumes/default/blog/pgdata/data:/var/lib/postgresql/data",
+		"/var/lib/cara/pgbackrest/projects/uid-1/conf:/etc/pgbackrest:ro",
+		"/var/lib/cara/pgbackrest/projects/uid-1/tls:/etc/cara/pgbackrest/tls:ro",
+	}, binds)
+
+	web, _, err := r.buildBinds("default", "blog", "uid-1", v1.ServiceDef{Name: "web"}, spec)
+	require.NoError(t, err)
+	assert.Empty(t, web)
+
+	spec.Backup.Items = nil // the same volume, backed up offline
+	offline, _, err := r.buildBinds("default", "blog", "uid-1", db, spec)
+	require.NoError(t, err)
+	assert.Len(t, offline, 1)
 }

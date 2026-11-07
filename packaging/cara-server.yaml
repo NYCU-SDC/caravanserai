@@ -1,0 +1,36 @@
+# nfpm config for the cara-server package (CARA-143). Built by
+# scripts/release/package.sh, which sets CARA_VERSION and CARA_ARCH and runs nfpm
+# in a staging directory holding packaging/ and the binaries under bin/.
+name: cara-server
+arch: ${CARA_ARCH}
+platform: linux
+version: ${CARA_VERSION}
+version_schema: none
+section: admin
+priority: optional
+maintainer: NYCU-SDC <https://github.com/NYCU-SDC/caravanserai>
+homepage: https://github.com/NYCU-SDC/caravanserai
+description: |-
+  Caravanserai control plane.
+  Installed disabled: set DATABASE_URL in /etc/cara/server.env, then
+  systemctl enable --now cara-server.
+recommends:
+  - caractl
+contents:
+  - src: bin/cara-server
+    dst: /usr/bin/cara-server
+    file_info: {mode: 0755}
+  - src: packaging/systemd/cara-server.service
+    dst: /usr/lib/systemd/system/cara-server.service
+    file_info: {mode: 0644}
+  - dst: /etc/cara
+    type: dir
+    file_info: {mode: 0700}
+  - src: packaging/etc/server.env
+    dst: /etc/cara/server.env
+    type: config|noreplace
+    file_info: {mode: 0600}
+scripts:
+  postinstall: packaging/scripts/postinst.sh
+  preremove: packaging/scripts/prerm.sh
+  postremove: packaging/scripts/postrm.sh

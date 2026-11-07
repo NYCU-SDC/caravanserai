@@ -1,0 +1,11 @@
+apiVersion: caravanserai/v1
+kind: Project
+metadata:
+  name: hello-loop
+  namespace: default
+spec:
+  services:
+    - name: writer
+      image: busybox:1.36
+      # Overrides the image's CMD, as in Docker Compose.
+      command: ["sh", "-c", "while true; do date; sleep 5; done"]

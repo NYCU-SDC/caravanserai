@@ -94,3 +94,28 @@ func ProjectDir(dataRoot, namespace, project string) (string, error) {
 	}
 	return filepath.Dir(filepath.Dir(path)), nil
 }
+
+// pgBackRestClientRoot holds, per Project lifetime, what a PostgresDifferential
+// database mounts to reach the Node's repo host.
+const pgBackRestClientRoot = "pgbackrest/projects"
+
+// PgBackRestClientDirs returns the host directories a PostgresDifferential
+// database of Project lifetime uid mounts: its pgBackRest configuration
+// (mounted at /etc/pgbackrest) and its TLS identity (mounted at
+// /etc/cara/pgbackrest/tls).
+//
+//	{dataRoot}/pgbackrest/projects/{uid}/conf
+//	{dataRoot}/pgbackrest/projects/{uid}/tls
+//
+// Keyed by UID, not name: a same-name successor must not mount its
+// predecessor's identity.
+func PgBackRestClientDirs(dataRoot, uid string) (confDir, tlsDir string, err error) {
+	if uid == "" || uid == "." || uid == ".." || strings.ContainsAny(uid, `/\`) {
+		return "", "", fmt.Errorf("project UID %q cannot be used in a path", uid)
+	}
+	if dataRoot == "" || !filepath.IsAbs(dataRoot) {
+		return "", "", fmt.Errorf("data root %q must be an absolute path", dataRoot)
+	}
+	base := filepath.Join(filepath.Clean(dataRoot), pgBackRestClientRoot, uid)
+	return filepath.Join(base, "conf"), filepath.Join(base, "tls"), nil
+}

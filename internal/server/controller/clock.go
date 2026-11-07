@@ -20,8 +20,10 @@ func (realClock) Since(t time.Time) time.Duration { return time.Since(t) }
 // options holds shared configuration that can be applied to any controller
 // that supports functional options.
 type options struct {
-	clock        Clock
-	seedInterval time.Duration
+	clock              Clock
+	seedInterval       time.Duration
+	terminatingTimeout time.Duration
+	runningGracePeriod time.Duration
 }
 
 // Option configures optional behaviour on controllers that accept it.
@@ -40,6 +42,24 @@ func WithClock(c Clock) Option {
 func WithSeedInterval(d time.Duration) Option {
 	return func(o *options) {
 		o.seedInterval = d
+	}
+}
+
+// WithTerminatingTimeout overrides how long ProjectReschedulerController waits
+// before marking a Terminating Project on a NotReady node TerminationBlocked.
+// Zero keeps the default. Rehearsals shorten it to observe the mark without
+// waiting ten minutes.
+func WithTerminatingTimeout(d time.Duration) Option {
+	return func(o *options) {
+		o.terminatingTimeout = d
+	}
+}
+
+// WithRunningGracePeriod overrides how long a Running Project may stay on a
+// NotReady Node before its release is attempted. Zero keeps the default.
+func WithRunningGracePeriod(d time.Duration) Option {
+	return func(o *options) {
+		o.runningGracePeriod = d
 	}
 }
 

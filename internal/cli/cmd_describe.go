@@ -177,6 +177,16 @@ func describeNode(w io.Writer, node *v1.Node) {
 	printConditions(w, node.Status.Conditions)
 }
 
+// backupItemFor returns the item naming volume, if any.
+func backupItemFor(items []v1.BackupItem, volume string) (v1.BackupItem, bool) {
+	for _, item := range items {
+		if item.Volume == volume {
+			return item, true
+		}
+	}
+	return v1.BackupItem{}, false
+}
+
 // describeProjectSize shows the declared size, marking an omitted one with the
 // default it resolves to.
 func describeProjectSize(spec v1.ProjectSpec) string {
@@ -267,6 +277,28 @@ func describeProject(w io.Writer, project *v1.Project) {
 			onMissing = string(v1.VolumeOnMissingInitializeEmpty) + " (default)"
 		}
 		printField(w, "    On Missing", onMissing)
+
+		// Every Managed volume, so the default Offline strategy is visible
+		// rather than implied by an item's absence.
+		fmt.Fprintln(w, "    Strategies:")
+		for _, vol := range project.Spec.Volumes {
+			if vol.Type != v1.VolumeTypeManaged {
+				continue
+			}
+			line := string(project.Spec.BackupStrategyFor(vol.Name))
+			item, listed := backupItemFor(project.Spec.Backup.Items, vol.Name)
+			switch {
+			case !listed:
+				line += " (default)"
+			case item.Strategy == v1.BackupStrategyPostgresDifferential:
+				retain := fmt.Sprintf("retain %d full", item.EffectiveRetainFull())
+				if item.RetainFull == nil {
+					retain += " (default)"
+				}
+				line += ", " + retain
+			}
+			fmt.Fprintf(w, "      %s: %s\n", vol.Name, line)
+		}
 	}
 
 	// Ingress
@@ -300,6 +332,75 @@ func describeProject(w io.Writer, project *v1.Project) {
 	printField(w, "  Eviction", describeEviction(project.Status.Eviction))
 	printField(w, "  Assignment Generation", fmt.Sprintf("%d", project.Status.AssignmentGeneration))
 	printField(w, "  Assignment History", stringOrNone(string(project.Status.AssignmentHistory)))
+	if b := project.Status.Backup; b != nil && len(b.Stanzas) > 0 {
+		names := make([]string, 0, len(b.Stanzas))
+		for _, st := range b.Stanzas {
+			names = append(names, st.Name+" ("+st.Volume+")")
+		}
+		printField(w, "  Stanzas", strings.Join(names, ", "))
+	}
+	if last := project.Status.Backup.LastCompletion(); last != nil {
+		parts := make([]string, 0, len(last.Items))
+		for _, it := range last.Items {
+			parts = append(parts, it.Volume+" "+it.Type+" "+it.Label)
+		}
+		printField(w, "  Last Backup", fmt.Sprintf("%s at %s (%s)",
+			last.BackupID, last.AcceptedAt.Format(time.RFC3339), strings.Join(parts, ", ")))
+	}
+
+	// Recovery — shown only once recovery has recorded something, so the
+	// common case prints exactly what it did before.
+	if r := project.Status.Recovery; r != nil {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Recovery:")
+		printField(w, "  Reschedule Attempts", fmt.Sprintf("%d", r.RescheduleAttempts))
+		lastAttempt := "<none>"
+		if r.LastAttemptAt != nil {
+			lastAttempt = formatTimestamp(*r.LastAttemptAt)
+		}
+		printField(w, "  Last Attempt", lastAttempt)
+		// A healthy window from an older assignment says nothing about the
+		// current one, so it is shown as stale rather than as a live window.
+		healthy := "<none>"
+		if r.HealthySince != nil {
+			healthy = formatTimestamp(*r.HealthySince)
+			if r.HealthySinceGeneration != project.Status.AssignmentGeneration {
+				healthy += fmt.Sprintf(" (stale: generation %d)", r.HealthySinceGeneration)
+			}
+		}
+		printField(w, "  Healthy Since", healthy)
+		printField(w, "  Preferred Node", stringOrNone(r.PreferredNode))
+		workloadStopped := "<none>"
+		if b := r.CommittedBackup; b != nil {
+			printField(w, "  Committed Backup", fmt.Sprintf("%s (from %s, generation %d, committed %s)",
+				b.BackupID, b.Assignment.NodeName, b.Assignment.AssignmentGeneration, b.CommittedAt.Format(time.RFC3339)))
+		}
+		if e := r.WorkloadStopped; e != nil {
+			workloadStopped = formatEvidence(e.Assignment, e.ObservedAt)
+		}
+		printField(w, "  Workload Stopped", workloadStopped)
+		if len(r.CleanupObligations) == 0 {
+			printField(w, "  Cleanup Obligations", "<none>")
+		} else {
+			fmt.Fprintln(w, "  Cleanup Obligations:")
+			for _, o := range r.CleanupObligations {
+				state := "pending"
+				if o.ResourcesRemoved != nil {
+					state = "removed at " + formatTimestamp(o.ResourcesRemoved.ObservedAt)
+				}
+				fmt.Fprintf(w, "    - %s\n", formatAssignment(o.Assignment))
+				fmt.Fprintf(w, "      Released:   %s by %s\n", formatTimestamp(o.ReleasedAt), stringOrNone(string(o.ReleaseAuthorization)))
+				fmt.Fprintf(w, "      Resources:  %s\n", state)
+				if o.ManagedDataOwed {
+					data := "pending"
+					if q := o.ManagedDataQuarantined; q != nil {
+						data = "quarantined at " + formatTimestamp(q.ObservedAt)
+					}
+					fmt.Fprintf(w, "      Local Data: %s\n", data)
+				}
+			}
+		}
+	}
 
 	// Conditions
 	fmt.Fprintln(w)
@@ -336,6 +437,17 @@ func describeSecret(w io.Writer, secret *v1.Secret) {
 }
 
 // --- helpers ----------------------------------------------------------------
+
+// formatAssignment returns "node-a generation 6 (uid 8f14…)".
+func formatAssignment(a v1.AssignmentIdentity) string {
+	return fmt.Sprintf("%s generation %d (uid %s)", stringOrNone(a.NodeName), a.AssignmentGeneration, stringOrNone(a.ProjectUID))
+}
+
+// formatEvidence returns the assignment the evidence is about and when it was
+// observed.
+func formatEvidence(a v1.AssignmentIdentity, observedAt time.Time) string {
+	return formatAssignment(a) + " at " + formatTimestamp(observedAt)
+}
 
 // formatTimestamp returns "2006-01-02T15:04:05Z (3d ago)" or "<none>" for zero.
 func formatTimestamp(t time.Time) string {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,12 +20,15 @@ import (
 	"NYCU-SDC/caravanserai/internal/server/adapter"
 	"NYCU-SDC/caravanserai/internal/server/agentdialer"
 	"NYCU-SDC/caravanserai/internal/server/apiserver"
+	"NYCU-SDC/caravanserai/internal/server/auth"
+	"NYCU-SDC/caravanserai/internal/server/authz"
 	"NYCU-SDC/caravanserai/internal/server/controller"
 	"NYCU-SDC/caravanserai/internal/server/handler"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
 	overlayhandler "NYCU-SDC/caravanserai/internal/server/handler/overlay"
 	projecthandler "NYCU-SDC/caravanserai/internal/server/handler/project"
 	secrethandler "NYCU-SDC/caravanserai/internal/server/handler/secret"
+	tokenhandler "NYCU-SDC/caravanserai/internal/server/handler/token"
 	pgstore "NYCU-SDC/caravanserai/internal/store/postgres"
 	"NYCU-SDC/caravanserai/internal/trace"
 
@@ -181,8 +185,21 @@ func main() {
 
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
 	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, pgStore, agentDialer, problemWriter))
-	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter, cfg.UIDEnforcement))
+	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter,
+		projecthandler.WithPostgresDifferentialImage(cfg.PostgresDifferentialImage)))
 	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
+	apiSrv.Register(tokenhandler.NewHandler(logger, pgStore, problemWriter))
+
+	// Every route but the health probe needs a token (ADR-0031).
+	breakGlassToken, err := readBreakGlassToken(cfg.BreakGlassTokenFile)
+	if err != nil {
+		logger.Fatal("Cannot read the break-glass token", zap.String("path", cfg.BreakGlassTokenFile), zap.Error(err))
+	}
+	if breakGlassToken == "" {
+		logger.Warn("No break-glass token configured: only issued tokens can authenticate, and none can be issued until one exists")
+	}
+	apiSrv.RequireAuthentication(auth.NewAuthenticator(logger, pgStore, breakGlassToken))
+	apiSrv.RequireAuthorization(authz.New(logger, pgStore))
 
 	// Overlay administration (CARA-49): issue Headscale pre-auth keys and
 	// list/revoke overlay nodes. Only active when Headscale admin credentials
@@ -203,7 +220,7 @@ func main() {
 	// ============================================
 
 	nodeAdapter := adapter.NewNodeStoreAdapter(pgStore)
-	projectAdapter := adapter.NewProjectStoreAdapter(pgStore)
+	projectAdapter := adapter.NewProjectStoreAdapter(pgStore).WithGraceExpiredRelease(cfg.GraceExpiredRelease)
 
 	ctrlManager := controller.NewManager(logger)
 
@@ -221,6 +238,8 @@ func main() {
 		projectAdapter,
 		nodeAdapter,
 		eventBus,
+		controller.WithTerminatingTimeout(cfg.TerminatingTimeout),
+		controller.WithRunningGracePeriod(cfg.RunningGracePeriod),
 	))
 	ctrlManager.Add(controller.NewFailedProjectReschedulerController(logger,
 		projectAdapter,
@@ -278,4 +297,22 @@ func main() {
 	}
 
 	logger.Info("cara-server stopped")
+}
+
+// readBreakGlassToken returns the token in path, or "" when path is empty. A
+// configured file that is unreadable or empty is an error: starting without the
+// token the operator meant to set would lock them out.
+func readBreakGlassToken(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", errors.New("the file is empty")
+	}
+	return token, nil
 }

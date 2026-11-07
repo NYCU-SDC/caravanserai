@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
@@ -18,12 +19,36 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
-// NewClient returns a Client pointed at the given server address.
+// TokenEnv names the environment variable caractl reads its bearer token from
+// (ADR-0031). It is not a flag, to keep the token out of process listings.
+const TokenEnv = "CARA_TOKEN"
+
+// NewClient returns a Client pointed at the given server address, presenting
+// the token in CARA_TOKEN when it is set.
 func NewClient(serverURL string) *Client {
-	return &Client{
-		BaseURL:    serverURL,
-		HTTPClient: &http.Client{},
+	return NewClientWithToken(serverURL, os.Getenv(TokenEnv))
+}
+
+// NewClientWithToken returns a Client presenting token on every request. An
+// empty token sends none, and cara-server answers 401.
+func NewClientWithToken(serverURL, token string) *Client {
+	c := &Client{BaseURL: serverURL, HTTPClient: &http.Client{}}
+	if token != "" {
+		c.HTTPClient.Transport = bearerTransport{token: token, base: http.DefaultTransport}
 	}
+	return c
+}
+
+// bearerTransport adds a bearer token to every request it sends.
+type bearerTransport struct {
+	token string
+	base  http.RoundTripper
+}
+
+func (t bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(r)
 }
 
 // GetNodes fetches all nodes from the server.

@@ -6,13 +6,15 @@ import (
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/store"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
 func TestProjectReschedulerReconcile(t *testing.T) {
-	t.Run("NotReady node with Scheduled project resets to Pending", func(t *testing.T) {
+	t.Run("NotReady node with Scheduled project is released", func(t *testing.T) {
 		ns := newFakeReschedulerNodeStore()
 		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
 		ps := newFakeReschedulerProjectStore()
@@ -26,8 +28,8 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		res, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
 		assert.False(t, res.Requeue)
-		require.Len(t, ps.SetProjectPendingCalls, 1)
-		assert.Equal(t, "app-1", ps.SetProjectPendingCalls[0].Name)
+		require.Len(t, ps.ReleaseAssignmentCalls, 1)
+		assert.Equal(t, "app-1", ps.ReleaseAssignmentCalls[0].Name)
 	})
 
 	t.Run("NotReady node with Running project records NotReadyAt on first observation, requeues", func(t *testing.T) {
@@ -57,7 +59,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		require.Len(t, ps.SetNotReadyAtCalls, 1)
 		assert.Equal(t, "app-1", ps.SetNotReadyAtCalls[0].Name)
 		assert.Equal(t, clk.Time.UTC(), ps.SetNotReadyAtCalls[0].At, "should record the fake clock's time")
-		assert.Empty(t, ps.SetProjectPendingCalls, "should not reset to Pending on first observation")
+		assert.Empty(t, ps.ReleaseAssignmentCalls, "should not reset to Pending on first observation")
 	})
 
 	t.Run("NotReady node with Running project within grace period requeues", func(t *testing.T) {
@@ -92,17 +94,17 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		res, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
 		assert.True(t, res.Requeue, "should requeue to check again later")
-		assert.Empty(t, ps.SetProjectPendingCalls, "should not reset to Pending before grace period expires")
+		assert.Empty(t, ps.ReleaseAssignmentCalls, "should not reset to Pending before grace period expires")
 		assert.Empty(t, ps.SetNotReadyAtCalls, "condition already exists, no re-write needed")
 	})
 
-	t.Run("NotReady node with Running project past grace period resets to Pending", func(t *testing.T) {
+	t.Run("NotReady node with Running project past grace period is released", func(t *testing.T) {
 		// Scenario: the NotReadyAt condition was recorded past the grace period.
-		// The node never recovered, so the project should be reset to Pending.
+		// The node never recovered, so the project should be released.
 		//
 		// Expected behaviour (handleRunning, elapsed >= runningGracePeriod):
-		//   1. Call SetProjectPending — resets the project to Pending so the
-		//      scheduler can place it on a healthy node.
+		//   1. Call ReleaseAssignment — the store releases the project to
+		//      Pending when the release is authorized.
 		//   2. Do NOT requeue — this project is done.
 		//   3. Do NOT re-write NotReadyAt — the condition already exists.
 		clk := newFakeClock()
@@ -126,8 +128,8 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		res, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
 		assert.False(t, res.Requeue)
-		require.Len(t, ps.SetProjectPendingCalls, 1)
-		assert.Equal(t, "app-1", ps.SetProjectPendingCalls[0].Name)
+		require.Len(t, ps.ReleaseAssignmentCalls, 1)
+		assert.Equal(t, "app-1", ps.ReleaseAssignmentCalls[0].Name)
 		assert.Empty(t, ps.SetNotReadyAtCalls, "should not re-set NotReadyAt")
 	})
 
@@ -138,9 +140,9 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		//
 		// Expected behaviour (handleTerminating, !found branch):
 		//   1. Record a TerminatingAt condition with the current timestamp —
-		//      this starts the force-termination clock.
+		//      this starts the termination timeout clock.
 		//   2. Requeue so the manager checks again after the timeout elapses.
-		//   3. Do NOT force-terminate yet — the node might recover in time.
+		//   3. Do NOT mark it blocked yet — the node might recover in time.
 		clk := newFakeClock()
 		ns := newFakeReschedulerNodeStore()
 		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
@@ -159,17 +161,17 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		require.Len(t, ps.SetTerminatingAtCalls, 1)
 		assert.Equal(t, "app-1", ps.SetTerminatingAtCalls[0].Name)
 		assert.Equal(t, clk.Time.UTC(), ps.SetTerminatingAtCalls[0].At, "should record the fake clock's time")
-		assert.Empty(t, ps.ForceTerminatedCalls, "should not force-terminate on first observation")
+		assert.Empty(t, ps.SetTerminationBlockedCalls, "should not mark blocked on first observation")
 	})
 
-	t.Run("NotReady node with Terminating project past timeout forces Terminated", func(t *testing.T) {
+	t.Run("NotReady node with Terminating project past timeout is marked blocked, not Terminated", func(t *testing.T) {
 		// Scenario: the TerminatingAt condition was recorded past the timeout.
-		// The node never recovered, so the graceful teardown is assumed to have failed.
+		// The node never recovered, so nothing can confirm its resources are gone.
 		//
 		// Expected behaviour (handleTerminating, elapsed >= terminatingTimeout):
-		//   1. Call ForceTerminated — transitions the project to Terminated
-		//      phase so ProjectTerminationController can delete the DB record.
-		//   2. Do NOT requeue — this project is done.
+		//   1. Mark the project TerminationBlocked. It stays Terminating, so
+		//      ProjectTerminationController never deletes the record.
+		//   2. Do NOT requeue — nothing changes until the node returns.
 		//   3. Do NOT re-write TerminatingAt — the condition already exists.
 		clk := newFakeClock()
 		terminatingAt := clk.Time.Add(-terminatingTimeout - time.Minute) // past timeout
@@ -192,9 +194,64 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		res, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
 		assert.False(t, res.Requeue)
-		require.Len(t, ps.ForceTerminatedCalls, 1)
-		assert.Equal(t, "app-1", ps.ForceTerminatedCalls[0].Name)
+		require.Len(t, ps.SetTerminationBlockedCalls, 1)
+		assert.Equal(t, setTerminationBlockedCall{Name: "app-1", NodeRef: "node-1", At: clk.Time.UTC()},
+			ps.SetTerminationBlockedCalls[0])
+		assert.Equal(t, v1.ProjectPhaseTerminating, ps.projects["app-1"].Phase,
+			"an expired timeout must never finalize the project")
 		assert.Empty(t, ps.SetTerminatingAtCalls, "should not re-set TerminatingAt")
+
+		// The periodic resync keeps enqueueing the node. Marking the same
+		// outage again would only churn the Project's version.
+		_, err = ctrl.Reconcile(context.Background(), "node-1")
+		require.NoError(t, err)
+		assert.Len(t, ps.SetTerminationBlockedCalls, 1, "the same outage is marked once")
+	})
+
+	t.Run("a configured termination timeout replaces the default", func(t *testing.T) {
+		clk := newFakeClock()
+		ns := newFakeReschedulerNodeStore()
+		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
+		ps := newFakeReschedulerProjectStore()
+		ps.projects["app-1"] = &ProjectSnapshot{
+			Name:    "app-1",
+			Phase:   v1.ProjectPhaseTerminating,
+			NodeRef: "node-1",
+			Conditions: []ConditionSnapshot{
+				{Type: v1.ConditionTypeTerminatingAt, LastTransitionTime: clk.Time.Add(-time.Minute)},
+			},
+		}
+		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil,
+			WithClock(clk), WithTerminatingTimeout(30*time.Second))
+
+		_, err := ctrl.Reconcile(context.Background(), "node-1")
+		require.NoError(t, err)
+		assert.Len(t, ps.SetTerminationBlockedCalls, 1,
+			"a minute exceeds the configured 30s, though not the 10m default")
+	})
+
+	t.Run("a blocked termination is cleared when the node returns", func(t *testing.T) {
+		clk := newFakeClock()
+		blockedAt := clk.Time.Add(-time.Minute)
+		ns := newFakeReschedulerNodeStore()
+		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateReady, LastHeartbeat: clk.Time}
+		ps := newFakeReschedulerProjectStore()
+		ps.projects["app-1"] = &ProjectSnapshot{
+			Name:    "app-1",
+			Phase:   v1.ProjectPhaseTerminating,
+			NodeRef: "node-1",
+			Conditions: []ConditionSnapshot{
+				{Type: v1.ConditionTypeTerminatingAt, LastTransitionTime: blockedAt.Add(-terminatingTimeout)},
+				{Type: v1.ConditionTypeTerminationBlocked, LastTransitionTime: blockedAt},
+			},
+		}
+		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil, WithClock(clk))
+
+		_, err := ctrl.Reconcile(context.Background(), "node-1")
+		require.NoError(t, err)
+		assert.Empty(t, ps.projects["app-1"].Conditions,
+			"TerminationBlocked and its clock describe an outage that is over")
+		assert.Equal(t, v1.ProjectPhaseTerminating, ps.projects["app-1"].Phase)
 	})
 
 	t.Run("NotReady node with Terminating project within timeout requeues", func(t *testing.T) {
@@ -205,7 +262,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		// Expected behaviour (handleTerminating, elapsed < terminatingTimeout):
 		//   1. Requeue — the manager will re-run Reconcile later to check
 		//      whether the timeout has now expired.
-		//   2. Do NOT force-terminate — still within the grace period.
+		//   2. Do NOT mark it blocked — still within the timeout.
 		//   3. Do NOT re-write TerminatingAt — the condition already exists
 		//      and its timestamp must not be reset (that would restart the
 		//      clock and potentially let a project stay in Terminating forever).
@@ -230,7 +287,7 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		res, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
 		assert.True(t, res.Requeue, "should requeue to check again later")
-		assert.Empty(t, ps.ForceTerminatedCalls, "should not force-terminate before timeout")
+		assert.Empty(t, ps.SetTerminationBlockedCalls, "should not mark blocked before timeout")
 		assert.Empty(t, ps.SetTerminatingAtCalls, "condition already exists, no re-write needed")
 	})
 
@@ -243,10 +300,10 @@ func TestProjectReschedulerReconcile(t *testing.T) {
 		res, err := ctrl.Reconcile(context.Background(), "node-1")
 		require.NoError(t, err)
 		assert.False(t, res.Requeue)
-		assert.Empty(t, ps.SetProjectPendingCalls)
+		assert.Empty(t, ps.ReleaseAssignmentCalls)
 		assert.Empty(t, ps.SetTerminatingAtCalls)
 		assert.Empty(t, ps.SetNotReadyAtCalls)
-		assert.Empty(t, ps.ForceTerminatedCalls)
+		assert.Empty(t, ps.SetTerminationBlockedCalls)
 	})
 
 	t.Run("node not found returns without error", func(t *testing.T) {
@@ -296,7 +353,7 @@ func TestProjectReschedulerGracePeriodIsPerIncident(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, ps.SetNotReadyAtCalls, 1, "the first failure starts a clock")
 		assert.True(t, res.Requeue)
-		assert.Empty(t, ps.SetProjectPendingCalls, "the grace period has barely begun")
+		assert.Empty(t, ps.ReleaseAssignmentCalls, "the grace period has barely begun")
 
 		// --- The node recovers inside the grace period and beats again. ---
 		clk.Time = clk.Time.Add(time.Minute)
@@ -316,22 +373,22 @@ func TestProjectReschedulerGracePeriodIsPerIncident(t *testing.T) {
 		require.Len(t, ps.SetNotReadyAtCalls, 2, "a clock predating the last heartbeat is restarted")
 		assert.Equal(t, clk.Time.UTC(), ps.SetNotReadyAtCalls[1].At)
 		assert.True(t, res.Requeue)
-		assert.Empty(t, ps.SetProjectPendingCalls,
+		assert.Empty(t, ps.ReleaseAssignmentCalls,
 			"the second failure must wait, not inherit the first failure's elapsed time")
 
 		// --- One second short of the new grace period: still holding. ---
 		clk.Time = clk.Time.Add(runningGracePeriod - time.Second)
 		_, err = ctrl.Reconcile(ctx, "node-1")
 		require.NoError(t, err)
-		assert.Empty(t, ps.SetProjectPendingCalls)
+		assert.Empty(t, ps.ReleaseAssignmentCalls)
 		assert.Len(t, ps.SetNotReadyAtCalls, 2, "the clock is not restarted within one incident")
 
 		// --- Past it: now, and only now, reschedule. ---
 		clk.Time = clk.Time.Add(2 * time.Second)
 		_, err = ctrl.Reconcile(ctx, "node-1")
 		require.NoError(t, err)
-		require.Len(t, ps.SetProjectPendingCalls, 1)
-		assert.Equal(t, "app-1", ps.SetProjectPendingCalls[0].Name)
+		require.Len(t, ps.ReleaseAssignmentCalls, 1)
+		assert.Equal(t, "app-1", ps.ReleaseAssignmentCalls[0].Name)
 	})
 
 	t.Run("a clock from the current failure is trusted across reconciles", func(t *testing.T) {
@@ -359,30 +416,31 @@ func TestProjectReschedulerGracePeriodIsPerIncident(t *testing.T) {
 			_, err = ctrl.Reconcile(ctx, "node-1")
 			require.NoError(t, err)
 			require.Len(t, ps.SetNotReadyAtCalls, 1, "the clock must not restart mid-incident")
-			require.Empty(t, ps.SetProjectPendingCalls)
+			require.Empty(t, ps.ReleaseAssignmentCalls)
 		}
 
 		clk.Time = clk.Time.Add(runningGracePeriod)
 		_, err = ctrl.Reconcile(ctx, "node-1")
 		require.NoError(t, err)
-		assert.Len(t, ps.SetProjectPendingCalls, 1, "the grace period still expires")
+		assert.Len(t, ps.ReleaseAssignmentCalls, 1, "the grace period still expires")
 	})
 }
 
-// The force-termination timeout is per-outage for the same reason the grace
-// period is, and with more at stake: exceeding it declares the Project
-// Terminated without the agent confirming teardown, which can strand Docker
-// resources on the node.
+// The termination timeout is per-outage for the same reason the grace period
+// is: TerminationBlocked has to describe the outage that is happening now, both
+// when it is first reported and when a later outage decides whether it has
+// already been reported.
 func TestProjectReschedulerTerminationTimeoutIsPerIncident(t *testing.T) {
 	notReadyAfter := func(lastBeat time.Time) NodeStatusSnapshot {
 		return NodeStatusSnapshot{State: v1.NodeStateNotReady, LastHeartbeat: lastBeat}
 	}
 
-	t.Run("a second outage does not force-terminate against the first one's clock", func(t *testing.T) {
-		// The sequence this guards: the node comes back, the agent begins a
-		// slow teardown, and the node fails again part-way through. Judged
-		// against the previous outage's clock the Project would be
-		// force-terminated on sight.
+	t.Run("a second outage is judged on its own clock and marked again", func(t *testing.T) {
+		// The sequence this guards: the node fails and the deletion is
+		// reported blocked, the node comes back and the agent begins a slow
+		// teardown, and the node fails again part-way through. The second
+		// outage must wait its own full timeout, and the first outage's mark
+		// must not stand in for the second one's.
 		clk := newFakeClock()
 		ns := newFakeReschedulerNodeStore()
 		ps := newFakeReschedulerProjectStore()
@@ -392,15 +450,19 @@ func TestProjectReschedulerTerminationTimeoutIsPerIncident(t *testing.T) {
 		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil, WithClock(clk))
 		ctx := context.Background()
 
-		// --- Outage 1: the clock starts. ---
+		// --- Outage 1: the clock starts and expires. ---
 		ns.nodes["node-1"] = notReadyAfter(clk.Time.Add(-NodeHeartbeatTimeout))
 		res, err := ctrl.Reconcile(ctx, "node-1")
 		require.NoError(t, err)
 		require.Len(t, ps.SetTerminatingAtCalls, 1)
 		assert.True(t, res.Requeue)
-		assert.Empty(t, ps.ForceTerminatedCalls)
 
-		// --- The node recovers and beats again. ---
+		clk.Time = clk.Time.Add(terminatingTimeout + time.Second)
+		_, err = ctrl.Reconcile(ctx, "node-1")
+		require.NoError(t, err)
+		require.Len(t, ps.SetTerminationBlockedCalls, 1)
+
+		// --- The node recovers and beats again, without a cleanup pass. ---
 		clk.Time = clk.Time.Add(2 * time.Minute)
 		recoveredBeat := clk.Time
 
@@ -413,25 +475,28 @@ func TestProjectReschedulerTerminationTimeoutIsPerIncident(t *testing.T) {
 		require.Len(t, ps.SetTerminatingAtCalls, 2, "the stale clock is restarted")
 		assert.Equal(t, clk.Time.UTC(), ps.SetTerminatingAtCalls[1].At)
 		assert.True(t, res.Requeue)
-		assert.Empty(t, ps.ForceTerminatedCalls,
-			"force-termination is destructive; it must not ride an earlier outage's clock")
+		assert.Len(t, ps.SetTerminationBlockedCalls, 1,
+			"the second outage is not reported blocked against the first one's clock")
 
 		// --- The new timeout still expires on its own schedule. ---
 		clk.Time = clk.Time.Add(terminatingTimeout - time.Second)
 		_, err = ctrl.Reconcile(ctx, "node-1")
 		require.NoError(t, err)
-		require.Empty(t, ps.ForceTerminatedCalls)
+		require.Len(t, ps.SetTerminationBlockedCalls, 1)
 
 		clk.Time = clk.Time.Add(2 * time.Second)
 		_, err = ctrl.Reconcile(ctx, "node-1")
 		require.NoError(t, err)
-		require.Len(t, ps.ForceTerminatedCalls, 1)
+		require.Len(t, ps.SetTerminationBlockedCalls, 2,
+			"the first outage's mark is stale and does not suppress this one")
+		assert.Equal(t, clk.Time.UTC(), ps.SetTerminationBlockedCalls[1].At)
+		assert.Equal(t, v1.ProjectPhaseTerminating, ps.projects["app-1"].Phase)
 	})
 
 	t.Run("one continuous outage keeps its clock and still times out", func(t *testing.T) {
 		// The node never recovers, so its last heartbeat does not move.
 		// Restarting the clock here would mean a Project stuck Terminating on a
-		// dead node is never cleaned up.
+		// dead node is never reported blocked.
 		clk := newFakeClock()
 		ns := newFakeReschedulerNodeStore()
 		ps := newFakeReschedulerProjectStore()
@@ -453,7 +518,8 @@ func TestProjectReschedulerTerminationTimeoutIsPerIncident(t *testing.T) {
 			require.Len(t, ps.SetTerminatingAtCalls, 1, "the clock must not restart mid-outage")
 		}
 
-		require.Len(t, ps.ForceTerminatedCalls, 1, "the timeout still expires")
+		require.Len(t, ps.SetTerminationBlockedCalls, 1, "the timeout still expires")
+		assert.Equal(t, v1.ProjectPhaseTerminating, ps.projects["app-1"].Phase)
 	})
 }
 
@@ -489,7 +555,7 @@ func TestProjectReschedulerClearsClocksWhenTheNodeRecovers(t *testing.T) {
 
 		require.Len(t, ps.projects["app-1"].Conditions, 1, "only the clock is removed")
 		assert.Equal(t, v1.ConditionTypePhase, ps.projects["app-1"].Conditions[0].Type)
-		assert.Empty(t, ps.SetProjectPendingCalls, "a healthy node reschedules nothing")
+		assert.Empty(t, ps.ReleaseAssignmentCalls, "a healthy node reschedules nothing")
 	})
 
 	t.Run("a recovered node with no clocks writes nothing", func(t *testing.T) {
@@ -596,4 +662,56 @@ func TestProjectReschedulerClearsClocksWhenTheNodeRecovers(t *testing.T) {
 		require.Len(t, ps.projects["app-1"].Conditions, 1)
 		assert.Equal(t, v1.ConditionTypePhase, ps.projects["app-1"].Conditions[0].Type)
 	})
+}
+
+// A refused release is the gate working, not a failure: the reconcile
+// succeeds, does not spin on a requeue, and leaves the Project assigned. The
+// next resync calls release again.
+func TestProjectReschedulerRefusedRelease(t *testing.T) {
+	clk := newFakeClock()
+	ns := newFakeReschedulerNodeStore()
+	ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
+	ps := newFakeReschedulerProjectStore()
+	ps.projects["sched"] = &ProjectSnapshot{Name: "sched", Phase: v1.ProjectPhaseScheduled, NodeRef: "node-1", AssignmentGeneration: 4}
+	ps.projects["run"] = &ProjectSnapshot{
+		Name: "run", Phase: v1.ProjectPhaseRunning, NodeRef: "node-1", AssignmentGeneration: 2,
+		Conditions: []ConditionSnapshot{{Type: v1.ConditionTypeNotReadyAt, LastTransitionTime: clk.Time.Add(-runningGracePeriod - time.Minute)}},
+	}
+	ps.unconfirmed["sched"] = true
+	ps.unconfirmed["run"] = true
+	ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil, WithClock(clk))
+
+	for round := 0; round < 2; round++ {
+		res, err := ctrl.Reconcile(context.Background(), "node-1")
+		require.NoError(t, err)
+		assert.False(t, res.Requeue, "a refused release requeued")
+	}
+
+	require.Len(t, ps.ReleaseAssignmentCalls, 4, "each resync retries the release")
+	wantGeneration := map[string]int64{"sched": 4, "run": 2}
+	for _, c := range ps.ReleaseAssignmentCalls {
+		assert.False(t, c.Released)
+		assert.Equal(t, wantGeneration[c.Name], c.AssignmentGeneration,
+			"the store must be asked to release the listed assignment")
+	}
+	for _, name := range []string{"sched", "run"} {
+		assert.Equal(t, "node-1", ps.projects[name].NodeRef)
+	}
+}
+
+// A Project that changed between the list and the release — deleted,
+// reassigned, or moved out of a releasable phase — is skipped without failing
+// the reconcile, so the other Projects on the node are still handled.
+func TestProjectReschedulerSkipsStaleRelease(t *testing.T) {
+	for _, staleErr := range []error{store.ErrStaleAssignment, store.ErrConflictState, store.ErrNotFound} {
+		ns := newFakeReschedulerNodeStore()
+		ns.nodes["node-1"] = NodeStatusSnapshot{State: v1.NodeStateNotReady}
+		ps := newFakeReschedulerProjectStore()
+		ps.projects["gone"] = &ProjectSnapshot{Name: "gone", Phase: v1.ProjectPhaseScheduled, NodeRef: "node-1"}
+		ps.errs["gone"] = staleErr
+		ctrl := NewProjectReschedulerController(zap.NewNop(), ps, ns, nil)
+
+		_, err := ctrl.Reconcile(context.Background(), "node-1")
+		assert.NoError(t, err, "%v failed the reconcile", staleErr)
+	}
 }

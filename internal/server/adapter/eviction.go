@@ -59,15 +59,20 @@ func (a *ProjectStoreAdapter) ListEvictions(ctx context.Context) ([]*controller.
 		if p.Status.Eviction == nil {
 			continue
 		}
+		assignment := v1.AssignmentIdentity{ProjectUID: p.ObjectMeta.UID, NodeName: p.Status.NodeRef, AssignmentGeneration: p.Status.AssignmentGeneration}
 		out = append(out, &controller.EvictionSnapshot{
-			Name:              p.Name,
-			Phase:             p.Status.Phase,
-			NodeRef:           p.Status.NodeRef,
-			Size:              p.Spec.Size,
-			FailedNodes:       slices.Clone(p.Status.FailedNodes),
-			HasManagedVolumes: hasManagedVolume(p.Spec.Volumes),
-			Eviction:          *p.Status.Eviction,
-			Conditions:        slices.Clone(p.Status.Conditions),
+			Name:                    p.Name,
+			UID:                     p.ObjectMeta.UID,
+			Phase:                   p.Status.Phase,
+			NodeRef:                 p.Status.NodeRef,
+			AssignmentGeneration:    p.Status.AssignmentGeneration,
+			WorkloadStopped:         p.Status.Recovery.WorkloadStoppedFor(assignment),
+			Size:                    p.Spec.Size,
+			FailedNodes:             slices.Clone(p.Status.FailedNodes),
+			HasManagedVolumes:       p.Spec.HasManagedVolume(),
+			HasPostgresDifferential: p.Spec.HasPostgresDifferential(),
+			Eviction:                *p.Status.Eviction,
+			Conditions:              slices.Clone(p.Status.Conditions),
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -97,24 +102,55 @@ func (a *ProjectStoreAdapter) StartEvictionBackup(ctx context.Context, name, fro
 	})
 }
 
-// MoveEvictedProject satisfies controller.EvictionStore. It returns the
-// Project to Pending off fromNode so the scheduler places it elsewhere.
+// MoveEvictedProject satisfies controller.EvictionStore. It releases the
+// Project's assignment on the source Node so the scheduler places it
+// elsewhere, and reports whether it did.
 //
-// It does nothing unless a move is in progress and the Project is still
-// Running on fromNode. As in SetProjectPending, clearing nodeRef revokes the
-// assignment but leaves the generation counter and assignment history alone.
-func (a *ProjectStoreAdapter) MoveEvictedProject(ctx context.Context, name, fromNode, message string) error {
+// It goes through the same release gate as every other release: the Agent
+// of the assignment must have confirmed the workload stopped (WorkloadStopped),
+// which it does once it has stopped the Project for the move and, if the
+// Project has Managed data, committed the fresh backup. Without that evidence
+// nothing is written and the move keeps waiting. The release appends the
+// source Node's cleanup obligation in the same write — and, for Managed data,
+// what it owes of that data — so the scheduler places the Project elsewhere
+// only once the source Node has cleaned up (ADR-0024 C2, C3).
+//
+// Everything is decided in one UID-bound write against the snapshot the
+// controller judged: the same lifetime, still Running on the source Node
+// under the same generation, with the move still in progress.
+func (a *ProjectStoreAdapter) MoveEvictedProject(ctx context.Context, e *controller.EvictionSnapshot, message string) (bool, error) {
 	now := time.Now().UTC()
-	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
-		e := status.Eviction
-		if e == nil || e.State == v1.EvictionStateMoving || e.FromNode != fromNode ||
-			status.Phase != v1.ProjectPhaseRunning || status.NodeRef != fromNode {
+	assignment := v1.AssignmentIdentity{ProjectUID: e.UID, NodeName: e.NodeRef, AssignmentGeneration: e.AssignmentGeneration}
+
+	var moved bool
+	err := a.s.UpdateProjectStatusForUID(ctx, e.Name, e.UID, func(status *v1.ProjectStatus) error {
+		moved = false
+		ev := status.Eviction
+		if ev == nil || ev.State == v1.EvictionStateMoving || ev.FromNode != e.Eviction.FromNode ||
+			status.NodeRef != e.NodeRef || status.AssignmentGeneration != e.AssignmentGeneration ||
+			!v1.PhaseTransitionAllowed(v1.WriterEvictor, status.Phase, v1.ProjectPhasePending) {
 			return nil
 		}
-		e.State = v1.EvictionStateMoving
-		e.StateSince = now
+		if !status.Recovery.WorkloadStoppedFor(assignment) {
+			return nil
+		}
+
+		project, err := a.s.GetProject(ctx, e.Name)
+		if err != nil {
+			return err
+		}
+
+		moved = true
+		ev.State = v1.EvictionStateMoving
+		ev.StateSince = now
 		status.Phase = v1.ProjectPhasePending
+		// The generation counter and history stay: the next assignment must
+		// advance past every generation this Project ever held.
 		status.NodeRef = ""
+		status.EnsureRecovery().AddObligation(assignment, now, v1.ReleaseByWorkloadStopped)
+		if project.Spec.HasManagedVolume() {
+			status.Recovery.OweManagedData(assignment)
+		}
 		status.Conditions = v1.RemoveConditions(status.Conditions,
 			v1.ConditionTypeEvictionBackup, v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt)
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
@@ -126,6 +162,10 @@ func (a *ProjectStoreAdapter) MoveEvictedProject(ctx context.Context, name, from
 		}, true)
 		return nil
 	})
+	if err != nil {
+		return false, err
+	}
+	return moved, nil
 }
 
 // EndEviction satisfies controller.EvictionStore. It clears the move, and
@@ -149,15 +189,4 @@ func (a *ProjectStoreAdapter) EndEviction(ctx context.Context, name string, fail
 		}
 		return nil
 	})
-}
-
-// hasManagedVolume reports whether volumes holds any Managed volume — data a
-// move has to carry to the new Node.
-func hasManagedVolume(volumes []v1.VolumeDef) bool {
-	for _, v := range volumes {
-		if v.Type == v1.VolumeTypeManaged {
-			return true
-		}
-	}
-	return false
 }

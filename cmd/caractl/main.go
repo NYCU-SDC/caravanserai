@@ -55,7 +55,10 @@ func init() {
 	rootCmd.AddCommand(cli.NewPortForwardCmd())
 	rootCmd.AddCommand(cli.NewLogsCmd())
 	rootCmd.AddCommand(cli.NewNodeCmd())
+	rootCmd.AddCommand(cli.NewTakeoverCmd())
+	rootCmd.AddCommand(cli.NewTakeoverAuditCmd())
 	rootCmd.AddCommand(cli.NewOverlayCmd())
+	rootCmd.AddCommand(cli.NewTokenCmd())
 }
 
 func main() {

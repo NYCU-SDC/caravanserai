@@ -2,10 +2,12 @@ package restore
 
 import (
 	"errors"
+	"os"
 	"testing"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	caravolume "NYCU-SDC/caravanserai/internal/agent/volume"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -321,4 +323,22 @@ func TestDecideRefusesToStartEmptyAtGenerationZero(t *testing.T) {
 
 	assert.NotEqual(t, DecisionInitializeEmpty, got.Decision)
 	assert.Equal(t, DecisionRestore, got.Decision)
+}
+
+func TestSurveyCountsAVolumeTheAgentCannotListAsHoldingData(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root can list anything")
+	}
+	dataRoot := t.TempDir()
+	path, err := caravolume.HostPath(dataRoot, "default", "db", "pgdata")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(path, 0o700))
+	require.NoError(t, os.Chmod(path, 0))
+	t.Cleanup(func() { _ = os.Chmod(path, 0o700) })
+
+	survey, err := SurveyVolumes(dataRoot, "default", "db", []v1.VolumeDef{{Name: "pgdata", Type: v1.VolumeTypeManaged}})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"pgdata"}, survey.WithData)
+	assert.True(t, survey.Complete())
 }

@@ -55,7 +55,7 @@ func doDeleteCondition(h *Handler, name, condType, query string) *httptest.Respo
 // fenced path, so a node that has lost the Project cannot.
 func TestRecoveryBlockedIsAgentWritableThroughTheFence(t *testing.T) {
 	s := &conditionFakeStore{}
-	h := newFenceHandler(s, true)
+	h := newFenceHandler(s)
 
 	rec := doPatchCondition(h, "demo", "RecoveryBlocked",
 		`{"status":"True","reason":"VolumeUnavailable","message":"db-data missing",`+
@@ -89,7 +89,7 @@ func TestRecoveryBlockedIsAgentWritableThroughTheFence(t *testing.T) {
 func TestRecoveryBlockedStaleFenceIsRejected(t *testing.T) {
 	s := &conditionFakeStore{}
 	s.returnErr = store.ErrStaleAssignment
-	h := newFenceHandler(s, true)
+	h := newFenceHandler(s)
 
 	rec := doPatchCondition(h, "demo", "RecoveryBlocked",
 		`{"status":"True","reason":"VolumeUnavailable","uid":"uid-1","nodeRef":"node-a","assignmentGeneration":4}`)
@@ -99,19 +99,48 @@ func TestRecoveryBlockedStaleFenceIsRejected(t *testing.T) {
 	}
 }
 
-// In strict mode an unfenced write is refused outright rather than falling
-// back to the unfenced path.
-func TestRecoveryBlockedWithoutFenceIsRejectedInStrictMode(t *testing.T) {
+// An unfenced write is refused outright.
+func TestRecoveryBlockedWithoutFenceIsRejected(t *testing.T) {
 	s := &conditionFakeStore{}
-	h := newFenceHandler(s, true)
+	h := newFenceHandler(s)
 
 	rec := doPatchCondition(h, "demo", "RecoveryBlocked", `{"status":"True","reason":"VolumeUnavailable"}`)
 
 	if rec.Code == http.StatusNoContent {
-		t.Fatalf("an unfenced write was accepted in strict mode")
+		t.Fatalf("an unfenced write was accepted")
 	}
 	if len(s.patched) != 0 {
 		t.Fatalf("store was written: %+v", s.patched)
+	}
+}
+
+// Recovering, RecoveryExhausted and TakeoverRequired are server-owned: only
+// recovery controllers decide them. A valid fence proves which assignment an
+// Agent holds, not that it may speak for the controller, so even a correctly
+// fenced Agent write or clear must be refused without touching the store.
+func TestServerOwnedRecoveryConditionsAreNotAgentWritable(t *testing.T) {
+	const fence = `"uid":"uid-1","nodeRef":"node-a","assignmentGeneration":5`
+	for _, ct := range []v1.ConditionType{
+		v1.ConditionTypeRecovering,
+		v1.ConditionTypeRecoveryExhausted,
+		v1.ConditionTypeTakeoverRequired,
+	} {
+		t.Run(string(ct), func(t *testing.T) {
+			s := &conditionFakeStore{}
+			h := newFenceHandler(s)
+
+			rec := doPatchCondition(h, "demo", string(ct), `{"status":"True","reason":"Forged",`+fence+`}`)
+			if rec.Code == http.StatusNoContent {
+				t.Fatalf("patch of server-owned %s was accepted", ct)
+			}
+			rec = doDeleteCondition(h, "demo", string(ct), "uid=uid-1&nodeRef=node-a&assignmentGeneration=5")
+			if rec.Code == http.StatusNoContent {
+				t.Fatalf("clear of server-owned %s was accepted", ct)
+			}
+			if len(s.patched) != 0 || len(s.cleared) != 0 {
+				t.Fatalf("store was written: patched=%+v cleared=%v", s.patched, s.cleared)
+			}
+		})
 	}
 }
 
@@ -130,7 +159,7 @@ func TestEvictionConditionsOwnership(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.condType, func(t *testing.T) {
 			s := &conditionFakeStore{}
-			h := newFenceHandler(s, true)
+			h := newFenceHandler(s)
 			rec := doPatchCondition(h, "demo", tt.condType,
 				`{"status":"True","reason":"BackupSucceeded","message":"b1",`+
 					`"uid":"uid-1","nodeRef":"node-a","assignmentGeneration":5}`)

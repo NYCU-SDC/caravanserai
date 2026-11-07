@@ -23,7 +23,6 @@ import (
 type mockRuntime struct {
 	inspectFn       func(ctx context.Context, project *v1.Project) ([]docker.ContainerState, error)
 	reconcileFn     func(ctx context.Context, project *v1.Project) error
-	removeFn        func(ctx context.Context, namespace, name string, spec v1.ProjectSpec) error
 	getContainerIPs func(ctx context.Context, project *v1.Project) (map[string]string, error)
 	stopFn          func(ctx context.Context, project *v1.Project) error
 	startFn         func(ctx context.Context, project *v1.Project) error
@@ -45,13 +44,6 @@ func (m *mockRuntime) InspectProject(ctx context.Context, project *v1.Project) (
 func (m *mockRuntime) ReconcileProject(ctx context.Context, project *v1.Project) error {
 	if m.reconcileFn != nil {
 		return m.reconcileFn(ctx, project)
-	}
-	return nil
-}
-
-func (m *mockRuntime) RemoveProject(ctx context.Context, namespace, name string, spec v1.ProjectSpec) error {
-	if m.removeFn != nil {
-		return m.removeFn(ctx, namespace, name, spec)
 	}
 	return nil
 }

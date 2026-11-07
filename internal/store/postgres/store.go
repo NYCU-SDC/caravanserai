@@ -465,10 +465,22 @@ func (s *Store) GetProject(ctx context.Context, name string) (*v1.Project, error
 }
 
 func (s *Store) getProject(ctx context.Context, name string) (*v1.Project, error) {
-	row := s.pool.QueryRow(ctx, `
+	return readProject(ctx, s.pool, name, "")
+}
+
+// rowQuerier is what readProject needs from a pool or a transaction.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// readProject reads one Project through q. lock is appended to the query
+// verbatim; FinalizeProject passes "FOR UPDATE" to hold the row until its
+// transaction ends.
+func readProject(ctx context.Context, q rowQuerier, name, lock string) (*v1.Project, error) {
+	row := q.QueryRow(ctx, `
 		SELECT namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
 		FROM resources
-		WHERE kind = $1 AND namespace = $2 AND name = $3`,
+		WHERE kind = $1 AND namespace = $2 AND name = $3 `+lock,
 		kindProject, defaultNamespace, name,
 	)
 
@@ -582,6 +594,29 @@ func (s *Store) ListProjectsByNodeRef(ctx context.Context, nodeRef string, phase
 	return scanProjects(rows)
 }
 
+// ListProjectsOwingCleanup implements store.ProjectStore.
+//
+// The JSONB containment test selects every Project whose obligation list has
+// an entry for nodeName, resolved or not; deciding which entries are tasks is
+// left to the caller, so the rule lives in one place (Project.CleanupTasksFor)
+// rather than being split between SQL and Go.
+func (s *Store) ListProjectsOwingCleanup(ctx context.Context, nodeName string) ([]*v1.Project, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT name, namespace, uid, resource_version, spec, status, labels, annotations, created_at, updated_at
+		FROM resources
+		WHERE kind = $1 AND namespace = $2
+		  AND status->'recovery'->'cleanupObligations' @> jsonb_build_array(
+		        jsonb_build_object('assignment', jsonb_build_object('nodeName', $3::text)))`,
+		kindProject, defaultNamespace, nodeName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list projects owing cleanup on %q: %w", nodeName, err)
+	}
+	defer rows.Close()
+
+	return scanProjects(rows)
+}
+
 // UpdateProject implements store.ProjectStore.
 func (s *Store) UpdateProject(ctx context.Context, project *v1.Project) error {
 	project.ObjectMeta.UpdatedAt = time.Now().UTC()
@@ -633,6 +668,68 @@ func (s *Store) DeleteProject(ctx context.Context, name string) error {
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+	}
+	return nil
+}
+
+// FinalizeProject implements store.ProjectStore.
+func (s *Store) FinalizeProject(ctx context.Context, name, uid string, blocker func(*v1.Project) string) error {
+	return s.finalizeProject(ctx, name, uid, blocker, nil)
+}
+
+// finalizeProject is the finalization point: the one transaction in which a
+// Project's record stops existing. The row is locked FOR UPDATE before blocker
+// reads it, so every other write to it waits until this transaction ends and
+// then finds the row gone — a status write that would have made blocker refuse
+// cannot slip in between the check and the delete.
+//
+// attach runs inside the same transaction after the check and before the
+// delete. Writes that must happen if and only if the record is finalized — the
+// deletion timestamp that starts deleted-Project backup retention, for example
+// — belong there, so they commit or roll back together with it. Production
+// passes nil until such a write exists.
+func (s *Store) finalizeProject(
+	ctx context.Context,
+	name, uid string,
+	blocker func(*v1.Project) string,
+	attach func(ctx context.Context, tx pgx.Tx) error,
+) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin finalize project %q: %w", name, err)
+	}
+	// A no-op once Commit has succeeded.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	project, err := readProject(ctx, tx, name, "FOR UPDATE")
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+		}
+		return err
+	}
+	if project.ObjectMeta.UID != uid {
+		return fmt.Errorf("%w: project %q is no longer lifetime %s", store.ErrStaleAssignment, name, uid)
+	}
+	if reason := blocker(project); reason != "" {
+		return &store.FinalizationBlockedError{Name: name, Reason: reason}
+	}
+
+	if attach != nil {
+		if err := attach(ctx, tx); err != nil {
+			return err
+		}
+	}
+
+	// Pinned to the UID as well, though the lock already makes it redundant:
+	// the statement says on its own which lifetime it removes.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM resources WHERE kind = $1 AND namespace = $2 AND name = $3 AND uid = $4`,
+		kindProject, defaultNamespace, name, uid); err != nil {
+		return fmt.Errorf("postgres: finalize project %q: %w", name, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit finalize project %q: %w", name, err)
 	}
 	return nil
 }
@@ -863,6 +960,56 @@ func (s *Store) swapProjectStatusFenced(
 	return nil
 }
 
+// swapProjectStatusForUID is a compare-and-swap pinned to one Project
+// lifetime: it matches only the row with this UID at this version. Use it
+// wherever the status was read on behalf of a caller that named a specific
+// lifetime, so a delete-and-recreate between read and write cannot redirect
+// the write to a same-name successor.
+func (s *Store) swapProjectStatusForUID(
+	ctx context.Context,
+	name string,
+	expectedVersion int64,
+	uid string,
+	status v1.ProjectStatus,
+) error {
+	raw, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal project status: %w", err)
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE resources
+		SET phase = $1, status = $2, updated_at = $3, resource_version = resource_version + 1
+		WHERE kind = $4 AND namespace = $5 AND name = $6 AND resource_version = $7 AND uid = $8`,
+		string(status.Phase), raw, time.Now().UTC(),
+		kindProject, defaultNamespace, name, expectedVersion, uid,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: update project status %q at version %d: %w", name, expectedVersion, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return s.classifyUIDSwapMiss(ctx, name, uid)
+	}
+	return nil
+}
+
+// classifyUIDSwapMiss explains a UID-pinned swap that matched no row: the
+// same lifetime at a newer version is a retryable race; a different lifetime
+// under the name means the caller's lifetime is gone, which no retry fixes.
+func (s *Store) classifyUIDSwapMiss(ctx context.Context, name, uid string) error {
+	project, err := s.getProject(ctx, name)
+	switch {
+	case err == nil && project.ObjectMeta.UID == uid:
+		return fmt.Errorf("%w: project %q", store.ErrVersionConflict, name)
+	case err == nil:
+		return fmt.Errorf("%w: project %q", store.ErrStaleAssignment, name)
+	case errors.Is(err, store.ErrNotFound):
+		return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+	default:
+		return fmt.Errorf("postgres: classify project status update %q: %w", name, err)
+	}
+}
+
 // classifyFencedSwapMiss explains a fenced compare-and-swap that matched no
 // row. A matching fence means only the version moved (a real race, retryable);
 // a mismatching fence means ownership changed under the Agent (stale, not
@@ -949,6 +1096,279 @@ func (s *Store) ClearProjectConditionFenced(
 	return nil
 }
 
+// workloadStoppedPhases are the phases in which the assigned Agent may record
+// that every Project container is stopped. Pending carries no nodeRef, so no
+// fence can match it; Terminated means the containers were already reported
+// removed, so stop evidence would say nothing new. Scheduled is included
+// because a Project told to stop before its containers ever started is,
+// truthfully, fully stopped.
+var workloadStoppedPhases = map[v1.ProjectPhase]bool{
+	v1.ProjectPhaseScheduled:   true,
+	v1.ProjectPhaseRunning:     true,
+	v1.ProjectPhaseFailed:      true,
+	v1.ProjectPhaseTerminating: true,
+}
+
+// assignmentIdentity converts an Agent's fence into the identity evidence is
+// recorded against. Evidence is always about the assignment that presented it.
+func assignmentIdentity(ref store.AssignmentRef) v1.AssignmentIdentity {
+	return v1.AssignmentIdentity{ProjectUID: ref.UID, NodeName: ref.NodeRef, AssignmentGeneration: ref.Generation}
+}
+
+// RecordWorkloadStopped implements store.ProjectStore.
+//
+// It rides on ReportProjectStatusFenced, so the fence is enforced by the swap's
+// own WHERE and the phase check runs against the snapshot that swap is
+// versioned on — the check and the write cannot be separated by a
+// reassignment.
+func (s *Store) RecordWorkloadStopped(ctx context.Context, name string, ref store.AssignmentRef, observedAt time.Time) error {
+	evidence := assignmentIdentity(ref)
+	return s.ReportProjectStatusFenced(ctx, name, ref, func(status *v1.ProjectStatus) error {
+		if !workloadStoppedPhases[status.Phase] {
+			return fmt.Errorf("%w: project %q is %s; workload-stopped evidence is accepted only while Scheduled, Running, Failed or Terminating",
+				store.ErrConflictState, name, status.Phase)
+		}
+		// First evidence for an assignment wins. A retry or a restarted Agent
+		// reporting the same stop again changes nothing, not even ObservedAt,
+		// so the reassertion is a no-op with no version or event.
+		if status.Recovery.WorkloadStoppedFor(evidence) {
+			return nil
+		}
+		status.EnsureRecovery().WorkloadStopped = &v1.WorkloadStoppedEvidence{Assignment: evidence, ObservedAt: observedAt.UTC()}
+		return nil
+	})
+}
+
+// committedBackupPhases are the phases in which the assigned Agent may commit a
+// backup. Terminating is left out: a Project on its way out needs no restore
+// source.
+var committedBackupPhases = map[v1.ProjectPhase]bool{
+	v1.ProjectPhaseScheduled: true,
+	v1.ProjectPhaseRunning:   true,
+	v1.ProjectPhaseFailed:    true,
+}
+
+// RecordCommittedBackup implements store.ProjectStore. It rides on
+// ReportProjectStatusFenced for the same reason RecordWorkloadStopped does.
+func (s *Store) RecordCommittedBackup(ctx context.Context, name string, ref store.AssignmentRef, backupID string, committedAt time.Time) error {
+	return s.ReportProjectStatusFenced(ctx, name, ref, func(status *v1.ProjectStatus) error {
+		if !committedBackupPhases[status.Phase] {
+			return fmt.Errorf("%w: project %q is %s; a backup is committed only while Scheduled, Running or Failed",
+				store.ErrConflictState, name, status.Phase)
+		}
+		if status.Recovery.CommittedBackupID() == backupID {
+			return nil
+		}
+		status.EnsureRecovery().CommittedBackup = &v1.CommittedBackup{
+			BackupID:    backupID,
+			Assignment:  assignmentIdentity(ref),
+			CommittedAt: committedAt.UTC(),
+		}
+		return nil
+	})
+}
+
+// stanzaPhases are the phases in which the assigned Agent creates stanzas:
+// while placing the Project and while it runs.
+var stanzaPhases = map[v1.ProjectPhase]bool{
+	v1.ProjectPhaseScheduled: true,
+	v1.ProjectPhaseRunning:   true,
+}
+
+// RecordStanza implements store.ProjectStore.
+func (s *Store) RecordStanza(ctx context.Context, name string, ref store.AssignmentRef, volume string, observedAt time.Time) error {
+	stanza := v1.StanzaName(ref.UID, volume)
+	return s.ReportProjectStatusFenced(ctx, name, ref, func(status *v1.ProjectStatus) error {
+		if !stanzaPhases[status.Phase] {
+			return fmt.Errorf("%w: project %q is %s; stanzas are recorded only while Scheduled or Running",
+				store.ErrConflictState, name, status.Phase)
+		}
+		if status.Backup.HasStanza(stanza) {
+			return nil
+		}
+		if status.Backup == nil {
+			status.Backup = &v1.ProjectBackupStatus{}
+		}
+		status.Backup.Stanzas = append(status.Backup.Stanzas,
+			v1.StanzaRecord{Name: stanza, Volume: volume, RecordedAt: observedAt.UTC()})
+		return nil
+	})
+}
+
+// RecordBackupCompletion implements store.ProjectStore.
+//
+// It is pinned to the lifetime by UID only, so a retry can find its backupID
+// after a reassignment; the rest of the fence is checked here on the snapshot
+// the UID- and version-pinned swap is based on.
+func (s *Store) RecordBackupCompletion(ctx context.Context, name string, ref store.AssignmentRef, completion v1.BackupCompletion) error {
+	return s.updateProjectStatusForUID(ctx, name, ref.UID, func(status *v1.ProjectStatus) error {
+		if status.Backup.Completion(completion.BackupID) != nil {
+			return nil
+		}
+		if status.NodeRef != ref.NodeRef || status.AssignmentGeneration != ref.Generation {
+			return fmt.Errorf("%w: project %q is not assigned to %s at generation %d",
+				store.ErrStaleAssignment, name, ref.NodeRef, ref.Generation)
+		}
+		if status.Phase != v1.ProjectPhaseRunning {
+			return fmt.Errorf("%w: project %q is %s; backups are accepted only while Running",
+				store.ErrConflictState, name, status.Phase)
+		}
+		if status.Backup == nil {
+			status.Backup = &v1.ProjectBackupStatus{}
+		}
+		completion.NodeRef, completion.AssignmentGeneration = ref.NodeRef, ref.Generation
+		status.Backup.Completions = append(status.Backup.Completions, completion)
+		if over := len(status.Backup.Completions) - v1.MaxBackupCompletions; over > 0 {
+			status.Backup.Completions = slices.Delete(status.Backup.Completions, 0, over)
+		}
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypeBackupActive,
+			Status:             v1.ConditionTrue,
+			LastTransitionTime: completion.AcceptedAt,
+			Reason:             v1.ReasonBackupAccepted,
+			Message:            "A backup of this Project has been accepted",
+		}, !backupActive(status.Conditions))
+		return nil
+	}, nil)
+}
+
+func backupActive(conds []v1.Condition) bool {
+	for _, c := range conds {
+		if c.Type == v1.ConditionTypeBackupActive {
+			return c.Status == v1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// RecordResourcesRemoved implements store.ProjectStore.
+//
+// The owner is any cleanup obligation in the list, which no single-row fence
+// can express, so ownership is checked in Go on the snapshot the swap is based
+// on. The swap is pinned to the UID and version that snapshot came from: if
+// the obligations or the Project change in between, the swap misses, the loop
+// re-reads, and the ownership check runs again on the new state. A same-name
+// successor never inherits its predecessor's obligations: the UID check fails
+// before the list is looked at.
+func (s *Store) RecordResourcesRemoved(ctx context.Context, name string, owner store.AssignmentRef, observedAt time.Time) error {
+	return s.recordResourcesRemoved(ctx, name, owner, observedAt, nil)
+}
+
+// recordResourcesRemoved is RecordResourcesRemoved with a hook that runs
+// between the snapshot read and the swap. Production passes nil; tests use it
+// to land a delete-and-recreate inside that window.
+func (s *Store) recordResourcesRemoved(
+	ctx context.Context,
+	name string,
+	owner store.AssignmentRef,
+	observedAt time.Time,
+	beforeSwap func(),
+) error {
+	evidence := assignmentIdentity(owner)
+	return s.updateProjectStatusForUID(ctx, name, owner.UID, func(status *v1.ProjectStatus) error {
+		obligation := status.Recovery.FindObligation(evidence)
+		if obligation == nil {
+			return fmt.Errorf("%w: project %q", store.ErrStaleAssignment, name)
+		}
+		// First evidence for an obligation wins: a retry or a restarted Agent
+		// reporting again changes nothing, not even ObservedAt.
+		if obligation.Resolved() {
+			return nil
+		}
+		obligation.ResourcesRemoved = &v1.ResourcesRemovedEvidence{ObservedAt: observedAt.UTC()}
+		return nil
+	}, beforeSwap)
+}
+
+// RecordManagedDataQuarantined implements store.ProjectStore. Ownership is
+// checked the way RecordResourcesRemoved checks it.
+func (s *Store) RecordManagedDataQuarantined(ctx context.Context, name string, owner store.AssignmentRef, observedAt time.Time) error {
+	evidence := assignmentIdentity(owner)
+	return s.updateProjectStatusForUID(ctx, name, owner.UID, func(status *v1.ProjectStatus) error {
+		obligation := status.Recovery.FindObligation(evidence)
+		if obligation == nil {
+			return fmt.Errorf("%w: project %q", store.ErrStaleAssignment, name)
+		}
+		// First evidence for an obligation wins, as with ResourcesRemoved.
+		if obligation.ManagedDataQuarantined != nil {
+			return nil
+		}
+		obligation.ManagedDataQuarantined = &v1.ManagedDataQuarantinedEvidence{ObservedAt: observedAt.UTC()}
+		return nil
+	}, nil)
+}
+
+// UpdateProjectStatusForUID implements store.ProjectStore.
+func (s *Store) UpdateProjectStatusForUID(
+	ctx context.Context,
+	name, uid string,
+	mutate func(*v1.ProjectStatus) error,
+) error {
+	return s.updateProjectStatusForUID(ctx, name, uid, mutate, nil)
+}
+
+// updateProjectStatusForUID is the read-mutate-swap loop of
+// UpdateProjectStatusWithRetry pinned to one Project lifetime.
+//
+// The swap carries the UID as well as the version. Version alone is not
+// enough: a same-name Project created after the read starts its own version
+// count and can reach the same number, and a version-only swap would then
+// write the old lifetime's status — nodeRef, generation and all — over the new
+// one. A read that already finds another lifetime under the name fails before
+// mutate runs, so mutate only ever sees status of the lifetime it was asked
+// about.
+//
+// beforeSwap runs between the read and the swap; production passes nil.
+func (s *Store) updateProjectStatusForUID(
+	ctx context.Context,
+	name, uid string,
+	mutate func(*v1.ProjectStatus) error,
+	beforeSwap func(),
+) error {
+	var lastConflict error
+
+	for attempt := 0; attempt < maxStatusUpdateAttempts; attempt++ {
+		project, err := s.getProject(ctx, name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+			}
+			return err
+		}
+		if project.ObjectMeta.UID != uid {
+			return fmt.Errorf("%w: project %q is no longer lifetime %s", store.ErrStaleAssignment, name, uid)
+		}
+
+		next := copyProjectStatus(project.Status)
+		if err := mutate(&next); err != nil {
+			return err
+		}
+		unchanged, err := statusEqual(project.Status, next)
+		if err != nil {
+			return fmt.Errorf("postgres: compare project status %q: %w", name, err)
+		}
+		if unchanged {
+			return nil
+		}
+
+		if beforeSwap != nil {
+			beforeSwap()
+		}
+		err = s.swapProjectStatusForUID(ctx, name, project.ObjectMeta.ResourceVersion, uid, next)
+		switch {
+		case err == nil:
+			s.publish(event.TopicProjectUpdated, name)
+			return nil
+		case errors.Is(err, store.ErrVersionConflict):
+			lastConflict = err
+		default:
+			return err
+		}
+	}
+
+	return lastConflict
+}
+
 // classifyFencedConditionMiss explains a fenced condition write that matched no
 // row. Unlike the CAS path there is no version to race: a matching fence means
 // the write changed nothing (a genuine no-op, nil), a mismatching fence means
@@ -997,19 +1417,23 @@ const maxStatusUpdateAttempts = 3
 
 // copyProjectStatus returns a status sharing nothing mutable with src.
 //
-// slices.Clone is enough only because every field of v1.Condition is a value
-// type. Should Condition gain a slice, map or pointer field, the copy stops
-// being independent: mutate would edit the original alongside the candidate,
-// statusEqual would report "unchanged" for every in-place edit, and every such
-// update would become a silent no-op that writes nothing and returns nil.
+// Every slice, map or pointer reachable from ProjectStatus must be copied here.
+// A field that is shared instead lets mutate edit the original alongside the
+// candidate; statusEqual then reports "unchanged" for every in-place edit, and
+// each such update becomes a silent no-op that writes nothing and returns nil.
+//
+// slices.Clone is enough for Conditions only because every field of
+// v1.Condition is a value type. Recovery holds pointers, so it is deep-copied.
 func copyProjectStatus(src v1.ProjectStatus) v1.ProjectStatus {
 	dst := src
 	dst.Conditions = slices.Clone(src.Conditions)
+	dst.Recovery = src.Recovery.DeepCopy()
 	dst.FailedNodes = slices.Clone(src.FailedNodes)
 	if src.Eviction != nil {
 		e := *src.Eviction
 		dst.Eviction = &e
 	}
+	dst.Backup = src.Backup.DeepCopy()
 	return dst
 }
 
@@ -1196,6 +1620,16 @@ func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) erro
 	if err != nil {
 		return fmt.Errorf("postgres: marshal project annotations: %w", err)
 	}
+	// Backup items are fixed at creation. Comparing them inside the UPDATE,
+	// rather than only in the handler beforehand, is what keeps two concurrent
+	// updates from changing a strategy between one's check and the other's
+	// write. NULL on both sides means neither has items.
+	var items any
+	if project.Spec.Backup != nil && len(project.Spec.Backup.Items) > 0 {
+		if items, err = json.Marshal(project.Spec.Backup.Items); err != nil {
+			return fmt.Errorf("postgres: marshal project backup items: %w", err)
+		}
+	}
 
 	// Applying a Project again starts its retry budget over: whoever applies it
 	// has seen it fail and may have fixed what was wrong, so the nodes it failed
@@ -1208,19 +1642,25 @@ func (s *Store) UpdateProjectSpec(ctx context.Context, project *v1.Project) erro
 		    status = (status - 'failedNodes') || jsonb_build_object('conditions',
 		        COALESCE((SELECT jsonb_agg(c) FROM jsonb_array_elements(COALESCE(status->'conditions', '[]'::jsonb)) c
 		                  WHERE c->>'type' <> $9), '[]'::jsonb))
-		WHERE kind = $5 AND namespace = $6 AND name = $7 AND phase = ANY($8)`,
+		WHERE kind = $5 AND namespace = $6 AND name = $7 AND phase = ANY($8)
+		  AND spec->'backup'->'items' IS NOT DISTINCT FROM $10::jsonb`,
 		spec, labels, annotations, now, kindProject, project.ObjectMeta.Namespace, project.Name,
 		[]string{string(v1.ProjectPhasePending), string(v1.ProjectPhaseFailed)},
 		string(v1.ConditionTypeRescheduleExhausted),
+		items,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: update project spec %q: %w", project.Name, err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Distinguish "not found" from "wrong phase" by checking existence.
-		_, getErr := s.getProject(ctx, project.Name)
+		// Distinguish "not found", "items changed" and "wrong phase".
+		current, getErr := s.getProject(ctx, project.Name)
 		if getErr != nil {
 			return fmt.Errorf("%w: project %q", store.ErrNotFound, project.Name)
+		}
+		if !v1.SameBackupItems(current.Spec, project.Spec) {
+			return fmt.Errorf("%w: project %q: spec.backup.items cannot change after the Project is created",
+				store.ErrConflictState, project.Name)
 		}
 		return fmt.Errorf("%w: project %q is not in Pending or Failed phase", store.ErrConflictState, project.Name)
 	}
@@ -1581,3 +2021,396 @@ func (l *migrateLogger) Verbose() bool {
 
 // Compile-time assertion that *Store satisfies store.Store.
 var _ store.Store = (*Store)(nil)
+
+// applyOperatorTakeover applies an operator's override of the release gate to
+// status. It returns what changed, and writes the same fields ReleaseAssignment
+// does when the assignment is still held.
+func applyOperatorTakeover(status *v1.ProjectStatus, assignment v1.AssignmentIdentity, now time.Time) (v1.TakeoverOutcome, error) {
+	if status.AssignmentGeneration != assignment.AssignmentGeneration {
+		return "", fmt.Errorf("%w: generation %d is not the latest", store.ErrStaleAssignment, assignment.AssignmentGeneration)
+	}
+
+	if status.NodeRef == "" {
+		o := status.Recovery.FindObligation(assignment)
+		if status.Phase != v1.ProjectPhasePending || o == nil {
+			return "", fmt.Errorf("%w: no released assignment to take over", store.ErrStaleAssignment)
+		}
+		if o.PermitsAssignment() {
+			return "", fmt.Errorf("%w: the assignment is not blocking the project", store.ErrConflictState)
+		}
+		status.Recovery.OverrideRelease(assignment, now)
+		return v1.TakeoverObligationOverridden, nil
+	}
+
+	if status.NodeRef != assignment.NodeName {
+		return "", fmt.Errorf("%w: project is assigned to another node", store.ErrStaleAssignment)
+	}
+	if !v1.PhaseTransitionAllowed(v1.WriterOperatorTakeover, status.Phase, v1.ProjectPhasePending) {
+		return "", fmt.Errorf("%w: project is %s", store.ErrConflictState, status.Phase)
+	}
+	// The mark is the rescheduler's finding that the Node is gone past its grace
+	// period. Without it the Node may be healthy, and taking over would run the
+	// workload twice for nothing.
+	marked := slices.ContainsFunc(status.Conditions, func(c v1.Condition) bool {
+		return c.Type == v1.ConditionTypeTakeoverRequired && c.Status == v1.ConditionTrue
+	})
+	if !marked {
+		return "", fmt.Errorf("%w: project is not marked %s", store.ErrConflictState, v1.ConditionTypeTakeoverRequired)
+	}
+
+	transitioned := status.Phase != v1.ProjectPhasePending
+	status.Phase = v1.ProjectPhasePending
+	status.NodeRef = ""
+	status.EnsureRecovery().OverrideRelease(assignment, now)
+	status.Conditions = v1.RemoveConditions(status.Conditions,
+		v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt, v1.ConditionTypeTakeoverRequired)
+	status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+		Type:               v1.ConditionTypePhase,
+		Status:             v1.ConditionTrue,
+		Reason:             "OperatorTakeover",
+		Message:            "An operator took over without proof the workload stopped; project released for rescheduling",
+		LastTransitionTime: now,
+	}, transitioned)
+	return v1.TakeoverReleased, nil
+}
+
+// TakeoverProject implements store.ProjectStore.
+//
+// The audit insert and the status swap share a transaction, retried like every
+// other compare-and-swap here. The insert goes first: a conflict on request_id
+// means a concurrent or earlier request made this decision, and the next pass
+// returns that record.
+func (s *Store) TakeoverProject(
+	ctx context.Context,
+	name string,
+	ref store.AssignmentRef,
+	audit store.TakeoverAudit,
+) (v1.TakeoverAuditRecord, bool, error) {
+	assignment := assignmentIdentity(ref)
+	var lastConflict error
+
+	for attempt := 0; attempt < maxStatusUpdateAttempts; attempt++ {
+		prior, found, err := s.takeoverByRequestID(ctx, audit.RequestID)
+		if err != nil {
+			return v1.TakeoverAuditRecord{}, false, err
+		}
+		if found {
+			if prior.ProjectName != name || prior.Assignment != assignment {
+				return v1.TakeoverAuditRecord{}, false, fmt.Errorf("%w: request ID belongs to another takeover", store.ErrConflictState)
+			}
+			return prior, true, nil
+		}
+
+		project, err := s.getProject(ctx, name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return v1.TakeoverAuditRecord{}, false, fmt.Errorf("%w: project %q", store.ErrNotFound, name)
+			}
+			return v1.TakeoverAuditRecord{}, false, err
+		}
+		if project.ObjectMeta.UID != ref.UID {
+			return v1.TakeoverAuditRecord{}, false, fmt.Errorf("%w: project %q is no longer lifetime %s", store.ErrStaleAssignment, name, ref.UID)
+		}
+
+		now := time.Now().UTC()
+		next := copyProjectStatus(project.Status)
+		evidence := "None"
+		if next.Recovery.WorkloadStoppedFor(assignment) {
+			evidence = string(v1.ReleaseByWorkloadStopped)
+		}
+		outcome, err := applyOperatorTakeover(&next, assignment, now)
+		if err != nil {
+			return v1.TakeoverAuditRecord{}, false, fmt.Errorf("project %q: %w", name, err)
+		}
+		if project.Spec.HasManagedVolume() {
+			next.Recovery.OweManagedData(assignment)
+		}
+		record := v1.TakeoverAuditRecord{
+			RequestID:   audit.RequestID,
+			Namespace:   defaultNamespace,
+			ProjectName: name,
+			Assignment:  assignment,
+			Evidence:    evidence,
+			Outcome:     outcome,
+			Caller:      audit.Caller,
+			Note:        audit.Note,
+			CreatedAt:   now,
+		}
+
+		err = s.commitTakeover(ctx, name, project.ObjectMeta.ResourceVersion, ref.UID, next, record)
+		switch {
+		case err == nil:
+			s.publish(event.TopicProjectUpdated, name)
+			return record, false, nil
+		case errors.Is(err, store.ErrVersionConflict):
+			lastConflict = err
+		default:
+			return v1.TakeoverAuditRecord{}, false, err
+		}
+	}
+	return v1.TakeoverAuditRecord{}, false, lastConflict
+}
+
+// commitTakeover writes the audit record and the status in one transaction.
+// ErrVersionConflict means nothing was written and the caller should re-read.
+func (s *Store) commitTakeover(
+	ctx context.Context,
+	name string,
+	expectedVersion int64,
+	uid string,
+	status v1.ProjectStatus,
+	record v1.TakeoverAuditRecord,
+) error {
+	raw, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal project status: %w", err)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin takeover %q: %w", name, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO takeover_audit
+			(request_id, namespace, project_name, project_uid, node_name,
+			 assignment_generation, evidence, outcome, caller, note, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		ON CONFLICT (request_id) DO NOTHING`,
+		record.RequestID, record.Namespace, record.ProjectName, record.Assignment.ProjectUID,
+		record.Assignment.NodeName, record.Assignment.AssignmentGeneration,
+		record.Evidence, string(record.Outcome), record.Caller, record.Note, record.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: record takeover %q: %w", name, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: takeover request %q", store.ErrVersionConflict, record.RequestID)
+	}
+
+	tag, err = tx.Exec(ctx, `
+		UPDATE resources
+		SET phase = $1, status = $2, updated_at = $3, resource_version = resource_version + 1
+		WHERE kind = $4 AND namespace = $5 AND name = $6 AND resource_version = $7 AND uid = $8`,
+		string(status.Phase), raw, record.CreatedAt,
+		kindProject, defaultNamespace, name, expectedVersion, uid,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: update project status %q at version %d: %w", name, expectedVersion, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return s.classifyUIDSwapMiss(ctx, name, uid)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit takeover %q: %w", name, err)
+	}
+	return nil
+}
+
+const takeoverAuditColumns = `request_id, namespace, project_name, project_uid, node_name,
+	assignment_generation, evidence, outcome, caller, note, created_at`
+
+func scanTakeoverAudit(row pgx.Row) (v1.TakeoverAuditRecord, error) {
+	var r v1.TakeoverAuditRecord
+	err := row.Scan(&r.RequestID, &r.Namespace, &r.ProjectName, &r.Assignment.ProjectUID, &r.Assignment.NodeName,
+		&r.Assignment.AssignmentGeneration, &r.Evidence, &r.Outcome, &r.Caller, &r.Note, &r.CreatedAt)
+	return r, err
+}
+
+func (s *Store) takeoverByRequestID(ctx context.Context, requestID string) (v1.TakeoverAuditRecord, bool, error) {
+	r, err := scanTakeoverAudit(s.pool.QueryRow(ctx,
+		`SELECT `+takeoverAuditColumns+` FROM takeover_audit WHERE request_id = $1`, requestID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v1.TakeoverAuditRecord{}, false, nil
+	}
+	if err != nil {
+		return v1.TakeoverAuditRecord{}, false, fmt.Errorf("postgres: get takeover request %q: %w", requestID, err)
+	}
+	return r, true, nil
+}
+
+// ListTakeoverAudit implements store.ProjectStore.
+func (s *Store) ListTakeoverAudit(ctx context.Context, name string) ([]v1.TakeoverAuditRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+takeoverAuditColumns+` FROM takeover_audit
+		WHERE namespace = $1 AND project_name = $2 ORDER BY created_at, id`, defaultNamespace, name)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list takeover audit %q: %w", name, err)
+	}
+	defer rows.Close()
+
+	records := []v1.TakeoverAuditRecord{}
+	for rows.Next() {
+		r, err := scanTakeoverAudit(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: scan takeover audit %q: %w", name, err)
+		}
+		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list takeover audit %q: %w", name, err)
+	}
+	return records, nil
+}
+
+// ============================================================
+// APIToken
+// ============================================================
+
+const apiTokenColumns = `id, kind, name, created_by, created_at, revoked_at`
+
+func scanAPIToken(row pgx.Row) (v1.APIToken, error) {
+	var t v1.APIToken
+	err := row.Scan(&t.ID, &t.Kind, &t.Name, &t.CreatedBy, &t.CreatedAt, &t.RevokedAt)
+	return t, err
+}
+
+// CreateAPIToken implements store.APITokenStore.
+func (s *Store) CreateAPIToken(ctx context.Context, kind v1.APITokenKind, name, tokenHash, createdBy string) (v1.APIToken, error) {
+	t, err := scanAPIToken(s.pool.QueryRow(ctx, `
+		INSERT INTO api_tokens (kind, name, token_hash, created_by, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING `+apiTokenColumns, kind, name, tokenHash, createdBy, time.Now().UTC()))
+	if err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: create api token for %s:%s: %w", kind, name, err)
+	}
+	return t, nil
+}
+
+// LookupAPIToken implements store.APITokenStore.
+func (s *Store) LookupAPIToken(ctx context.Context, tokenHash string) (v1.APIToken, error) {
+	t, err := scanAPIToken(s.pool.QueryRow(ctx,
+		`SELECT `+apiTokenColumns+` FROM api_tokens WHERE token_hash = $1 AND revoked_at IS NULL`, tokenHash))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v1.APIToken{}, store.ErrNotFound
+	}
+	if err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: look up api token: %w", err)
+	}
+	return t, nil
+}
+
+// ListAPITokens implements store.APITokenStore.
+func (s *Store) ListAPITokens(ctx context.Context) ([]v1.APIToken, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+apiTokenColumns+` FROM api_tokens ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list api tokens: %w", err)
+	}
+	defer rows.Close()
+
+	tokens := []v1.APIToken{}
+	for rows.Next() {
+		t, err := scanAPIToken(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: scan api token: %w", err)
+		}
+		tokens = append(tokens, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list api tokens: %w", err)
+	}
+	return tokens, nil
+}
+
+// RevokeAPIToken implements store.APITokenStore.
+func (s *Store) RevokeAPIToken(ctx context.Context, id int64) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE api_tokens SET revoked_at = COALESCE(revoked_at, $2) WHERE id = $1`, id, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("postgres: revoke api token %d: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: api token %d", store.ErrNotFound, id)
+	}
+	return nil
+}
+
+const nodeJoinTokenColumns = `id, node_name, created_by, created_at, expires_at, used_at, revoked_at`
+
+func scanNodeJoinToken(row pgx.Row) (v1.NodeJoinToken, error) {
+	var t v1.NodeJoinToken
+	err := row.Scan(&t.ID, &t.NodeName, &t.CreatedBy, &t.CreatedAt, &t.ExpiresAt, &t.UsedAt, &t.RevokedAt)
+	return t, err
+}
+
+// CreateNodeJoinToken implements store.APITokenStore.
+func (s *Store) CreateNodeJoinToken(ctx context.Context, nodeName, tokenHash, createdBy string, expiresAt time.Time) (v1.NodeJoinToken, error) {
+	t, err := scanNodeJoinToken(s.pool.QueryRow(ctx, `
+		INSERT INTO node_join_tokens (node_name, token_hash, created_by, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING `+nodeJoinTokenColumns, nodeName, tokenHash, createdBy, time.Now().UTC(), expiresAt.UTC()))
+	if err != nil {
+		return v1.NodeJoinToken{}, fmt.Errorf("postgres: create join token for node %q: %w", nodeName, err)
+	}
+	return t, nil
+}
+
+// RedeemNodeJoinToken implements store.APITokenStore.
+func (s *Store) RedeemNodeJoinToken(ctx context.Context, joinHash, nodeName, nodeTokenHash string, now time.Time) (v1.APIToken, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: begin redeem join token: %w", err)
+	}
+	// A no-op once Commit has succeeded.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// FOR UPDATE makes two concurrent redemptions of one token serialise, and
+	// the second then sees used_at set.
+	join, err := scanNodeJoinToken(tx.QueryRow(ctx, `
+		SELECT `+nodeJoinTokenColumns+` FROM node_join_tokens
+		WHERE token_hash = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > $2
+		FOR UPDATE`, joinHash, now.UTC()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v1.APIToken{}, store.ErrNotFound
+	}
+	if err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: look up join token: %w", err)
+	}
+	if join.NodeName != nodeName {
+		return v1.APIToken{}, fmt.Errorf("%w: join token %d is for node %q, not %q", store.ErrWrongNode, join.ID, join.NodeName, nodeName)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE node_join_tokens SET used_at = $2 WHERE id = $1`, join.ID, now.UTC()); err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: mark join token %d used: %w", join.ID, err)
+	}
+	issued, err := scanAPIToken(tx.QueryRow(ctx, `
+		INSERT INTO api_tokens (kind, name, token_hash, created_by, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING `+apiTokenColumns,
+		v1.APITokenKindNode, nodeName, nodeTokenHash, fmt.Sprintf("join-token:%d", join.ID), now.UTC()))
+	if err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: issue node token for %q: %w", nodeName, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return v1.APIToken{}, fmt.Errorf("postgres: commit redeem join token: %w", err)
+	}
+	return issued, nil
+}
+
+// RevokeNodeTokens implements store.APITokenStore.
+func (s *Store) RevokeNodeTokens(ctx context.Context, nodeName string) (int, int, error) {
+	now := time.Now().UTC()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("postgres: begin revoke node tokens: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	nodes, err := tx.Exec(ctx, `
+		UPDATE api_tokens SET revoked_at = $3
+		WHERE kind = $1 AND name = $2 AND revoked_at IS NULL`, v1.APITokenKindNode, nodeName, now)
+	if err != nil {
+		return 0, 0, fmt.Errorf("postgres: revoke node tokens of %q: %w", nodeName, err)
+	}
+	joins, err := tx.Exec(ctx, `
+		UPDATE node_join_tokens SET revoked_at = $2
+		WHERE node_name = $1 AND used_at IS NULL AND revoked_at IS NULL`, nodeName, now)
+	if err != nil {
+		return 0, 0, fmt.Errorf("postgres: revoke join tokens of %q: %w", nodeName, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, fmt.Errorf("postgres: commit revoke node tokens: %w", err)
+	}
+	return int(nodes.RowsAffected()), int(joins.RowsAffected()), nil
+}
