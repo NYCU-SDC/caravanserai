@@ -55,36 +55,7 @@ func (a *NodeStoreAdapter) SetNodeState(ctx context.Context, name string, state 
 	if err != nil {
 		return err
 	}
-	node.Status.State = state
-	// Update or append the Ready condition.
-	condStatus := v1.ConditionTrue
-	if state != v1.NodeStateReady {
-		condStatus = v1.ConditionFalse
-	}
-	now := time.Now().UTC()
-	updated := false
-	for i, c := range node.Status.Conditions {
-		if c.Type == v1.ConditionTypeReady {
-			node.Status.Conditions[i] = v1.Condition{
-				Type:               v1.ConditionTypeReady,
-				Status:             condStatus,
-				Reason:             reason,
-				Message:            message,
-				LastTransitionTime: now,
-			}
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		node.Status.Conditions = append(node.Status.Conditions, v1.Condition{
-			Type:               v1.ConditionTypeReady,
-			Status:             condStatus,
-			Reason:             reason,
-			Message:            message,
-			LastTransitionTime: now,
-		})
-	}
+	node.Status.SetState(state, reason, message, time.Now().UTC())
 	return a.s.UpdateNodeStatus(ctx, name, node.Status)
 }
 
@@ -122,10 +93,11 @@ func (a *NodeReadyAdapter) ListReadyNodes(ctx context.Context) ([]controller.Rea
 	for _, n := range nodes {
 		if n.Status.State == v1.NodeStateReady && !n.Spec.Unschedulable {
 			ready = append(ready, controller.ReadyNode{
-				Name:        n.Name,
-				Labels:      n.Labels,
-				Allocatable: n.Status.Allocatable,
-				Conditions:  n.Status.Conditions,
+				Name:           n.Name,
+				Labels:         n.Labels,
+				Allocatable:    n.Status.Allocatable,
+				Conditions:     n.Status.Conditions,
+				RecentNotReady: n.Status.RecentNotReady,
 			})
 		}
 	}

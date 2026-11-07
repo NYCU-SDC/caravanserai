@@ -167,10 +167,29 @@ func TestCapacityLedgerAgainstPostgres(t *testing.T) {
 	assert.Contains(t, reason, "lacks cpu")
 }
 
-// createLedgerNode creates a Ready node with the given Allocatable and, when
-// busy is true, a Running Large project that fills 2c / 4Gi of it. tier, when
-// not empty, is set as the node's cara.io/tier label.
+// longStable is long before any test clock, so a node Ready since then counts
+// as stable and a project running since then as cooled down for fail-back.
+var longStable = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+// createLedgerNode creates a node Ready since longStable with the given
+// Allocatable and, when busy is true, a Running Large project that fills
+// 2c / 4Gi of it. tier, when not empty, is set as the node's cara.io/tier
+// label.
 func createLedgerNode(t *testing.T, s *controllerhelper.Suite, name, tier string, allocatable v1.ResourceList, busy bool) {
+	t.Helper()
+	createNodeReadySince(t, s, name, tier, allocatable, longStable)
+	if busy {
+		require.NoError(t, s.Store.CreateProject(context.Background(), &v1.Project{
+			TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"},
+			ObjectMeta: v1.ObjectMeta{Name: name + "-tenant"},
+			Spec:       v1.ProjectSpec{Size: v1.ProjectSizeLarge},
+			Status:     v1.ProjectStatus{Phase: v1.ProjectPhaseRunning, NodeRef: name},
+		}))
+	}
+}
+
+// createNodeReadySince creates a node that has been Ready since since.
+func createNodeReadySince(t *testing.T, s *controllerhelper.Suite, name, tier string, allocatable v1.ResourceList, since time.Time) {
 	t.Helper()
 	ctx := context.Background()
 	var labels map[string]string
@@ -180,16 +199,11 @@ func createLedgerNode(t *testing.T, s *controllerhelper.Suite, name, tier string
 	require.NoError(t, s.Store.CreateNode(ctx, &v1.Node{
 		TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Node"},
 		ObjectMeta: v1.ObjectMeta{Name: name, Labels: labels},
-		Status:     v1.NodeStatus{State: v1.NodeStateReady, Allocatable: allocatable, LastHeartbeat: time.Now().UTC()},
+		Status: v1.NodeStatus{
+			State: v1.NodeStateReady, Allocatable: allocatable, LastHeartbeat: time.Now().UTC(),
+			Conditions: []v1.Condition{{Type: v1.ConditionTypeReady, Status: v1.ConditionTrue, LastTransitionTime: since}},
+		},
 	}))
-	if busy {
-		require.NoError(t, s.Store.CreateProject(ctx, &v1.Project{
-			TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"},
-			ObjectMeta: v1.ObjectMeta{Name: name + "-tenant"},
-			Spec:       v1.ProjectSpec{Size: v1.ProjectSizeLarge},
-			Status:     v1.ProjectStatus{Phase: v1.ProjectPhaseRunning, NodeRef: name},
-		}))
-	}
 }
 
 // TestSchedulerFilterSkipsFullNode validates that the scheduler leaves out a

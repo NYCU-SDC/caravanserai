@@ -24,7 +24,7 @@ var (
 // fromNode — only a running Project can be backed up and moved — and does
 // nothing when a move is already in progress, so a trigger may ask again
 // without starting a second one.
-func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNode, reason string, targetTier v1.NodeTier) error {
+func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNode, reason string, targetTier v1.NodeTier, avoid []string) error {
 	if targetTier != "" && !targetTier.IsValid() {
 		return fmt.Errorf("request eviction of %q: invalid target tier %q", name, targetTier)
 	}
@@ -42,6 +42,7 @@ func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNod
 			FromNode:    fromNode,
 			State:       v1.EvictionStateQueued,
 			TargetTier:  targetTier,
+			AvoidNodes:  slices.Clone(avoid),
 			RequestedAt: now,
 			StateSince:  now,
 		}
