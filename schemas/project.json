@@ -387,6 +387,14 @@
       ],
       "description": "ObjectMeta holds identity and classification metadata common to all resources."
     },
+    "Overlap": {
+      "type": "string",
+      "enum": [
+        "Allow",
+        "Forbid"
+      ],
+      "description": "Whether two copies of the Project may run at once. Defaults to Allow when omitted."
+    },
     "Project": {
       "properties": {
         "apiVersion": {
@@ -551,7 +559,11 @@
         },
         "backup": {
           "$ref": "#/$defs/ProjectBackupConfig",
-          "description": "Backup configures periodic backup of every Managed volume in this\nProject. Omitting it means the volumes persist on the node but are\nnever uploaded."
+          "description": "Backup configures periodic backup of every Managed volume in this\nProject. A Project with a Managed volume that omits it is given the\nserver's default interval on create and update (ADR-0029); backup is\nturned off with backup.disabled."
+        },
+        "overlap": {
+          "$ref": "#/$defs/Overlap",
+          "description": "Overlap says whether two copies of this Project may run at once, as they\ndo when a Node is cut off from the server but keeps running and the\nProject is started elsewhere. Forbid is for a service with side effects\noutside its own data: scheduled jobs, webhooks, mail, bots. Omitting it\nmeans OverlapAllow (ADR-0036)."
         },
         "ingress": {
           "items": {
