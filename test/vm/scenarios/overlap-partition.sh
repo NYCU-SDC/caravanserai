@@ -9,10 +9,12 @@
 A=ov-allow
 F=ov-forbid
 
-# manifest <name> <Forbid|-> writes and applies a stateless Project.
+# manifest <name> <Forbid|-> writes and applies a stateless Project. Small, so
+# both fit on one 2-vCPU Node (1500m allocatable): two Medium Projects do not,
+# and the second would be placed on node-b before the partition starts.
 manifest() {
 	{
-		printf 'apiVersion: caravanserai/v1\nkind: Project\nmetadata:\n  name: %s\nspec:\n' "$1"
+		printf 'apiVersion: caravanserai/v1\nkind: Project\nmetadata:\n  name: %s\nspec:\n  size: Small\n' "$1"
 		[[ $2 == Forbid ]] && printf '  overlap: Forbid\n'
 		printf '  services:\n    - name: app\n      image: busybox:1.36\n'
 		printf '      command: ["sh", "-c", "exec sleep 86400"]\n'
@@ -45,6 +47,11 @@ wait_for 300 "$A Running on node-a" running_on "$A" node-a
 wait_for 120 "$F Running on node-a" running_on "$F" node-a
 expect "S1 Allow Project placed on node-a" node-a/Running "$(node_of "$A")/$(phase_of "$A")"
 expect "S1 Forbid Project placed on node-a" node-a/Running "$(node_of "$F")/$(phase_of "$F")"
+if [[ "$(node_of "$A")/$(node_of "$F")" != node-a/node-a ]]; then
+	log "both Projects must start on node-a for the partition to mean anything; stopping"
+	for p in "$A" "$F"; do ctl "delete project $p --force" >/dev/null 2>&1 || true; done
+	return 0
+fi
 
 log "--- S2: cut node-a off from the server"
 cut
