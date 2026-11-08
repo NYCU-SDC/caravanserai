@@ -109,20 +109,22 @@ deploy_server() {
 		exit 1" || { echo "cara-server did not become healthy" >&2; return 1; }
 }
 
-# deploy_object_store runs MinIO over TLS with a throwaway CA; the CA lands in
-# /etc/cara/s3-ca.crt on the server for the agents to copy.
+# deploy_object_store runs MinIO over TLS with a throwaway CA, kept in
+# /opt/cara-vmtest/minio-certs on the server for the agents to copy. Not under
+# /etc/cara: the cara-server package makes that directory root-only, and the
+# steps here and in deploy_agent run as the login user.
 deploy_object_store() {
 	VMTEST_S3_KEY=caratest
 	VMTEST_S3_SECRET="$(openssl rand -hex 16)"
 	local minio_image='cgr.dev/chainguard/minio:latest@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1'
-	srv "set -e; sudo install -d -m 755 /etc/cara/certs; cd /etc/cara/certs
+	srv "set -e; sudo install -d -m 755 /opt/cara-vmtest/minio-certs; cd /opt/cara-vmtest/minio-certs
 		sudo openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=cara-vmtest-ca -keyout ca.key -out ca.crt 2>/dev/null
 		sudo openssl req -newkey rsa:2048 -nodes -subj /CN=minio -keyout private.key -out s.csr 2>/dev/null
 		printf 'subjectAltName=IP:$VMTEST_SERVER_IP,IP:127.0.0.1\n' | sudo tee ext >/dev/null
 		sudo openssl x509 -req -in s.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 -extfile ext -out public.crt 2>/dev/null
 		sudo rm -f ca.key s.csr ext ca.srl; sudo chmod 644 private.key public.crt ca.crt
 		sudo docker rm -f cara-minio >/dev/null 2>&1 || true
-		sudo docker run -d --name cara-minio --restart=always -e MINIO_ROOT_USER=$VMTEST_S3_KEY -e MINIO_ROOT_PASSWORD=$VMTEST_S3_SECRET -e MC_HOST_local=https://$VMTEST_S3_KEY:$VMTEST_S3_SECRET@127.0.0.1:9000 -v /etc/cara/certs:/certs:ro -p $VMTEST_SERVER_IP:9000:9000 -v cara-minio:/data '$minio_image' server /data --certs-dir /certs >/dev/null
+		sudo docker run -d --name cara-minio --restart=always -e MINIO_ROOT_USER=$VMTEST_S3_KEY -e MINIO_ROOT_PASSWORD=$VMTEST_S3_SECRET -e MC_HOST_local=https://$VMTEST_S3_KEY:$VMTEST_S3_SECRET@127.0.0.1:9000 -v /opt/cara-vmtest/minio-certs:/certs:ro -p $VMTEST_SERVER_IP:9000:9000 -v cara-minio:/data '$minio_image' server /data --certs-dir /certs >/dev/null
 		for i in \$(seq 1 40); do sudo docker exec cara-minio mc --insecure mb --ignore-existing local/cara-test >/dev/null 2>&1 && exit 0; sleep 2; done
 		exit 1"
 }
@@ -134,7 +136,7 @@ deploy_agent() {
 	install_package "$v" "$bin" cara-agent || return 1
 	echo "$v $(install_state "$v" cara-agent)" >>"$VMTEST_OUT/logs/install-state.txt"
 	if [[ "${VMTEST_WITH_S3:-}" == 1 ]]; then
-		srv "cat /etc/cara/certs/ca.crt" | vm "$v" "sudo install -d -m 700 /etc/cara && sudo tee /etc/cara/s3-ca.crt >/dev/null" || return 1
+		srv "cat /opt/cara-vmtest/minio-certs/ca.crt" | vm "$v" "sudo install -d -m 700 /etc/cara && sudo tee /etc/cara/s3-ca.crt >/dev/null" || return 1
 		s3_env="S3_ENDPOINT=https://$VMTEST_SERVER_IP:9000
 S3_CA_FILE=/etc/cara/s3-ca.crt
 S3_BUCKET=cara-test
