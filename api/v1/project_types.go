@@ -2,6 +2,7 @@ package v1
 
 import (
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/invopop/jsonschema"
@@ -312,10 +313,22 @@ type TakeoverAuditRecord struct {
 // Managed volume is captured and committed together. Per-volume intervals
 // could not be honoured without producing generations whose volumes are from
 // different points in time — exactly what stopping the whole Project avoids.
+//
+// A Project with a Managed volume and no backup section gets the server's
+// default interval when it is created or updated (ADR-0029), so leaving the
+// section out means "back up on the default schedule", not "never". Disabled
+// is how a Project opts out.
 type ProjectBackupConfig struct {
 	// Interval is the time between backup runs, e.g. "168h", "1h". Parsed with
-	// time.ParseDuration; must be positive.
-	Interval string `json:"interval" yaml:"interval"`
+	// time.ParseDuration; must be positive unless Disabled is set, and empty
+	// when it is.
+	Interval string `json:"interval,omitempty" yaml:"interval,omitempty"`
+
+	// Disabled turns periodic backup off. A disabled Project is never moved off
+	// a lost Node automatically: its last backup, if any, falls further behind
+	// the data every day, and restoring it would discard everything since
+	// without anyone deciding to. Interval, OnMissing and Items must be empty.
+	Disabled bool `json:"disabled,omitempty" yaml:"disabled,omitempty"`
 
 	// OnMissing selects behaviour when no backup exists at restore time.
 	// Defaults to InitializeEmpty when empty.
@@ -926,6 +939,41 @@ func (r *ProjectRecoveryStatus) NodesOwingCleanup() []string {
 		}
 	}
 	return nodes
+}
+
+// DefaultBackupInterval is the backup interval a Project with a Managed volume
+// and no spec.backup gets when the server is not configured with another one
+// (ADR-0029). Club data rarely needs more than daily backups, and each
+// Offline backup stops the Project.
+const DefaultBackupInterval = 24 * time.Hour
+
+// WithDefaultBackup returns the spec with spec.backup set to interval when the
+// spec declares a Managed volume and no backup section. Any section the spec
+// has, including a disabled one, is kept as written.
+func (s ProjectSpec) WithDefaultBackup(interval time.Duration) ProjectSpec {
+	if s.Backup != nil || !s.HasManagedVolume() {
+		return s
+	}
+	s.Backup = &ProjectBackupConfig{Interval: shortDuration(interval)}
+	return s
+}
+
+// shortDuration formats d the way people write it: "24h" rather than
+// time.Duration's "24h0m0s".
+func shortDuration(d time.Duration) string {
+	out := d.String()
+	if strings.HasSuffix(out, "m0s") {
+		out = out[:len(out)-2]
+	}
+	if strings.HasSuffix(out, "h0m") {
+		out = out[:len(out)-2]
+	}
+	return out
+}
+
+// BackupDisabled reports whether the spec explicitly turns backup off.
+func (s ProjectSpec) BackupDisabled() bool {
+	return s.Backup != nil && s.Backup.Disabled
 }
 
 // HasManagedVolume reports whether the spec declares a Managed volume.

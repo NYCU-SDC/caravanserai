@@ -223,6 +223,8 @@ spec:
 
 ### Backup strategy per Managed volume
 
+A Project with a Managed volume and no `spec.backup` is backed up every 24 hours (the server's `default_backup_interval`); the stored spec shows the interval it got. A Project's own `interval` wins. Leaving `spec.backup` out of a later manifest returns it to the default rather than keeping an earlier value. `backup: {disabled: true}` turns backup off; such a Project is never moved off a lost Node automatically, even if it has an older backup, because restoring that would discard everything written since.
+
 `spec.backup` backs up every Managed volume offline by default: the Project's services are stopped and each volume is archived. The newest 7 generations of a Project are kept, along with the one the server committed; a generation from an earlier Project of the same name is left alone. `spec.backup.items` can select `PostgresDifferential` for a PostgreSQL data volume instead (pgBackRest full and differential backups, PostgreSQL keeps running). See [`examples/volume/postgres-differential.yaml`](examples/volume/postgres-differential.yaml).
 
 | Field | Meaning |
@@ -284,7 +286,8 @@ The file is the one named by `--config` or `CARA_CONFIG`, and a named file that 
 | `headscale_api_url` | `HEADSCALE_API_URL` | _(optional)_ | Headscale management API URL. Enables the `/api/v1/overlay` endpoints when set together with the API key |
 | `headscale_api_key` | `HEADSCALE_API_KEY` | _(optional)_ | Headscale management API key (secret, never logged) |
 | `running_grace_period` | `RUNNING_GRACE_PERIOD` | `3m` | How long a Running Project may stay on a NotReady node before its release is attempted |
-| `grace_expired_release` | `GRACE_EXPIRED_RELEASE` | `false` | Move Projects off a node that stayed NotReady past the grace period, with no proof it stopped; a partitioned node keeps its copy running until it reconnects. A Project with a Managed volume moves only once it has a committed backup, and restores from it |
+| `grace_expired_release` | `GRACE_EXPIRED_RELEASE` | `false` | Move Projects off a node that stayed NotReady past the grace period, with no proof it stopped; a partitioned node keeps its copy running until it reconnects. A Project with a Managed volume moves only once it has a committed backup, and restores from it; one with `spec.backup.disabled` never moves on the grace period |
+| `default_backup_interval` | `DEFAULT_BACKUP_INTERVAL` | `24h` | Backup interval a Project with a Managed volume and no `spec.backup` gets when it is created or updated |
 | `headscale_user` | `HEADSCALE_USER` | `cara-node` | Headscale user new pre-auth keys are created under |
 | `postgres_differential_image` | `POSTGRES_DIFFERENTIAL_IMAGE` | `ghcr.io/nycu-sdc/cara-postgres:16` | Image a `PostgresDifferential` volume's service must use. Set it where the published image cannot be pulled, or to a `16-<run>.<attempt>` tag to keep every Node on one content; manifests then name the same reference |
 

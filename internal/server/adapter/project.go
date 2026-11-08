@@ -248,7 +248,13 @@ func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controll
 		// be on the lost Node, and another Node could not start anyway. Only a
 		// person can decide to give that up. PostgresDifferential backups are
 		// accepted as completions rather than as a committed backup.
-		hasBackup := status.Recovery.CommittedBackupID() != "" || status.Backup.LastCompletion() != nil
+		//
+		// A Project that turned backup off does not count as having one even
+		// when an old backup exists: that backup falls further behind every
+		// day, and restoring it would discard everything since without anyone
+		// deciding to (ADR-0029).
+		hasBackup := !project.Spec.BackupDisabled() &&
+			(status.Recovery.CommittedBackupID() != "" || status.Backup.LastCompletion() != nil)
 		if !released && a.graceExpiredRelease && (!hasManaged || hasBackup) {
 			released = true
 			authorization = v1.ReleaseByGraceExpired

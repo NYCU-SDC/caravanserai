@@ -134,6 +134,7 @@ var describeProjectCoveredFields = newStringSet(
 	"Spec.Services",
 	"Spec.Volumes",
 	"Spec.Backup.Interval",
+	"Spec.Backup.Disabled",
 	"Spec.Backup.OnMissing",
 	"Spec.Backup.Items",
 	"Spec.Ingress",

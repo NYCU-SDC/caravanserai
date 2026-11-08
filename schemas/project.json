@@ -421,7 +421,11 @@
       "properties": {
         "interval": {
           "type": "string",
-          "description": "Interval is the time between backup runs, e.g. \"168h\", \"1h\". Parsed with\ntime.ParseDuration; must be positive."
+          "description": "Interval is the time between backup runs, e.g. \"168h\", \"1h\". Parsed with\ntime.ParseDuration; must be positive unless Disabled is set, and empty\nwhen it is."
+        },
+        "disabled": {
+          "type": "boolean",
+          "description": "Disabled turns periodic backup off. A disabled Project is never moved off\na lost Node automatically: its last backup, if any, falls further behind\nthe data every day, and restoring it would discard everything since\nwithout anyone deciding to. Interval, OnMissing and Items must be empty."
         },
         "onMissing": {
           "$ref": "#/$defs/VolumeOnMissing",
@@ -437,9 +441,6 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "interval"
-      ],
       "description": "ProjectBackupConfig configures periodic object-store backup of a Project's Managed volumes."
     },
     "ProjectBackupStatus": {
