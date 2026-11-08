@@ -263,9 +263,12 @@ func describeProject(w io.Writer, project *v1.Project) {
 	// Backup
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  Backup:")
-	if project.Spec.Backup == nil {
+	switch {
+	case project.Spec.Backup == nil:
 		fmt.Fprintln(w, "    <none>")
-	} else {
+	case project.Spec.Backup.Disabled:
+		fmt.Fprintln(w, "    Disabled (not moved off a lost Node automatically)")
+	default:
 		printField(w, "    Interval", stringOrNone(project.Spec.Backup.Interval))
 		onMissing := string(project.Spec.Backup.OnMissing)
 		if onMissing == "" {

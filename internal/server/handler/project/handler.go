@@ -56,6 +56,10 @@ type Handler struct {
 	// postgresImage is the image a PostgresDifferential volume's service must
 	// run (see WithPostgresDifferentialImage).
 	postgresImage string
+
+	// defaultBackupInterval is what a Project with a Managed volume and no
+	// spec.backup is backed up at (see WithDefaultBackupInterval).
+	defaultBackupInterval time.Duration
 }
 
 // NewHandler creates a Project Handler.
@@ -66,6 +70,8 @@ func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter
 		tracer:        otel.Tracer("project/handler"),
 		problemWriter: pw,
 		postgresImage: v1.PostgresDifferentialImage,
+
+		defaultBackupInterval: v1.DefaultBackupInterval,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -82,6 +88,17 @@ func WithPostgresDifferentialImage(ref string) Option {
 	return func(h *Handler) {
 		if ref != "" {
 			h.postgresImage = ref
+		}
+	}
+}
+
+// WithDefaultBackupInterval replaces the interval a Project with a Managed
+// volume and no spec.backup is backed up at (ADR-0029). Zero or negative keeps
+// v1.DefaultBackupInterval.
+func WithDefaultBackupInterval(d time.Duration) Option {
+	return func(h *Handler) {
+		if d > 0 {
+			h.defaultBackupInterval = d
 		}
 	}
 }
@@ -163,7 +180,16 @@ func validateProjectSpecFor(spec v1.ProjectSpec, postgresImage string) error {
 		}
 	}
 
-	if spec.Backup != nil {
+	if spec.Backup != nil && spec.Backup.Disabled {
+		if !hasManagedVolume {
+			return handlerutil.NewValidationError("spec.backup", nil,
+				"spec.backup requires at least one volume with type \"Managed\"")
+		}
+		if spec.Backup.Interval != "" || spec.Backup.OnMissing != "" || len(spec.Backup.Items) > 0 {
+			return handlerutil.NewValidationError("spec.backup.disabled", true,
+				"spec.backup.disabled turns backup off, so interval, onMissing and items must be left out")
+		}
+	} else if spec.Backup != nil {
 		// A backup policy with nothing to back up is always a mistake, and
 		// would otherwise be a silent no-op.
 		if !hasManagedVolume {
@@ -480,6 +506,7 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		project.Namespace = v1.DefaultNamespace
 	}
 
+	project.Spec = project.Spec.WithDefaultBackup(h.defaultBackupInterval)
 	if err := validateProjectSpecFor(project.Spec, h.postgresImage); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
@@ -558,6 +585,10 @@ func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request) {
 		project.Namespace = v1.DefaultNamespace
 	}
 
+	// The manifest is what the Project should be: leaving spec.backup out of
+	// it means the default schedule, the same as at creation, not "keep what
+	// was there before". Opting out is spec.backup.disabled.
+	project.Spec = project.Spec.WithDefaultBackup(h.defaultBackupInterval)
 	if err := validateProjectSpecFor(project.Spec, h.postgresImage); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
