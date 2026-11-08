@@ -530,9 +530,17 @@ type ProjectSpec struct {
 	Volumes []VolumeDef `json:"volumes,omitempty" yaml:"volumes,omitempty"`
 
 	// Backup configures periodic backup of every Managed volume in this
-	// Project. Omitting it means the volumes persist on the node but are
-	// never uploaded.
+	// Project. A Project with a Managed volume that omits it is given the
+	// server's default interval on create and update (ADR-0029); backup is
+	// turned off with backup.disabled.
 	Backup *ProjectBackupConfig `json:"backup,omitempty" yaml:"backup,omitempty"`
+
+	// Overlap says whether two copies of this Project may run at once, as they
+	// do when a Node is cut off from the server but keeps running and the
+	// Project is started elsewhere. Forbid is for a service with side effects
+	// outside its own data: scheduled jobs, webhooks, mail, bots. Omitting it
+	// means OverlapAllow (ADR-0036).
+	Overlap Overlap `json:"overlap,omitempty" yaml:"overlap,omitempty"`
 
 	// Ingress defines public or internal HTTP routing rules.
 	Ingress []IngressDef `json:"ingress,omitempty" yaml:"ingress,omitempty"`
@@ -547,6 +555,43 @@ type ProjectSpec struct {
 	// containers (ADR-0026). An update that leaves it out keeps the stored
 	// value, so applying a manifest after a restart does not restart again.
 	RestartedAt *time.Time `json:"restartedAt,omitempty" yaml:"restartedAt,omitempty"`
+}
+
+// Overlap declares whether two copies of a Project may run at the same time.
+// It describes the service, not a move policy: what Cara does with it depends
+// on what can stop the old copy. Today a Forbid Project is never moved on the
+// grace period alone; once Agent leases exist it may move after the old Node
+// has stopped it itself (ADR-0030).
+type Overlap string
+
+const (
+	// OverlapAllow: running twice for a while costs at most the writes the old
+	// copy makes, which a move after a lost Node already gives up.
+	OverlapAllow Overlap = "Allow"
+	// OverlapForbid: running twice does harm outside the Project, such as a
+	// job or a message sent twice.
+	OverlapForbid Overlap = "Forbid"
+)
+
+// IsValid reports whether o is one of the declared values. Empty is not valid
+// here; callers treat an omitted value as OverlapAllow before asking.
+func (o Overlap) IsValid() bool {
+	return o == OverlapAllow || o == OverlapForbid
+}
+
+// JSONSchema returns a JSON Schema with the allowed Overlap values.
+func (Overlap) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Enum:        []any{string(OverlapAllow), string(OverlapForbid)},
+		Description: "Whether two copies of the Project may run at once. Defaults to Allow when omitted.",
+	}
+}
+
+// ForbidsOverlap reports whether the spec declares that two copies must not
+// run at once.
+func (s ProjectSpec) ForbidsOverlap() bool {
+	return s.Overlap == OverlapForbid
 }
 
 // EffectiveSize returns the declared Size, or DefaultProjectSize when none was

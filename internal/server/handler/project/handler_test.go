@@ -485,3 +485,17 @@ func TestDefaultBackupIntervalOption(t *testing.T) {
 		"zero keeps the default rather than producing an interval validation rejects")
 	assert.Equal(t, 168*time.Hour, NewHandler(nil, nil, nil, WithDefaultBackupInterval(168*time.Hour)).defaultBackupInterval)
 }
+
+func TestValidateProjectSpecOverlap(t *testing.T) {
+	spec := func(o v1.Overlap) v1.ProjectSpec {
+		s := specWithVolumes(nil, nil)
+		s.Overlap = o
+		return s
+	}
+	assert.NoError(t, validateProjectSpec(spec("")), "omitted means Allow")
+	assert.NoError(t, validateProjectSpec(spec(v1.OverlapAllow)))
+	assert.NoError(t, validateProjectSpec(spec(v1.OverlapForbid)))
+	assert.ErrorContains(t, validateProjectSpec(spec("forbid")), `spec.overlap must be "Allow" or "Forbid"`,
+		"values are case-sensitive, like every other enum in the spec")
+	assert.ErrorContains(t, validateProjectSpec(spec("Never")), `spec.overlap must be "Allow" or "Forbid"`)
+}

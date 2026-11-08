@@ -143,6 +143,10 @@ func validateProjectSpecFor(spec v1.ProjectSpec, postgresImage string) error {
 		return handlerutil.NewValidationError("spec.size", spec.Size,
 			`spec.size must be one of "Small", "Medium", "Large"`)
 	}
+	if spec.Overlap != "" && !spec.Overlap.IsValid() {
+		return handlerutil.NewValidationError("spec.overlap", spec.Overlap,
+			`spec.overlap must be "Allow" or "Forbid"`)
+	}
 	for _, svc := range spec.Services {
 		if svc.Name == "" {
 			return handlerutil.NewValidationError("spec.services[].name", nil, "each service must have a non-empty name")

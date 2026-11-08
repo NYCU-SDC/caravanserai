@@ -255,19 +255,27 @@ func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controll
 		// deciding to (ADR-0029).
 		hasBackup := !project.Spec.BackupDisabled() &&
 			(status.Recovery.CommittedBackupID() != "" || status.Backup.LastCompletion() != nil)
-		if !released && a.graceExpiredRelease && (!hasManaged || hasBackup) {
+		// The grace period is no evidence the old copy stopped: a Node cut off
+		// from the server keeps running it. A Project that must not run twice
+		// waits for the Node or a person (ADR-0036).
+		forbidsOverlap := project.Spec.ForbidsOverlap()
+		if !released && a.graceExpiredRelease && !forbidsOverlap && (!hasManaged || hasBackup) {
 			released = true
 			authorization = v1.ReleaseByGraceExpired
 			reason = "Node stayed NotReady past its grace period; project released for rescheduling"
 		}
 		if !released {
+			message := fmt.Sprintf("Node %s is NotReady and has not confirmed generation %d stopped; "+
+				"the project stays assigned to it until the node returns or the takeover is authorized",
+				p.NodeRef, p.AssignmentGeneration)
+			if a.graceExpiredRelease && forbidsOverlap {
+				message += "; spec.overlap is Forbid, so it is not moved on the grace period"
+			}
 			status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
-				Type:   v1.ConditionTypeTakeoverRequired,
-				Status: v1.ConditionTrue,
-				Reason: "WorkloadStopUnconfirmed",
-				Message: fmt.Sprintf("Node %s is NotReady and has not confirmed generation %d stopped; "+
-					"the project stays assigned to it until the node returns or the takeover is authorized",
-					p.NodeRef, p.AssignmentGeneration),
+				Type:               v1.ConditionTypeTakeoverRequired,
+				Status:             v1.ConditionTrue,
+				Reason:             "WorkloadStopUnconfirmed",
+				Message:            message,
 				LastTransitionTime: now,
 			}, false)
 			return nil
