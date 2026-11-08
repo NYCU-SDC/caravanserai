@@ -553,6 +553,46 @@ func (c *Client) CommitBackup(ctx context.Context, projectName string, fence Ass
 	}
 }
 
+// ReportWorkloadStopped records the evidence that every container of the
+// assignment the fence names is stopped. It is what lets the server release
+// that assignment (the release gate of CARA-84), and it latches the
+// generation: once it is accepted, nothing on this node may start that
+// generation's containers again. So it is sent only once the containers
+// really are stopped and are meant to stay so.
+//
+// It returns ErrStaleAssignment when the fence no longer names the Project's
+// current assignment, and ErrProjectNotFound when the Project is gone.
+func (c *Client) ReportWorkloadStopped(ctx context.Context, projectName string, fence AssignmentFence) error {
+	body, err := json.Marshal(evidenceRequest{UID: fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &fence.Generation})
+	if err != nil {
+		return fmt.Errorf("marshal workload-stopped request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/projects/%s/recovery/workload-stopped", c.serverURL, projectName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build workload-stopped request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("workload-stopped request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("report workload stopped: unexpected status %s", resp.Status)
+	}
+}
+
 // stanzaRequest is the body of PUT /api/v1/projects/{name}/backup/stanzas.
 type stanzaRequest struct {
 	evidenceRequest

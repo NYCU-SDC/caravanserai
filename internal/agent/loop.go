@@ -351,6 +351,11 @@ func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docke
 	for _, p := range projects {
 		if p.Status.Phase == v1.ProjectPhaseRunning {
 			running++
+			// Read from the server before any Docker call, so a generation
+			// reported stopped stays stopped across an Agent restart.
+			if workloadLatched(p) {
+				continue
+			}
 			healthCheckOne(ctx, client, runtime, routes, busy, recovery, p, logger)
 		}
 	}
@@ -402,6 +407,11 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 	// ownership snapshot above: each task is revalidated on its own.
 	runCleanupTasks(ctx, client, cleaner, busy, logger)
 
+	// Failed Projects a different node may fix are stopped and reported
+	// stopped, so Tier-2 recovery can move them (CARA-92). They are not in
+	// the reconcile list below; this is the only thing done to them here.
+	stopFailedProjects(ctx, client, runtime, busy, assignedProjects, logger)
+
 	projects := projectsForReconcile(assignedProjects)
 
 	// Sync before the early return: an empty list means every Project left
@@ -446,6 +456,15 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 			}
 		}
 
+		// A generation this node has reported stopped is never started
+		// again here: no health check (which would recover it), no
+		// reconcile. Teardown still runs.
+		if p.Status.Phase != v1.ProjectPhaseTerminating && workloadLatched(p) {
+			logger.Debug("Skipping project this node has reported stopped",
+				zap.String("project", p.Name), zap.Int64("generation", p.Status.AssignmentGeneration))
+			continue
+		}
+
 		switch p.Status.Phase {
 		case v1.ProjectPhaseTerminating:
 			terminateOne(ctx, client, runtime, routes, busy, cleaner, p, logger)
@@ -478,6 +497,12 @@ func projectsForReconcile(projects []*v1.Project) []*v1.Project {
 // After a successful transition to Running, proxy routes are updated.
 func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, p *v1.Project, logger *zap.Logger) {
 	log := logger.With(zap.String("project", p.Name))
+
+	// Never start a generation this node has reported stopped (CARA-92).
+	if workloadLatched(p) {
+		log.Info("This node has reported the Project stopped; not starting it")
+		return
+	}
 
 	// Same first question as the health check, and for the same reason: a
 	// container from another assignment is not this one's to adopt, and a
@@ -1107,6 +1132,10 @@ func recoverLocally(
 		log.Info("Project changed before recovery could run, skipping", zap.Error(err))
 		return
 	}
+	if workloadLatched(current) {
+		log.Info("This node has reported the Project stopped; not recovering it")
+		return
+	}
 
 	// The copy healthCheckOne checked was the stale one. A backup that began
 	// since then is visible only here.
@@ -1365,7 +1394,14 @@ func secretBlocked(err error) (reason, message string, blocked bool) {
 // A failed write is logged and not retried here: the condition is how the
 // control plane learns of the block, not what enforces it, and the next poll
 // will try again because p will still not carry it.
-func reportRecoveryBlocked(ctx context.Context, client *Client, p *v1.Project, reason, message string, log *zap.Logger) {
+// conditionWriter writes a Project condition under the assignment fence. It
+// is satisfied by *Client.
+type conditionWriter interface {
+	PatchProjectCondition(ctx context.Context, projectName string, fence AssignmentFence, condType v1.ConditionType, status v1.ConditionStatus, reason, message string) error
+	ClearProjectCondition(ctx context.Context, projectName string, fence AssignmentFence, condType v1.ConditionType) error
+}
+
+func reportRecoveryBlocked(ctx context.Context, client conditionWriter, p *v1.Project, reason, message string, log *zap.Logger) {
 	if c, ok := projectCondition(p, v1.ConditionTypeRecoveryBlocked); ok &&
 		c.Status == v1.ConditionTrue && c.Reason == reason && c.Message == message {
 		return
@@ -1379,7 +1415,7 @@ func reportRecoveryBlocked(ctx context.Context, client *Client, p *v1.Project, r
 // clearRecoveryBlocked removes the RecoveryBlocked condition from p if p
 // carries one. Like reportRecoveryBlocked it writes only on a change, and a
 // failure is left for the next poll.
-func clearRecoveryBlocked(ctx context.Context, client *Client, p *v1.Project, log *zap.Logger) {
+func clearRecoveryBlocked(ctx context.Context, client conditionWriter, p *v1.Project, log *zap.Logger) {
 	if _, ok := projectCondition(p, v1.ConditionTypeRecoveryBlocked); !ok {
 		return
 	}
