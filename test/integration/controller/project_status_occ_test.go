@@ -297,16 +297,15 @@ func TestOCCEventSemantics(t *testing.T) {
 }
 
 // The guard has to hold for the mutation production actually performs, not just
-// for one contrived to produce identical bytes. SetProjectPhase stamps a
+// for one contrived to produce identical bytes. ForcePhase stamps a
 // Condition with a fresh timestamp every call; if that timestamp moved on an
 // unchanged re-assertion, every agent tick would be a write and an event and
 // this whole guard would be decorative. It did, once — this is why.
 func TestRepeatedIdenticalPhaseReportIsANoOp(t *testing.T) {
 	f := newOCCFixture(t, "occ-repeat-real-mutation")
 	ctx := context.Background()
-	projects := adapter.NewProjectStoreAdapter(f.store)
 
-	require.NoError(t, projects.SetProjectPhase(ctx, f.name,
+	require.NoError(t, testhelper.ForcePhase(ctx, f.store, f.name,
 		v1.ProjectPhaseRunning, "ContainersRunning", "All containers running"))
 	assert.Len(t, collectEvents(f.sub, 200*time.Millisecond), 1, "the first report is a real change")
 	after := f.version(t)
@@ -314,7 +313,7 @@ func TestRepeatedIdenticalPhaseReportIsANoOp(t *testing.T) {
 	// What the agent does on the next poll tick, and the one after that.
 	for i := 0; i < 3; i++ {
 		time.Sleep(2 * time.Millisecond)
-		require.NoError(t, projects.SetProjectPhase(ctx, f.name,
+		require.NoError(t, testhelper.ForcePhase(ctx, f.store, f.name,
 			v1.ProjectPhaseRunning, "ContainersRunning", "All containers running"))
 	}
 
@@ -324,7 +323,7 @@ func TestRepeatedIdenticalPhaseReportIsANoOp(t *testing.T) {
 		"repeated identical reports advanced resource_version")
 
 	// A genuine change still gets through.
-	require.NoError(t, projects.SetProjectPhase(ctx, f.name,
+	require.NoError(t, testhelper.ForcePhase(ctx, f.store, f.name,
 		v1.ProjectPhaseFailed, "ContainerExited", "exit 1"))
 	assert.Len(t, collectEvents(f.sub, 200*time.Millisecond), 1)
 	assert.Equal(t, after+1, f.version(t))
@@ -359,7 +358,7 @@ func TestScheduledThenPendingRecordsANewTransition(t *testing.T) {
 	ctx := context.Background()
 	projects := adapter.NewProjectStoreAdapter(f.store)
 
-	require.NoError(t, projects.SetProjectScheduled(ctx, f.name, "node-a"))
+	require.NoError(t, projects.SetProjectScheduled(ctx, f.name, testhelper.UID(t, f.store, f.name), "node-a"))
 	testhelper.ReleaseCleanly(t, f.store, f.name)
 	first := f.phaseCondition(t)
 	require.False(t, first.LastTransitionTime.IsZero(), "the first reschedule must stamp a time")
@@ -367,7 +366,7 @@ func TestScheduledThenPendingRecordsANewTransition(t *testing.T) {
 	time.Sleep(2 * time.Millisecond)
 
 	// The scheduler picks a node: the Phase condition follows the phase.
-	require.NoError(t, projects.SetProjectScheduled(ctx, f.name, "node-a"))
+	require.NoError(t, projects.SetProjectScheduled(ctx, f.name, testhelper.UID(t, f.store, f.name), "node-a"))
 	scheduled := f.phaseCondition(t)
 	assert.Equal(t, "Scheduled", scheduled.Reason, "SetProjectScheduled must record the transition (S9)")
 	assert.True(t, scheduled.LastTransitionTime.After(first.LastTransitionTime))
