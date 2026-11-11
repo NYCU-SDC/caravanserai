@@ -4,6 +4,7 @@
 //
 //	POST   /api/v1/projects                  — create a Project
 //	PUT    /api/v1/projects/{name}           — update a Project's spec
+//	POST   /api/v1/projects/{name}/restart   — recreate every service (rollout restart)
 //	GET    /api/v1/projects                  — list Projects (supports ?phase= and ?nodeRef= filters)
 //	GET    /api/v1/projects/{name}           — get a single Project
 //	DELETE /api/v1/projects/{name}           — delete a Project (supports ?force=true for immediate hard-delete)
@@ -55,6 +56,10 @@ type Handler struct {
 	// postgresImage is the image a PostgresDifferential volume's service must
 	// run (see WithPostgresDifferentialImage).
 	postgresImage string
+
+	// defaultBackupInterval is what a Project with a Managed volume and no
+	// spec.backup is backed up at (see WithDefaultBackupInterval).
+	defaultBackupInterval time.Duration
 }
 
 // NewHandler creates a Project Handler.
@@ -65,6 +70,8 @@ func NewHandler(logger *zap.Logger, s store.ProjectStore, pw *problem.HttpWriter
 		tracer:        otel.Tracer("project/handler"),
 		problemWriter: pw,
 		postgresImage: v1.PostgresDifferentialImage,
+
+		defaultBackupInterval: v1.DefaultBackupInterval,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -85,10 +92,22 @@ func WithPostgresDifferentialImage(ref string) Option {
 	}
 }
 
+// WithDefaultBackupInterval replaces the interval a Project with a Managed
+// volume and no spec.backup is backed up at (ADR-0029). Zero or negative keeps
+// v1.DefaultBackupInterval.
+func WithDefaultBackupInterval(d time.Duration) Option {
+	return func(h *Handler) {
+		if d > 0 {
+			h.defaultBackupInterval = d
+		}
+	}
+}
+
 // RegisterRoutes satisfies apiserver.RouteRegistrar.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux, mid *middleware.Set) {
 	mux.HandleFunc("POST /api/v1/projects", mid.HandlerFunc(h.createProject))
 	mux.HandleFunc("PUT /api/v1/projects/{name}", mid.HandlerFunc(h.updateProject))
+	mux.HandleFunc("POST /api/v1/projects/{name}/restart", mid.HandlerFunc(h.restartProject))
 	mux.HandleFunc("GET /api/v1/projects", mid.HandlerFunc(h.listProjects))
 	mux.HandleFunc("GET /api/v1/projects/{name}", mid.HandlerFunc(h.getProject))
 	mux.HandleFunc("DELETE /api/v1/projects/{name}", mid.HandlerFunc(h.deleteProject))
@@ -123,6 +142,10 @@ func validateProjectSpecFor(spec v1.ProjectSpec, postgresImage string) error {
 	if spec.Size != "" && !spec.Size.IsValid() {
 		return handlerutil.NewValidationError("spec.size", spec.Size,
 			`spec.size must be one of "Small", "Medium", "Large"`)
+	}
+	if spec.Overlap != "" && !spec.Overlap.IsValid() {
+		return handlerutil.NewValidationError("spec.overlap", spec.Overlap,
+			`spec.overlap must be "Allow" or "Forbid"`)
 	}
 	for _, svc := range spec.Services {
 		if svc.Name == "" {
@@ -161,7 +184,16 @@ func validateProjectSpecFor(spec v1.ProjectSpec, postgresImage string) error {
 		}
 	}
 
-	if spec.Backup != nil {
+	if spec.Backup != nil && spec.Backup.Disabled {
+		if !hasManagedVolume {
+			return handlerutil.NewValidationError("spec.backup", nil,
+				"spec.backup requires at least one volume with type \"Managed\"")
+		}
+		if spec.Backup.Interval != "" || spec.Backup.OnMissing != "" || len(spec.Backup.Items) > 0 {
+			return handlerutil.NewValidationError("spec.backup.disabled", true,
+				"spec.backup.disabled turns backup off, so interval, onMissing and items must be left out")
+		}
+	} else if spec.Backup != nil {
 		// A backup policy with nothing to back up is always a mistake, and
 		// would otherwise be a silent no-op.
 		if !hasManagedVolume {
@@ -478,6 +510,7 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 		project.Namespace = v1.DefaultNamespace
 	}
 
+	project.Spec = project.Spec.WithDefaultBackup(h.defaultBackupInterval)
 	if err := validateProjectSpecFor(project.Spec, h.postgresImage); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
@@ -556,6 +589,10 @@ func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request) {
 		project.Namespace = v1.DefaultNamespace
 	}
 
+	// The manifest is what the Project should be: leaving spec.backup out of
+	// it means the default schedule, the same as at creation, not "keep what
+	// was there before". Opting out is spec.backup.disabled.
+	project.Spec = project.Spec.WithDefaultBackup(h.defaultBackupInterval)
 	if err := validateProjectSpecFor(project.Spec, h.postgresImage); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
@@ -606,6 +643,36 @@ func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	handlerutil.WriteJSONResponse(w, http.StatusOK, updated)
+}
+
+// restartProject handles POST /api/v1/projects/{name}/restart.
+//
+// It records the time in spec.restartedAt, inside the same transaction an
+// update uses, so every service's spec hash changes and the Agent recreates
+// them. This is how a rotated Secret reaches the containers. Doing it server
+// side keeps it from racing an apply the way a read-modify-write would.
+func (h *Handler) restartProject(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "restartProject")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+	name := r.PathValue("name")
+
+	project, err := h.store.RestartProject(traceCtx, name, time.Now())
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("project not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		}
+		if !errors.Is(err, store.ErrConflictState) {
+			logger.Error("RestartProject failed", zap.String("name", name), zap.Error(err))
+		}
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+	logger.Info("Project restart requested", zap.String("project", name), zap.Int64("specRevision", project.SpecRevision))
+	project.TypeMeta = v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"}
+	handlerutil.WriteJSONResponse(w, http.StatusOK, project)
 }
 
 // listProjects handles GET /api/v1/projects.

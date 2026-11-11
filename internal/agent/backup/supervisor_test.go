@@ -247,6 +247,10 @@ func TestShouldSupervise(t *testing.T) {
 	noBackup.Spec.Backup = nil
 	assert.False(t, shouldSupervise(noBackup))
 
+	disabled := base()
+	disabled.Spec.Backup = &v1.ProjectBackupConfig{Disabled: true}
+	assert.False(t, shouldSupervise(disabled))
+
 	notRunning := base()
 	notRunning.Status.Phase = v1.ProjectPhaseFailed
 	assert.False(t, shouldSupervise(notRunning))

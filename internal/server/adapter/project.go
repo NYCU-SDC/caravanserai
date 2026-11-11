@@ -6,6 +6,7 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -59,14 +60,6 @@ func (a *ProjectStoreAdapter) ListProjectNamesByPhase(ctx context.Context, phase
 	return names, nil
 }
 
-func (a *ProjectStoreAdapter) GetProjectPhase(ctx context.Context, name string) (v1.ProjectPhase, string, error) {
-	project, err := a.s.GetProject(ctx, name)
-	if err != nil {
-		return "", "", err
-	}
-	return project.Status.Phase, project.Status.NodeRef, nil
-}
-
 func (a *ProjectStoreAdapter) GetProjectPlacement(ctx context.Context, name string) (controller.ProjectPlacement, error) {
 	project, err := a.s.GetProject(ctx, name)
 	if err != nil {
@@ -75,6 +68,8 @@ func (a *ProjectStoreAdapter) GetProjectPlacement(ctx context.Context, name stri
 	// A Node still owing cleanup is left out: SetProjectScheduled would refuse
 	// it, and choosing it would stall a Project another Node could host.
 	return controller.ProjectPlacement{
+		UID:           project.ObjectMeta.UID,
+		Phase:         project.Status.Phase,
 		Size:          project.Spec.Size,
 		ExcludedNodes: slices.Concat(project.Status.FailedNodes, project.Status.Recovery.NodesOwingCleanup()),
 	}, nil
@@ -91,10 +86,12 @@ func (a *ProjectStoreAdapter) GetProjectPlacement(ctx context.Context, name stri
 // assigned elsewhere, and silently moving a Scheduled Project to another Node
 // would change its Node without a new generation, a release or a cleanup
 // obligation.
-func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nodeRef string) error {
+func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, uid, nodeRef string) error {
 	// Fixed before the closure, which may run more than once.
 	now := time.Now().UTC()
-	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+	// Pinned to the lifetime the scheduler read: a same-name Project created
+	// since is refused with ErrStaleAssignment, not assigned (CARA-81 stage 3).
+	return a.s.UpdateProjectStatusForUID(ctx, name, uid, func(status *v1.ProjectStatus) error {
 		switch {
 		case status.Phase == v1.ProjectPhaseScheduled && status.NodeRef == nodeRef:
 			// A scheduler retry re-asserting the assignment it already made.
@@ -150,13 +147,10 @@ func (a *ProjectStoreAdapter) SetProjectScheduled(ctx context.Context, name, nod
 	})
 }
 
-// SetProjectPhase writes any phase with no writer or transition check. No
-// production code calls it; integration tests use it to put a Project into a
-// phase directly. CARA-81 stage 3 removes it.
 // SetSchedulingBlocked satisfies controller.SchedulerProjectStore.
-func (a *ProjectStoreAdapter) SetSchedulingBlocked(ctx context.Context, name, reason, message string) error {
+func (a *ProjectStoreAdapter) SetSchedulingBlocked(ctx context.Context, name, uid, reason, message string) error {
 	now := time.Now().UTC()
-	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+	return a.s.UpdateProjectStatusForUID(ctx, name, uid, func(status *v1.ProjectStatus) error {
 		if status.Phase != v1.ProjectPhasePending {
 			return nil
 		}
@@ -167,28 +161,6 @@ func (a *ProjectStoreAdapter) SetSchedulingBlocked(ctx context.Context, name, re
 			Message:            message,
 			LastTransitionTime: now,
 		}, false)
-		return nil
-	})
-}
-
-func (a *ProjectStoreAdapter) SetProjectPhase(ctx context.Context, name string, phase v1.ProjectPhase, reason, message string) error {
-	// Fixed before the closure, not inside it: the closure may run more than
-	// once, and this records when the transition was observed rather than when
-	// a retry happened to land.
-	now := time.Now().UTC()
-	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
-		transitioned := status.Phase != phase
-		status.Phase = phase
-		if phase == v1.ProjectPhaseFailed {
-			status.Recovery.ClearHealthyWindow()
-		}
-		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
-			Type:               v1.ConditionTypePhase,
-			Status:             v1.ConditionTrue,
-			Reason:             reason,
-			Message:            message,
-			LastTransitionTime: now,
-		}, transitioned)
 		return nil
 	})
 }
@@ -276,20 +248,34 @@ func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controll
 		// be on the lost Node, and another Node could not start anyway. Only a
 		// person can decide to give that up. PostgresDifferential backups are
 		// accepted as completions rather than as a committed backup.
-		hasBackup := status.Recovery.CommittedBackupID() != "" || status.Backup.LastCompletion() != nil
-		if !released && a.graceExpiredRelease && (!hasManaged || hasBackup) {
+		//
+		// A Project that turned backup off does not count as having one even
+		// when an old backup exists: that backup falls further behind every
+		// day, and restoring it would discard everything since without anyone
+		// deciding to (ADR-0029).
+		hasBackup := !project.Spec.BackupDisabled() &&
+			(status.Recovery.CommittedBackupID() != "" || status.Backup.LastCompletion() != nil)
+		// The grace period is no evidence the old copy stopped: a Node cut off
+		// from the server keeps running it. A Project that must not run twice
+		// waits for the Node or a person (ADR-0036).
+		forbidsOverlap := project.Spec.ForbidsOverlap()
+		if !released && a.graceExpiredRelease && !forbidsOverlap && (!hasManaged || hasBackup) {
 			released = true
 			authorization = v1.ReleaseByGraceExpired
 			reason = "Node stayed NotReady past its grace period; project released for rescheduling"
 		}
 		if !released {
+			message := fmt.Sprintf("Node %s is NotReady and has not confirmed generation %d stopped; "+
+				"the project stays assigned to it until the node returns or the takeover is authorized",
+				p.NodeRef, p.AssignmentGeneration)
+			if a.graceExpiredRelease && forbidsOverlap {
+				message += "; spec.overlap is Forbid, so it is not moved on the grace period"
+			}
 			status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
-				Type:   v1.ConditionTypeTakeoverRequired,
-				Status: v1.ConditionTrue,
-				Reason: "WorkloadStopUnconfirmed",
-				Message: fmt.Sprintf("Node %s is NotReady and has not confirmed generation %d stopped; "+
-					"the project stays assigned to it until the node returns or the takeover is authorized",
-					p.NodeRef, p.AssignmentGeneration),
+				Type:               v1.ConditionTypeTakeoverRequired,
+				Status:             v1.ConditionTrue,
+				Reason:             "WorkloadStopUnconfirmed",
+				Message:            message,
 				LastTransitionTime: now,
 			}, false)
 			return nil
@@ -333,42 +319,54 @@ func (a *ProjectStoreAdapter) ReleaseAssignment(ctx context.Context, p *controll
 	return released, nil
 }
 
+// The rescheduler's writes below each act on a decision taken from snapshot
+// p. They go through the UID-bound status update and re-check, on the status
+// the swap is versioned on and on every retry, what that decision depended on
+// (CARA-81 stage 3):
+//
+//   - the lifetime: p's UID. A same-name Project created since is another
+//     lifetime, and the write is dropped (ErrStaleAssignment is swallowed).
+//   - the assignment: p's nodeRef and generation. A Project moved to another
+//     Node or generation since is no longer in the outage that was judged.
+//   - the phase, where the decision was phase-specific.
+//   - for a clock, the outage: lastHeartbeat is the Node heartbeat the
+//     decision was based on. A clock stamped at or after it was started for
+//     this outage, by another pass or another server, and is not restarted;
+//     a stale write landing late would otherwise move a newer outage's clock
+//     back and cut its grace period short.
+//
+// A precondition that no longer holds ends the write without changing status.
+
+// holdsAssignment reports whether status still carries p's assignment.
+func holdsAssignment(status *v1.ProjectStatus, p *controller.ProjectSnapshot) bool {
+	return status.NodeRef == p.NodeRef && status.AssignmentGeneration == p.AssignmentGeneration
+}
+
+// stampedSince reports whether conditions carry t stamped at or after since.
+func stampedSince(conditions []v1.Condition, t v1.ConditionType, since time.Time) bool {
+	for _, c := range conditions {
+		if c.Type == t {
+			return !c.LastTransitionTime.Before(since)
+		}
+	}
+	return false
+}
+
+// ignoreOtherLifetime drops the refusal of a write pinned to a lifetime that
+// is gone: for these writes that is a precondition that no longer holds.
+func ignoreOtherLifetime(err error) error {
+	if errors.Is(err, store.ErrStaleAssignment) {
+		return nil
+	}
+	return err
+}
+
 // ClearRescheduleClocks satisfies controller.ReschedulerProjectStore.
-// Removes the outage conditions (NotReadyAt, TerminatingAt, TakeoverRequired,
-// TerminationBlocked)
-// from a Project still assigned to nodeRef, ending the reschedule clocks
-// without touching the phase.
-//
-// This is the other way an incident ends: the node came back before either
-// clock expired, so the Project never moved and its phase never changed. The
-// clocks no longer govern anything — handleRunning and handleTerminating both
-// ignore a clock older than the node's last heartbeat — but they are still in
-// Project status, reporting a failure that is over to anyone who reads it.
-//
-// Two guards, because this write races the next outage. The cleanup decides to
-// run while the node is Ready; between that decision and this write the node
-// can fail again and a fresh clock be written, and deleting that one would
-// hand the Project an extra full grace period:
-//
-//   - notAfter is the heartbeat that proved the node healthy. A clock stamped
-//     later than it belongs to an outage that began after this cleanup was
-//     decided on, and is left alone.
-//   - nodeRef must still be the Project's, so a Project reassigned in the
-//     meantime is not written by the old node's cleanup at all.
-//
-// Writing unconditionally is otherwise fine: UpdateProjectStatusWithRetry is a
-// no-op when the status is unchanged, and the caller only asks for Projects
-// that carry a clock.
-func (a *ProjectStoreAdapter) ClearRescheduleClocks(
-	ctx context.Context,
-	name, nodeRef string,
-	notAfter time.Time,
-) error {
-	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
-		if status.NodeRef != nodeRef {
+func (a *ProjectStoreAdapter) ClearRescheduleClocks(ctx context.Context, p *controller.ProjectSnapshot, notAfter time.Time) error {
+	return ignoreOtherLifetime(a.s.UpdateProjectStatusForUID(ctx, p.Name, p.UID, func(status *v1.ProjectStatus) error {
+		if !holdsAssignment(status, p) {
 			return nil
 		}
-
 		kept := make([]v1.Condition, 0, len(status.Conditions))
 		for _, c := range status.Conditions {
 			if controller.IsOutageCondition(c.Type) && !c.LastTransitionTime.After(notAfter) {
@@ -378,14 +376,18 @@ func (a *ProjectStoreAdapter) ClearRescheduleClocks(
 		}
 		status.Conditions = kept
 		return nil
-	})
+	}))
 }
 
-// SetTerminatingAt satisfies controller.ReschedulerProjectStore.
-// Writes (or replaces) the TerminatingAt condition to record the time at which
-// the rescheduler first observed this project as stranded on a NotReady node.
-func (a *ProjectStoreAdapter) SetTerminatingAt(ctx context.Context, name string, at time.Time) error {
-	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+// SetTerminatingAt satisfies controller.ReschedulerProjectStore. It records
+// when the rescheduler first observed this Terminating project stranded on a
+// NotReady node, starting the termination clock.
+func (a *ProjectStoreAdapter) SetTerminatingAt(ctx context.Context, p *controller.ProjectSnapshot, at, lastHeartbeat time.Time) error {
+	return ignoreOtherLifetime(a.s.UpdateProjectStatusForUID(ctx, p.Name, p.UID, func(status *v1.ProjectStatus) error {
+		if !holdsAssignment(status, p) || status.Phase != v1.ProjectPhaseTerminating ||
+			stampedSince(status.Conditions, v1.ConditionTypeTerminatingAt, lastHeartbeat) {
+			return nil
+		}
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypeTerminatingAt,
 			Status:             v1.ConditionTrue,
@@ -397,18 +399,22 @@ func (a *ProjectStoreAdapter) SetTerminatingAt(ctx context.Context, name string,
 			// incident's start time and the clock would never restart.
 		}, true)
 		return nil
-	})
+	}))
 }
 
-// SetNotReadyAt satisfies controller.ReschedulerProjectStore.
-// Starts, or restarts, the running grace-period clock at the given time.
+// SetNotReadyAt satisfies controller.ReschedulerProjectStore. It starts, or
+// restarts, the running grace-period clock.
 //
 // Restarting matters as much as starting: a node can go NotReady, recover, and
-// fail again, and the second failure is owed its own full grace period. The
-// caller only reaches here when it has decided a clock should begin, so this
-// always writes the timestamp it was given.
-func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at time.Time) error {
-	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+// fail again, and the second failure is owed its own full grace period. That
+// is why the outage check compares with lastHeartbeat rather than asking
+// whether any clock exists.
+func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, p *controller.ProjectSnapshot, at, lastHeartbeat time.Time) error {
+	return ignoreOtherLifetime(a.s.UpdateProjectStatusForUID(ctx, p.Name, p.UID, func(status *v1.ProjectStatus) error {
+		if !holdsAssignment(status, p) || status.Phase != v1.ProjectPhaseRunning ||
+			stampedSince(status.Conditions, v1.ConditionTypeNotReadyAt, lastHeartbeat) {
+			return nil
+		}
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypeNotReadyAt,
 			Status:             v1.ConditionTrue,
@@ -418,19 +424,17 @@ func (a *ProjectStoreAdapter) SetNotReadyAt(ctx context.Context, name string, at
 			// true, for the same reason as SetTerminatingAt above.
 		}, true)
 		return nil
-	})
+	}))
 }
 
-// SetTerminationBlocked satisfies controller.ReschedulerProjectStore.
-// Marks a Terminating Project whose Node stayed NotReady past the termination
+// SetTerminationBlocked satisfies controller.ReschedulerProjectStore. It marks
+// a Terminating Project whose Node stayed NotReady past the termination
 // timeout. The phase is left alone: the record must outlive the resources it
 // represents, and nothing can confirm those are gone while the Node is away.
-//
-// A Project that has left Terminating since the controller read it is not
-// written, so the mark never lands on a phase it does not describe.
-func (a *ProjectStoreAdapter) SetTerminationBlocked(ctx context.Context, name, nodeRef string, at time.Time) error {
-	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
-		if status.Phase != v1.ProjectPhaseTerminating {
+func (a *ProjectStoreAdapter) SetTerminationBlocked(ctx context.Context, p *controller.ProjectSnapshot, at, lastHeartbeat time.Time) error {
+	return ignoreOtherLifetime(a.s.UpdateProjectStatusForUID(ctx, p.Name, p.UID, func(status *v1.ProjectStatus) error {
+		if !holdsAssignment(status, p) || status.Phase != v1.ProjectPhaseTerminating ||
+			stampedSince(status.Conditions, v1.ConditionTypeTerminationBlocked, lastHeartbeat) {
 			return nil
 		}
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
@@ -438,13 +442,13 @@ func (a *ProjectStoreAdapter) SetTerminationBlocked(ctx context.Context, name, n
 			Status: v1.ConditionTrue,
 			Reason: "NodeNotReady",
 			Message: fmt.Sprintf("Node %s has been NotReady past the termination timeout; "+
-				"the project is kept until the node returns and confirms its resources are removed", nodeRef),
+				"the project is kept until the node returns and confirms its resources are removed", p.NodeRef),
 			LastTransitionTime: at,
 			// true, for the same reason as SetTerminatingAt: the timestamp is
 			// what says which outage this mark belongs to.
 		}, true)
 		return nil
-	})
+	}))
 }
 
 // snapshotOf converts an api/v1 Project into the view the controllers read.

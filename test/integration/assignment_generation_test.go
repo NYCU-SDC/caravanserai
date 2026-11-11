@@ -49,7 +49,7 @@ func TestAssignmentGenerationFencing(t *testing.T) {
 	require.NotEmpty(t, uid)
 
 	// First grant: Pending → Scheduled on node-a increments to 1 and turns Known.
-	require.NoError(t, sched.SetProjectScheduled(ctx, name, "node-a"))
+	require.NoError(t, sched.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-a"))
 	p = getProject(t, name)
 	require.Equal(t, int64(1), p.Status.AssignmentGeneration, "first assignment increments to 1")
 	require.Equal(t, v1.AssignmentHistoryKnown, p.Status.AssignmentHistory)
@@ -57,7 +57,7 @@ func TestAssignmentGenerationFencing(t *testing.T) {
 
 	// A scheduler retry that re-asserts the existing Scheduled assignment must
 	// not increment the generation twice.
-	require.NoError(t, sched.SetProjectScheduled(ctx, name, "node-a"))
+	require.NoError(t, sched.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-a"))
 	require.Equal(t, int64(1), getProject(t, name).Status.AssignmentGeneration,
 		"re-asserting an existing assignment must not bump the generation")
 
@@ -69,10 +69,10 @@ func TestAssignmentGenerationFencing(t *testing.T) {
 
 	// ABA: move to node-b (gen 2), then back to node-a (gen 3). The Node name
 	// returns to node-a but the generation never repeats.
-	require.NoError(t, sched.SetProjectScheduled(ctx, name, "node-b"))
+	require.NoError(t, sched.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-b"))
 	require.Equal(t, int64(2), getProject(t, name).Status.AssignmentGeneration)
 	testhelper.ReleaseCleanly(t, suite.store, name)
-	require.NoError(t, sched.SetProjectScheduled(ctx, name, "node-a"))
+	require.NoError(t, sched.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-a"))
 	current := getProject(t, name)
 	require.Equal(t, int64(3), current.Status.AssignmentGeneration, "returning to node-a is a new generation, not a repeat")
 

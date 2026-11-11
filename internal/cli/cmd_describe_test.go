@@ -131,13 +131,16 @@ var describeProjectCoveredFields = newStringSet(
 	"UpdatedAt",
 	// Spec
 	"Spec.Size",
+	"Spec.Overlap",
 	"Spec.Services",
 	"Spec.Volumes",
 	"Spec.Backup.Interval",
+	"Spec.Backup.Disabled",
 	"Spec.Backup.OnMissing",
 	"Spec.Backup.Items",
 	"Spec.Ingress",
 	"Spec.ExpireAt",
+	"Spec.RestartedAt",
 	// Status
 	"Status.Phase",
 	"Status.NodeRef",
@@ -358,6 +361,25 @@ func TestDescribeProjectFailedNodes(t *testing.T) {
 			var buf bytes.Buffer
 			describeProject(&buf, &v1.Project{Status: v1.ProjectStatus{FailedNodes: tt.nodes}})
 			assert.Regexp(t, `(?m)^  Failed Nodes:\s+`+regexp.QuoteMeta(tt.want)+`$`, buf.String())
+		})
+	}
+}
+
+func TestDescribeProjectOverlap(t *testing.T) {
+	tests := []struct {
+		name    string
+		overlap v1.Overlap
+		want    string
+	}{
+		{name: "declared", overlap: v1.OverlapForbid, want: "Forbid"},
+		{name: "omitted shows the default", overlap: "", want: "Allow (default)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			describeProject(&buf, &v1.Project{Spec: v1.ProjectSpec{Overlap: tt.overlap}})
+			assert.Regexp(t, `(?m)^  Overlap:\s+`+regexp.QuoteMeta(tt.want)+`$`, buf.String())
 		})
 	}
 }

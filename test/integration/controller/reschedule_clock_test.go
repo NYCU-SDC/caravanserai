@@ -9,7 +9,10 @@ import (
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/server/adapter"
+	"NYCU-SDC/caravanserai/internal/server/controller"
+	"NYCU-SDC/caravanserai/internal/store"
 	"NYCU-SDC/caravanserai/test/integration/controllerhelper"
+	"NYCU-SDC/caravanserai/test/integration/testhelper"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -77,7 +80,7 @@ func TestClearRescheduleClocksGuards(t *testing.T) {
 	t.Run("a clock older than the recovery heartbeat is removed", func(t *testing.T) {
 		name := create(t, "clk-stale", "node-a", recoveryBeat.Add(-time.Minute))
 
-		require.NoError(t, projects.ClearRescheduleClocks(ctx, name, "node-a", recoveryBeat))
+		require.NoError(t, projects.ClearRescheduleClocks(ctx, snapshot(t, s, name, "node-a"), recoveryBeat))
 
 		assert.Equal(t, []v1.ConditionType{v1.ConditionTypePhase}, conditionTypes(t, name))
 	})
@@ -87,7 +90,7 @@ func TestClearRescheduleClocksGuards(t *testing.T) {
 		// its clock would hand the Project an extra full grace period.
 		name := create(t, "clk-fresh", "node-a", recoveryBeat.Add(2*time.Minute))
 
-		require.NoError(t, projects.ClearRescheduleClocks(ctx, name, "node-a", recoveryBeat))
+		require.NoError(t, projects.ClearRescheduleClocks(ctx, snapshot(t, s, name, "node-a"), recoveryBeat))
 
 		assert.Equal(t,
 			[]v1.ConditionType{v1.ConditionTypePhase, v1.ConditionTypeNotReadyAt},
@@ -116,7 +119,7 @@ func TestClearRescheduleClocksGuards(t *testing.T) {
 				st.Conditions = append(st.Conditions, takeover(at))
 				return nil
 			}))
-			require.NoError(t, projects.ClearRescheduleClocks(ctx, name, "node-a", recoveryBeat))
+			require.NoError(t, projects.ClearRescheduleClocks(ctx, snapshot(t, s, name, "node-a"), recoveryBeat))
 		}
 
 		assert.Equal(t, []v1.ConditionType{v1.ConditionTypePhase}, conditionTypes(t, stale))
@@ -129,7 +132,7 @@ func TestClearRescheduleClocksGuards(t *testing.T) {
 		name := create(t, "clk-moved", "node-b", recoveryBeat.Add(-time.Minute))
 
 		// node-a's cleanup, arriving after the Project was reassigned.
-		require.NoError(t, projects.ClearRescheduleClocks(ctx, name, "node-a", recoveryBeat))
+		require.NoError(t, projects.ClearRescheduleClocks(ctx, snapshot(t, s, name, "node-a"), recoveryBeat))
 
 		assert.Equal(t,
 			[]v1.ConditionType{v1.ConditionTypePhase, v1.ConditionTypeNotReadyAt},
@@ -170,15 +173,16 @@ func TestSetNotReadyAtRestartsTheClockInTheStore(t *testing.T) {
 		return time.Time{}
 	}
 
-	require.NoError(t, projects.SetNotReadyAt(ctx, "clk-restart", first))
+	require.NoError(t, projects.SetNotReadyAt(ctx, snapshot(t, s, "clk-restart", "node-a"), first, first.Add(-time.Minute)))
 	require.WithinDuration(t, first, readClock(t, v1.ConditionTypeNotReadyAt), time.Millisecond)
 
-	require.NoError(t, projects.SetNotReadyAt(ctx, "clk-restart", second))
+	require.NoError(t, projects.SetNotReadyAt(ctx, snapshot(t, s, "clk-restart", "node-a"), second, first.Add(time.Hour)))
 	assert.WithinDuration(t, second, readClock(t, v1.ConditionTypeNotReadyAt), time.Millisecond,
 		"a second incident must start its own clock, not inherit the first's")
 
-	require.NoError(t, projects.SetTerminatingAt(ctx, "clk-restart", first))
-	require.NoError(t, projects.SetTerminatingAt(ctx, "clk-restart", second))
+	require.NoError(t, forcePhase(t, s, "clk-restart", v1.ProjectPhaseTerminating))
+	require.NoError(t, projects.SetTerminatingAt(ctx, snapshot(t, s, "clk-restart", "node-a"), first, first.Add(-time.Minute)))
+	require.NoError(t, projects.SetTerminatingAt(ctx, snapshot(t, s, "clk-restart", "node-a"), second, first.Add(time.Hour)))
 	assert.WithinDuration(t, second, readClock(t, v1.ConditionTypeTerminatingAt), time.Millisecond,
 		"the same holds for the termination clock")
 }
@@ -222,7 +226,7 @@ func TestTerminationBlockedKeepsTheProjectTerminating(t *testing.T) {
 	t.Run("the phase stays Terminating and a new outage restamps the mark", func(t *testing.T) {
 		create(t, "blocked", v1.ProjectPhaseTerminating)
 
-		require.NoError(t, projects.SetTerminationBlocked(ctx, "blocked", "node-a", first))
+		require.NoError(t, projects.SetTerminationBlocked(ctx, snapshot(t, s, "blocked", "node-a"), first, first.Add(-time.Minute)))
 		got, err := s.Store.GetProject(ctx, "blocked")
 		require.NoError(t, err)
 		assert.Equal(t, v1.ProjectPhaseTerminating, got.Status.Phase,
@@ -231,7 +235,7 @@ func TestTerminationBlockedKeepsTheProjectTerminating(t *testing.T) {
 		require.True(t, ok)
 		assert.WithinDuration(t, first, at, time.Millisecond)
 
-		require.NoError(t, projects.SetTerminationBlocked(ctx, "blocked", "node-a", second))
+		require.NoError(t, projects.SetTerminationBlocked(ctx, snapshot(t, s, "blocked", "node-a"), second, first.Add(time.Hour)))
 		at, _ = blockedAt(t, "blocked")
 		assert.WithinDuration(t, second, at, time.Millisecond)
 	})
@@ -239,27 +243,179 @@ func TestTerminationBlockedKeepsTheProjectTerminating(t *testing.T) {
 	t.Run("a Project that left Terminating is not marked", func(t *testing.T) {
 		create(t, "not-terminating", v1.ProjectPhaseRunning)
 
-		require.NoError(t, projects.SetTerminationBlocked(ctx, "not-terminating", "node-a", first))
+		require.NoError(t, projects.SetTerminationBlocked(ctx, snapshot(t, s, "not-terminating", "node-a"), first, first.Add(-time.Minute)))
 		_, ok := blockedAt(t, "not-terminating")
 		assert.False(t, ok)
 	})
 
 	t.Run("the mark goes with the clocks when the node returns", func(t *testing.T) {
 		create(t, "recovered", v1.ProjectPhaseTerminating)
-		require.NoError(t, projects.SetTerminatingAt(ctx, "recovered", first.Add(-time.Hour)))
-		require.NoError(t, projects.SetTerminationBlocked(ctx, "recovered", "node-a", first))
+		require.NoError(t, projects.SetTerminatingAt(ctx, snapshot(t, s, "recovered", "node-a"), first.Add(-time.Hour), first.Add(-2*time.Hour)))
+		require.NoError(t, projects.SetTerminationBlocked(ctx, snapshot(t, s, "recovered", "node-a"), first, first.Add(-time.Minute)))
 
 		// A cleanup decided on a heartbeat older than the mark leaves it:
 		// the mark belongs to an outage that began after that heartbeat.
-		require.NoError(t, projects.ClearRescheduleClocks(ctx, "recovered", "node-a", first.Add(-time.Minute)))
+		require.NoError(t, projects.ClearRescheduleClocks(ctx, snapshot(t, s, "recovered", "node-a"), first.Add(-time.Minute)))
 		_, ok := blockedAt(t, "recovered")
 		require.True(t, ok)
 
-		require.NoError(t, projects.ClearRescheduleClocks(ctx, "recovered", "node-a", first.Add(time.Minute)))
+		require.NoError(t, projects.ClearRescheduleClocks(ctx, snapshot(t, s, "recovered", "node-a"), first.Add(time.Minute)))
 		_, ok = blockedAt(t, "recovered")
 		assert.False(t, ok)
 		got, err := s.Store.GetProject(ctx, "recovered")
 		require.NoError(t, err)
 		assert.Equal(t, v1.ProjectPhaseTerminating, got.Status.Phase)
+	})
+}
+
+// snapshot is what the rescheduler would have read for name: its lifetime and
+// generation as stored now, on nodeRef.
+func snapshot(t *testing.T, s *controllerhelper.Suite, name, nodeRef string) *controller.ProjectSnapshot {
+	t.Helper()
+	got, err := s.Store.GetProject(context.Background(), name)
+	require.NoError(t, err)
+	return &controller.ProjectSnapshot{
+		Name: name, UID: got.ObjectMeta.UID, Phase: got.Status.Phase,
+		NodeRef: nodeRef, AssignmentGeneration: got.Status.AssignmentGeneration,
+	}
+}
+
+func forcePhase(t *testing.T, s *controllerhelper.Suite, name string, phase v1.ProjectPhase) error {
+	t.Helper()
+	return testhelper.ForcePhase(context.Background(), s.Store, name, phase, "Test", "")
+}
+
+// CARA-81 stage 3: a controller write lands only on what its decision was
+// about. Each case reads a snapshot, changes the Project the way a race
+// between the controller's read and its write would, and then makes the
+// write the controller decided on from the old snapshot.
+func TestReschedulerWritesFollowTheDecision(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+	ctx := context.Background()
+	projects := adapter.NewProjectStoreAdapter(s.Store)
+	heartbeat := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)
+	now := heartbeat.Add(30 * time.Second)
+
+	running := func(t *testing.T, name string) {
+		t.Helper()
+		_ = s.Store.DeleteProject(ctx, name)
+		require.NoError(t, s.Store.CreateProject(ctx, &v1.Project{
+			TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"},
+			ObjectMeta: v1.ObjectMeta{Name: name},
+			Spec:       v1.ProjectSpec{Services: []v1.ServiceDef{{Name: "web", Image: "nginx:alpine"}}},
+			Status:     v1.InitialProjectStatus(),
+		}))
+		require.NoError(t, projects.SetProjectScheduled(ctx, name, testhelper.UID(t, s.Store, name), "node-a"))
+		require.NoError(t, forcePhase(t, s, name, v1.ProjectPhaseRunning))
+	}
+	notReadyAt := func(t *testing.T, name string) (time.Time, bool) {
+		t.Helper()
+		got, err := s.Store.GetProject(ctx, name)
+		require.NoError(t, err)
+		for _, c := range got.Status.Conditions {
+			if c.Type == v1.ConditionTypeNotReadyAt {
+				return c.LastTransitionTime.UTC(), true
+			}
+		}
+		return time.Time{}, false
+	}
+
+	t.Run("a same-name Project created since gets nothing", func(t *testing.T) {
+		running(t, "race-recreated")
+		old := snapshot(t, s, "race-recreated", "node-a")
+		running(t, "race-recreated")
+		require.NotEqual(t, old.UID, testhelper.UID(t, s.Store, "race-recreated"))
+
+		require.NoError(t, projects.SetNotReadyAt(ctx, old, now, heartbeat))
+		_, has := notReadyAt(t, "race-recreated")
+		assert.False(t, has, "the clock was decided for the old lifetime")
+	})
+
+	t.Run("a Project moved to a new generation gets nothing", func(t *testing.T) {
+		running(t, "race-new-generation")
+		old := snapshot(t, s, "race-new-generation", "node-a")
+		require.NoError(t, s.Store.UpdateProjectStatusWithRetry(ctx, "race-new-generation", func(st *v1.ProjectStatus) error {
+			st.AssignmentGeneration++
+			return nil
+		}))
+
+		require.NoError(t, projects.SetNotReadyAt(ctx, old, now, heartbeat))
+		_, has := notReadyAt(t, "race-new-generation")
+		assert.False(t, has)
+	})
+
+	t.Run("a Project moved to another Node gets nothing", func(t *testing.T) {
+		running(t, "race-new-node")
+		old := snapshot(t, s, "race-new-node", "node-a")
+		require.NoError(t, s.Store.UpdateProjectStatusWithRetry(ctx, "race-new-node", func(st *v1.ProjectStatus) error {
+			st.NodeRef = "node-b"
+			return nil
+		}))
+
+		require.NoError(t, projects.SetNotReadyAt(ctx, old, now, heartbeat))
+		_, has := notReadyAt(t, "race-new-node")
+		assert.False(t, has)
+	})
+
+	t.Run("a clock already started for this outage is not moved back", func(t *testing.T) {
+		running(t, "race-same-outage")
+		snap := snapshot(t, s, "race-same-outage", "node-a")
+		started := heartbeat.Add(10 * time.Second)
+		require.NoError(t, projects.SetNotReadyAt(ctx, snap, started, heartbeat))
+
+		// A pass that read the Project before that clock existed lands late.
+		require.NoError(t, projects.SetNotReadyAt(ctx, snap, now, heartbeat))
+		at, _ := notReadyAt(t, "race-same-outage")
+		assert.WithinDuration(t, started, at, time.Millisecond)
+	})
+
+	t.Run("a decision from an earlier outage does not overwrite the new one's clock", func(t *testing.T) {
+		running(t, "race-new-outage")
+		snap := snapshot(t, s, "race-new-outage", "node-a")
+		// The Node recovered and failed again; another pass started the second
+		// outage's clock after the new heartbeat.
+		secondBeat := heartbeat.Add(time.Hour)
+		secondClock := secondBeat.Add(time.Minute)
+		require.NoError(t, projects.SetNotReadyAt(ctx, snap, secondClock, secondBeat))
+
+		// The pass that judged the first outage lands now.
+		require.NoError(t, projects.SetNotReadyAt(ctx, snap, now, heartbeat))
+		at, _ := notReadyAt(t, "race-new-outage")
+		assert.WithinDuration(t, secondClock, at, time.Millisecond,
+			"moving it back would cut the second outage's grace period short")
+	})
+
+	t.Run("a phase the decision was not about gets nothing", func(t *testing.T) {
+		running(t, "race-left-running")
+		snap := snapshot(t, s, "race-left-running", "node-a")
+		require.NoError(t, forcePhase(t, s, "race-left-running", v1.ProjectPhaseFailed))
+
+		require.NoError(t, projects.SetNotReadyAt(ctx, snap, now, heartbeat))
+		_, has := notReadyAt(t, "race-left-running")
+		assert.False(t, has)
+	})
+
+	t.Run("the scheduler cannot assign a same-name Project created since", func(t *testing.T) {
+		_ = s.Store.DeleteProject(ctx, "race-schedule")
+		create := func() string {
+			require.NoError(t, s.Store.CreateProject(ctx, &v1.Project{
+				TypeMeta:   v1.TypeMeta{APIVersion: v1.APIVersion, Kind: "Project"},
+				ObjectMeta: v1.ObjectMeta{Name: "race-schedule"},
+				Spec:       v1.ProjectSpec{Services: []v1.ServiceDef{{Name: "web", Image: "nginx:alpine"}}},
+				Status:     v1.InitialProjectStatus(),
+			}))
+			return testhelper.UID(t, s.Store, "race-schedule")
+		}
+		oldUID := create()
+		require.NoError(t, s.Store.DeleteProject(ctx, "race-schedule"))
+		create()
+
+		err := projects.SetProjectScheduled(ctx, "race-schedule", oldUID, "node-a")
+		assert.ErrorIs(t, err, store.ErrStaleAssignment)
+		got, getErr := s.Store.GetProject(ctx, "race-schedule")
+		require.NoError(t, getErr)
+		assert.Equal(t, v1.ProjectPhasePending, got.Status.Phase)
+		assert.Zero(t, got.Status.AssignmentGeneration)
 	})
 }

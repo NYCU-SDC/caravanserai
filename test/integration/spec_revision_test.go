@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"NYCU-SDC/caravanserai/test/integration/testhelper"
 	"context"
 	"errors"
 	"fmt"
@@ -122,10 +123,8 @@ func TestAssignedSpecChangesAreRefused(t *testing.T) {
 		require.Equal(t, http.StatusOK, code)
 	})
 
-	// Failed keeps its nodeRef and is the one assigned phase that accepts an
-	// update before stage 2 opens Scheduled and Running.
-	require.NoError(t, projects.SetProjectScheduled(ctx, name, "node-a"))
-	require.NoError(t, projects.SetProjectPhase(ctx, name, v1.ProjectPhaseFailed, "Test", ""))
+	require.NoError(t, projects.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-a"))
+	require.NoError(t, testhelper.ForcePhase(ctx, suite.store, name, v1.ProjectPhaseRunning, "Test", ""))
 	before := getProject(t, name)
 	require.Equal(t, "node-a", before.Status.NodeRef)
 
@@ -167,7 +166,13 @@ func TestAssignedSpecChangesAreRefused(t *testing.T) {
 		assert.Equal(t, before.UID, p.UID)
 		assert.Equal(t, before.Status.NodeRef, p.Status.NodeRef)
 		assert.Equal(t, before.Status.AssignmentGeneration, p.Status.AssignmentGeneration)
-		assert.Equal(t, v1.ProjectPhaseFailed, p.Status.Phase)
+		assert.Equal(t, v1.ProjectPhaseRunning, p.Status.Phase)
+	})
+
+	t.Run("Failed with its nodeRef is still assigned", func(t *testing.T) {
+		require.NoError(t, testhelper.ForcePhase(ctx, suite.store, name, v1.ProjectPhaseFailed, "Test", ""))
+		code, _ := putSpec(t, name, resize, v1.ObjectMeta{})
+		assert.Equal(t, http.StatusBadRequest, code)
 	})
 }
 
@@ -213,9 +218,6 @@ func TestSpecAppliedReports(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, report("node-a", gen, 1, false, ""), "a failure needs a reason")
 	})
 
-	// Reach revision 3 the way stage 1 allows: Failed keeps the assignment
-	// and accepts updates.
-	require.NoError(t, adapter.NewProjectStoreAdapter(suite.store).SetProjectPhase(context.Background(), name, v1.ProjectPhaseFailed, "Test", ""))
 	for _, image := range []string{"nginx:1.28", "nginx:1.29"} {
 		code, _ := putSpec(t, name, v1.ProjectSpec{Services: []v1.ServiceDef{{Name: "web", Image: image}}}, v1.ObjectMeta{})
 		require.Equal(t, http.StatusOK, code)
@@ -271,4 +273,57 @@ func TestSpecAppliedIsNotAnAgentCondition(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	_, found := findCondition(getProject(t, name).Status.Conditions, v1.ConditionTypeSpecApplied)
 	assert.False(t, found)
+}
+
+// CARA-134 stage 3: a rollout restart is a new revision that only changes
+// spec.restartedAt, and a later apply of the manifest keeps it.
+func TestRolloutRestart(t *testing.T) {
+	const name = "e2e-spec-restart"
+	createAssigned(t, name, "node-a", v1.ProjectPhaseRunning)
+	before := getProject(t, name)
+	require.Nil(t, before.Spec.RestartedAt)
+
+	restart := func() (int, v1.Project) {
+		t.Helper()
+		resp := doRequest(t, http.MethodPost, "/api/v1/projects/"+name+"/restart", nil)
+		var p v1.Project
+		if resp.StatusCode == http.StatusOK {
+			mustDecodeBody(t, resp, &p)
+		} else {
+			drainBody(resp)
+		}
+		return resp.StatusCode, p
+	}
+
+	code, restarted := restart()
+	require.Equal(t, http.StatusOK, code)
+	require.NotNil(t, restarted.Spec.RestartedAt)
+	assert.Equal(t, before.SpecRevision+1, restarted.SpecRevision)
+	assert.Equal(t, before.Spec.Services, restarted.Spec.Services, "nothing else in the spec changes")
+	assert.Equal(t, before.Status.AssignmentGeneration, restarted.Status.AssignmentGeneration, "a restart is not a reschedule")
+	cond, _ := findCondition(restarted.Status.Conditions, v1.ConditionTypeSpecApplied)
+	assert.Equal(t, v1.ReasonSpecUpdatePending, cond.Reason)
+
+	t.Run("applying the manifest again keeps the restart", func(t *testing.T) {
+		code, p := putSpec(t, name, v1.ProjectSpec{Services: before.Spec.Services}, v1.ObjectMeta{})
+		require.Equal(t, http.StatusOK, code)
+		require.NotNil(t, p.Spec.RestartedAt)
+		assert.True(t, p.Spec.RestartedAt.Equal(*restarted.Spec.RestartedAt))
+		assert.Equal(t, restarted.SpecRevision, p.SpecRevision, "and so is not a new revision")
+	})
+
+	t.Run("each restart is a new revision", func(t *testing.T) {
+		code, again := restart()
+		require.Equal(t, http.StatusOK, code)
+		assert.Equal(t, restarted.SpecRevision+1, again.SpecRevision)
+	})
+
+	t.Run("refused once the Project is on its way out, and for one that does not exist", func(t *testing.T) {
+		drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+name, nil))
+		code, _ := restart()
+		assert.Equal(t, http.StatusConflict, code)
+		resp := doRequest(t, http.MethodPost, "/api/v1/projects/no-such-project/restart", nil)
+		drainBody(resp)
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	})
 }

@@ -49,6 +49,8 @@ Pending ──(scheduler)──▶ Scheduled ──(agent)──▶ Running
                                                   Failed
 ```
 
+**Running twice:** when a Node is cut off from the server but keeps running, and `GRACE_EXPIRED_RELEASE` moves its Projects elsewhere, both copies run until the Node reconnects. For most Projects that costs only what the old copy writes, which is lost. A Project with side effects outside its own data (scheduled jobs, webhooks, mail, bots) declares `spec.overlap: Forbid`: it is never moved on the grace period alone, and stays on its Node with `TakeoverRequired` until the Node confirms it stopped, the Node returns, or an operator takes it over. A Forbid Project is not moved when its Node loses power either, since the server cannot tell that from a cut network. Omitting `overlap` means `Allow`.
+
 ## Prerequisites
 
 - Go 1.22+
@@ -223,6 +225,8 @@ spec:
 
 ### Backup strategy per Managed volume
 
+A Project with a Managed volume and no `spec.backup` is backed up every 24 hours (the server's `default_backup_interval`); the stored spec shows the interval it got. A Project's own `interval` wins. Leaving `spec.backup` out of a later manifest returns it to the default rather than keeping an earlier value. `backup: {disabled: true}` turns backup off; such a Project is never moved off a lost Node automatically, even if it has an older backup, because restoring that would discard everything written since.
+
 `spec.backup` backs up every Managed volume offline by default: the Project's services are stopped and each volume is archived. The newest 7 generations of a Project are kept, along with the one the server committed; a generation from an earlier Project of the same name is left alone. `spec.backup.items` can select `PostgresDifferential` for a PostgreSQL data volume instead (pgBackRest full and differential backups, PostgreSQL keeps running). See [`examples/volume/postgres-differential.yaml`](examples/volume/postgres-differential.yaml).
 
 | Field | Meaning |
@@ -284,7 +288,8 @@ The file is the one named by `--config` or `CARA_CONFIG`, and a named file that 
 | `headscale_api_url` | `HEADSCALE_API_URL` | _(optional)_ | Headscale management API URL. Enables the `/api/v1/overlay` endpoints when set together with the API key |
 | `headscale_api_key` | `HEADSCALE_API_KEY` | _(optional)_ | Headscale management API key (secret, never logged) |
 | `running_grace_period` | `RUNNING_GRACE_PERIOD` | `3m` | How long a Running Project may stay on a NotReady node before its release is attempted |
-| `grace_expired_release` | `GRACE_EXPIRED_RELEASE` | `false` | Move Projects off a node that stayed NotReady past the grace period, with no proof it stopped; a partitioned node keeps its copy running until it reconnects. A Project with a Managed volume moves only once it has a committed backup, and restores from it |
+| `grace_expired_release` | `GRACE_EXPIRED_RELEASE` | `false` | Move Projects off a node that stayed NotReady past the grace period, with no proof it stopped; a partitioned node keeps its copy running until it reconnects. A Project with a Managed volume moves only once it has a committed backup, and restores from it; one with `spec.backup.disabled` or `spec.overlap: Forbid` never moves on the grace period |
+| `default_backup_interval` | `DEFAULT_BACKUP_INTERVAL` | `24h` | Backup interval a Project with a Managed volume and no `spec.backup` gets when it is created or updated |
 | `headscale_user` | `HEADSCALE_USER` | `cara-node` | Headscale user new pre-auth keys are created under |
 | `postgres_differential_image` | `POSTGRES_DIFFERENTIAL_IMAGE` | `ghcr.io/nycu-sdc/cara-postgres:16` | Image a `PostgresDifferential` volume's service must use. Set it where the published image cannot be pulled, or to a `16-<run>.<attempt>` tag to keep every Node on one content; manifests then name the same reference |
 
@@ -387,8 +392,11 @@ The agent calls `POST /api/v1/nodes/{name}/join` with the join token as its bear
 | `POST` | `/api/v1/projects` | Create a project |
 | `GET` | `/api/v1/projects` | List projects (`?phase=`, `?nodeRef=`) |
 | `GET` | `/api/v1/projects/{name}` | Get a single project |
+| `PUT` | `/api/v1/projects/{name}` | Replace a project's spec; a Running or Scheduled project's agent recreates only the services that changed (ADR-0026). While assigned, `size`, removing a volume, a volume's type and `backup.items` cannot change |
 | `DELETE` | `/api/v1/projects/{name}` | Delete a project |
 | `PATCH` | `/api/v1/projects/{name}/status` | Update project status (agent only) |
+| `PUT` | `/api/v1/projects/{name}/status/spec-applied` | Report whether a spec revision runs (currently assigned agent only; requires the assignment fence) |
+| `POST` | `/api/v1/projects/{name}/restart` | Recreate every service by recording `spec.restartedAt` (users only; `caractl rollout restart`) |
 | `PUT` | `/api/v1/projects/{name}/recovery/workload-stopped` | Record that every container is stopped (currently assigned agent only; requires the assignment fence) |
 | `PUT` | `/api/v1/projects/{name}/recovery/managed-data-quarantined` | Record that local Managed data left the active path (the obligation's agent only) |
 | `PUT` | `/api/v1/projects/{name}/recovery/committed-backup` | Make a backup generation the restore source (currently assigned agent only; requires the assignment fence) |

@@ -45,9 +45,9 @@ func createAssigned(t *testing.T, name, node string, phase v1.ProjectPhase) (str
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	drainBody(resp)
 
-	require.NoError(t, sched.SetProjectScheduled(ctx, name, node))
+	require.NoError(t, sched.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), node))
 	if phase != v1.ProjectPhaseScheduled {
-		require.NoError(t, sched.SetProjectPhase(ctx, name, phase, "Test", ""))
+		require.NoError(t, testhelper.ForcePhase(ctx, suite.store, name, phase, "Test", ""))
 	}
 	p := getProject(t, name)
 	t.Cleanup(func() {
@@ -103,7 +103,6 @@ func TestWorkloadStoppedEvidence(t *testing.T) {
 
 func TestWorkloadStoppedEvidencePhaseGate(t *testing.T) {
 	ctx := context.Background()
-	sched := adapter.NewProjectStoreAdapter(suite.store)
 
 	for _, phase := range []v1.ProjectPhase{v1.ProjectPhaseScheduled, v1.ProjectPhaseRunning, v1.ProjectPhaseFailed, v1.ProjectPhaseTerminating} {
 		t.Run("accepted while "+string(phase), func(t *testing.T) {
@@ -116,7 +115,7 @@ func TestWorkloadStoppedEvidencePhaseGate(t *testing.T) {
 	t.Run("refused while Terminated", func(t *testing.T) {
 		const name = "e2e-ws-phase-terminated"
 		uid, gen := createAssigned(t, name, "node-a", v1.ProjectPhaseRunning)
-		require.NoError(t, sched.SetProjectPhase(ctx, name, v1.ProjectPhaseTerminated, "Test", ""))
+		require.NoError(t, testhelper.ForcePhase(ctx, suite.store, name, v1.ProjectPhaseTerminated, "Test", ""))
 		before := getProject(t, name).ObjectMeta.ResourceVersion
 		assert.Equal(t, http.StatusConflict, putEvidence(t, name, "workload-stopped", evidenceBody(uid, "node-a", gen)))
 		assert.Equal(t, before, getProject(t, name).ObjectMeta.ResourceVersion)
@@ -221,15 +220,15 @@ func TestNewAssignmentClearsLatchAndHealthyWindow(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, putEvidence(t, name, "workload-stopped", evidenceBody(uid, "node-a", gen)))
 
 	// Re-asserting the current Scheduled assignment is not a new assignment.
-	require.NoError(t, sched.SetProjectPhase(ctx, name, v1.ProjectPhaseScheduled, "Test", ""))
-	require.NoError(t, sched.SetProjectScheduled(ctx, name, "node-a"))
+	require.NoError(t, testhelper.ForcePhase(ctx, suite.store, name, v1.ProjectPhaseScheduled, "Test", ""))
+	require.NoError(t, sched.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-a"))
 	r := getProject(t, name).Status.Recovery
 	require.NotNil(t, r.WorkloadStopped, "re-asserting an assignment cleared the latch")
 	require.NotNil(t, r.HealthySince)
 
 	// A real new assignment clears both.
 	testhelper.ReleaseCleanly(t, suite.store, name)
-	require.NoError(t, sched.SetProjectScheduled(ctx, name, "node-b"))
+	require.NoError(t, sched.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-b"))
 	p := getProject(t, name)
 	assert.Equal(t, gen+1, p.Status.AssignmentGeneration)
 	assert.Nil(t, p.Status.Recovery.WorkloadStopped, "new assignment kept the old no-start latch")
@@ -238,10 +237,10 @@ func TestNewAssignmentClearsLatchAndHealthyWindow(t *testing.T) {
 	// A reported failure ends the healthy window, through both the controller
 	// path and the Agent report path.
 	setHealthy()
-	require.NoError(t, sched.SetProjectPhase(ctx, name, v1.ProjectPhaseFailed, "Test", ""))
+	require.NoError(t, testhelper.ForcePhase(ctx, suite.store, name, v1.ProjectPhaseFailed, "Test", ""))
 	assert.Nil(t, getProject(t, name).Status.Recovery.HealthySince)
 
-	require.NoError(t, sched.SetProjectPhase(ctx, name, v1.ProjectPhaseRunning, "Test", ""))
+	require.NoError(t, testhelper.ForcePhase(ctx, suite.store, name, v1.ProjectPhaseRunning, "Test", ""))
 	setHealthy()
 	resp := doRequest(t, http.MethodPatch, "/api/v1/projects/"+name+"/status",
 		[]byte(fmt.Sprintf(`{"phase":"Failed","uid":%q,"nodeRef":"node-b","assignmentGeneration":%d}`, uid, gen+1)))

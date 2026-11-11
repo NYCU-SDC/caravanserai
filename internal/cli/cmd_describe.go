@@ -187,6 +187,15 @@ func backupItemFor(items []v1.BackupItem, volume string) (v1.BackupItem, bool) {
 	return v1.BackupItem{}, false
 }
 
+// describeProjectOverlap shows whether two copies may run at once, marking an
+// omitted value with "(default)".
+func describeProjectOverlap(spec v1.ProjectSpec) string {
+	if spec.Overlap == "" {
+		return string(v1.OverlapAllow) + " (default)"
+	}
+	return string(spec.Overlap)
+}
+
 // describeProjectSize shows the declared size, marking an omitted one with the
 // default it resolves to.
 func describeProjectSize(spec v1.ProjectSpec) string {
@@ -219,6 +228,10 @@ func describeProject(w io.Writer, project *v1.Project) {
 
 	// Size
 	printField(w, "  Size", describeProjectSize(project.Spec))
+	printField(w, "  Overlap", describeProjectOverlap(project.Spec))
+	if project.Spec.RestartedAt != nil {
+		printField(w, "  Restarted", formatTimestamp(*project.Spec.RestartedAt))
+	}
 
 	// Services
 	fmt.Fprintln(w, "  Services:")
@@ -260,9 +273,12 @@ func describeProject(w io.Writer, project *v1.Project) {
 	// Backup
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  Backup:")
-	if project.Spec.Backup == nil {
+	switch {
+	case project.Spec.Backup == nil:
 		fmt.Fprintln(w, "    <none>")
-	} else {
+	case project.Spec.Backup.Disabled:
+		fmt.Fprintln(w, "    Disabled (not moved off a lost Node automatically)")
+	default:
 		printField(w, "    Interval", stringOrNone(project.Spec.Backup.Interval))
 		onMissing := string(project.Spec.Backup.OnMissing)
 		if onMissing == "" {

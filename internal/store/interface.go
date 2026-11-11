@@ -462,13 +462,19 @@ type ProjectStore interface {
 	// labels, annotations). When the spec's content changed it increments
 	// metadata.specRevision and sets SpecApplied False in the same write; the
 	// rest of the status is preserved, except that the retry budget starts
-	// over. The update is only allowed when the project's current phase is
-	// Pending or Failed. Returns ErrConflictState for another phase, for a
+	// over. The update is allowed while the Project is Pending, Scheduled,
+	// Running or Failed. Returns ErrConflictState for another phase, for a
 	// change of backup items, and, while the Project is assigned to a Node,
 	// for a change v1.CheckAssignedSpecChange refuses; ErrNotFound if it does
 	// not exist. On success project.SpecRevision and ResourceVersion hold the
 	// stored values.
 	UpdateProjectSpec(ctx context.Context, project *v1.Project) error
+
+	// RestartProject sets spec.restartedAt to at, which changes the spec
+	// hash of every service, so the Agent recreates them all (`caractl rollout
+	// restart`, ADR-0026). It goes through the same transaction and phase
+	// check as UpdateProjectSpec and returns the stored Project.
+	RestartProject(ctx context.Context, name string, at time.Time) (*v1.Project, error)
 
 	// RecordSpecApplied is the assigned Agent's report on a spec revision,
 	// through the same fence as ReportProjectStatusFenced. An applied report

@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"NYCU-SDC/caravanserai/test/integration/testhelper"
 	"context"
 	"fmt"
 	"net/http"
@@ -23,9 +24,9 @@ func placeInPhase(t *testing.T, name string, phase v1.ProjectPhase, reason, mess
 	t.Helper()
 	ctx := context.Background()
 	projects := adapter.NewProjectStoreAdapter(suite.store)
-	require.NoError(t, projects.SetProjectScheduled(ctx, name, "node-a"))
+	require.NoError(t, projects.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-a"))
 	if phase != v1.ProjectPhaseScheduled {
-		require.NoError(t, projects.SetProjectPhase(ctx, name, phase, reason, message))
+		require.NoError(t, testhelper.ForcePhase(ctx, suite.store, name, phase, reason, message))
 	}
 }
 

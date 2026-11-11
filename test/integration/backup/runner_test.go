@@ -83,7 +83,7 @@ func newRunnerHarness(t *testing.T, projectName string, volumes ...string) *runn
 
 	dataRoot := t.TempDir()
 	project := &v1.Project{
-		ObjectMeta: v1.ObjectMeta{Name: projectName, Namespace: "default", ResourceVersion: 5},
+		ObjectMeta: v1.ObjectMeta{Name: projectName, Namespace: "default", ResourceVersion: 8, SpecRevision: 5},
 		Status:     v1.ProjectStatus{Phase: v1.ProjectPhaseRunning, NodeRef: "node-a"},
 		Spec: v1.ProjectSpec{
 			Services: []v1.ServiceDef{{Name: "web", Image: "nginx:alpine"}},
@@ -150,7 +150,7 @@ func TestBackupWritesOneGenerationToMinio(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, committed, manifest.BackupID)
 	assert.Equal(t, "node-a", manifest.SourceNode)
-	assert.Equal(t, int64(5), manifest.ProjectResourceVersion)
+	assert.Equal(t, int64(5), manifest.ProjectSpecRevision)
 	assert.Equal(t, "tar-offline", manifest.BackupMethod)
 	require.Len(t, manifest.Volumes, 2, "both Managed volumes belong to this generation")
 
