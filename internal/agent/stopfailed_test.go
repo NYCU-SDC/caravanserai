@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -43,6 +45,7 @@ type fakeStopClient struct {
 	current    *v1.Project
 	getErr     error
 	stoppedErr error
+	onReport   func() // runs when the evidence is sent, before it is answered
 
 	mu      sync.Mutex
 	stopped []AssignmentFence
@@ -57,6 +60,9 @@ func (f *fakeStopClient) GetProject(context.Context, string) (*v1.Project, error
 }
 
 func (f *fakeStopClient) ReportWorkloadStopped(_ context.Context, _ string, fence AssignmentFence) error {
+	if f.onReport != nil {
+		f.onReport()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.stoppedErr != nil {
@@ -83,27 +89,36 @@ func (f *fakeStopClient) ClearProjectCondition(context.Context, string, Assignme
 }
 
 type fakeStopRuntime struct {
-	stopErr    error
-	inspectErr error
-	after      []docker.ContainerState
-	stops      int
+	stopErr error
+	listErr error
+	after   []docker.ProjectContainer // what Docker lists once the stop ran
+	stops   int
 }
 
-func (f *fakeStopRuntime) StopProject(context.Context, *v1.Project) error {
+func (f *fakeStopRuntime) StopAssignment(context.Context, *v1.Project) error {
 	f.stops++
 	return f.stopErr
 }
 
-func (f *fakeStopRuntime) InspectProject(context.Context, *v1.Project) ([]docker.ContainerState, error) {
-	return f.after, f.inspectErr
+func (f *fakeStopRuntime) ProjectContainers(context.Context, *v1.Project) ([]docker.ProjectContainer, error) {
+	return f.after, f.listErr
 }
 
-func stoppedStates() []docker.ContainerState {
-	return []docker.ContainerState{{ServiceName: "web", Status: "exited", ExitCode: 1}, {ServiceName: "db", Status: "exited"}}
+func stoppedStates() []docker.ProjectContainer {
+	return []docker.ProjectContainer{
+		{Name: "blog-web", Service: "web", State: "exited"},
+		{Name: "blog-db", Service: "db", State: "exited"},
+	}
+}
+
+// otherAssignment is a container listed for the Project that belongs to a
+// different assignment of it.
+func otherAssignment(name, state string) docker.ProjectContainer {
+	return docker.ProjectContainer{Name: name, Service: "db", State: state, NotOwned: docker.ErrContainerNotOwned}
 }
 
 func runStopFailed(client *fakeStopClient, rt *fakeStopRuntime, busy busyChecker, p *v1.Project) {
-	stopFailedProjects(context.Background(), client, rt, busy, []*v1.Project{p}, zap.NewNop())
+	stopFailedProjects(context.Background(), client, rt, busy, nil, []*v1.Project{p}, zap.NewNop())
 }
 
 func TestStopFailedProjects_Reasons(t *testing.T) {
@@ -146,39 +161,100 @@ func TestStopFailedProjects_StopsThenReports(t *testing.T) {
 }
 
 func TestStopFailedProjects_Blocked(t *testing.T) {
+	running := func(state string) []docker.ProjectContainer {
+		return []docker.ProjectContainer{{Name: "blog-web", Service: "web", State: state}}
+	}
 	tests := []struct {
-		name string
-		rt   *fakeStopRuntime
+		name   string
+		rt     *fakeStopRuntime
+		reason string
 	}{
-		{name: "the stop fails", rt: &fakeStopRuntime{stopErr: errors.New("docker unreachable")}},
-		{name: "the check fails", rt: &fakeStopRuntime{inspectErr: errors.New("docker unreachable")}},
-		{name: "a container is still running", rt: &fakeStopRuntime{after: []docker.ContainerState{{ServiceName: "web", Status: "running"}}}},
-		{name: "a container is restarting", rt: &fakeStopRuntime{after: []docker.ContainerState{{ServiceName: "web", Status: "restarting"}}}},
-		{name: "a container is paused", rt: &fakeStopRuntime{after: []docker.ContainerState{{ServiceName: "web", Status: "paused"}}}},
+		{name: "the stop fails", rt: &fakeStopRuntime{stopErr: errors.New("docker unreachable")}, reason: recoveryBlockedStopUnconfirmed},
+		{name: "the check fails", rt: &fakeStopRuntime{listErr: errors.New("docker unreachable")}, reason: recoveryBlockedStopUnconfirmed},
+		{name: "a container is still running", rt: &fakeStopRuntime{after: running("running")}, reason: recoveryBlockedStopUnconfirmed},
+		{name: "a container is restarting", rt: &fakeStopRuntime{after: running("restarting")}, reason: recoveryBlockedStopUnconfirmed},
+		{name: "a container is paused", rt: &fakeStopRuntime{after: running("paused")}, reason: recoveryBlockedStopUnconfirmed},
+		{
+			// The spec no longer names the service, but its container is this
+			// assignment's and still a copy of the workload.
+			name:   "a dropped service's container is still running",
+			rt:     &fakeStopRuntime{after: append(stoppedStates(), docker.ProjectContainer{Name: "blog-worker", Service: "worker", State: "running"})},
+			reason: recoveryBlockedStopUnconfirmed,
+		},
+		{
+			name:   "another assignment's container is running",
+			rt:     &fakeStopRuntime{after: append(stoppedStates(), otherAssignment("blog-old", "running"))},
+			reason: recoveryBlockedStaleContainer,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &fakeStopClient{current: failedProject("LocalRestartExhausted")}
 			runStopFailed(client, tt.rt, nil, failedProject("LocalRestartExhausted"))
 			assert.Empty(t, client.stopped, "no evidence without a confirmed stop")
-			assert.Equal(t, []string{recoveryBlockedStopUnconfirmed}, client.patched)
+			assert.Equal(t, []string{tt.reason}, client.patched)
 
 			// The next poll tries again.
-			tt.rt.stopErr, tt.rt.inspectErr, tt.rt.after = nil, nil, stoppedStates()
+			tt.rt.stopErr, tt.rt.listErr, tt.rt.after = nil, nil, stoppedStates()
 			runStopFailed(client, tt.rt, nil, failedProject("LocalRestartExhausted"))
 			assert.Len(t, client.stopped, 1, "retried on a later poll")
 		})
 	}
 }
 
-func TestStopFailedProjects_OtherAssignmentsContainersAreNotCounted(t *testing.T) {
+// A stopped leftover of another assignment says nothing runs, and is not this
+// assignment's to stop; it does not hold the report back.
+func TestStopFailedProjects_AStoppedLeftoverOfAnotherAssignmentDoesNotBlock(t *testing.T) {
 	client := &fakeStopClient{current: failedProject("ContainerCrashed")}
-	rt := &fakeStopRuntime{after: []docker.ContainerState{
-		{ServiceName: "web", Status: "exited"},
-		{ServiceName: "db", Status: "running", NotOwned: errors.New("generation 3")},
-	}}
+	rt := &fakeStopRuntime{after: append(stoppedStates(), otherAssignment("blog-db-gen3", "exited"))}
 	runStopFailed(client, rt, nil, failedProject("ContainerCrashed"))
 	assert.Len(t, client.stopped, 1)
+	assert.Empty(t, client.patched)
+}
+
+func TestStopFailedProjects_LocalRecord(t *testing.T) {
+	stop := func(t *testing.T, latches *StopLatches, client *fakeStopClient) {
+		t.Helper()
+		stopFailedProjects(context.Background(), client, &fakeStopRuntime{after: stoppedStates()}, nil, latches,
+			[]*v1.Project{failedProject("LocalRestartExhausted")}, zap.NewNop())
+	}
+
+	t.Run("written before the evidence is sent", func(t *testing.T) {
+		latches := NewStopLatches(t.TempDir())
+		client := &fakeStopClient{current: failedProject("LocalRestartExhausted")}
+		var heldWhenSent bool
+		client.onReport = func() { heldWhenSent, _ = latches.Holds(failedProject("LocalRestartExhausted")) }
+		stop(t, latches, client)
+		assert.True(t, heldWhenSent)
+		assert.Len(t, client.stopped, 1)
+	})
+
+	t.Run("no record, no report", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "not-a-dir")
+		require.NoError(t, os.WriteFile(file, nil, 0o600))
+		client := &fakeStopClient{current: failedProject("LocalRestartExhausted")}
+		stop(t, NewStopLatches(file), client)
+		assert.Empty(t, client.stopped, "evidence the guard does not know of is never sent")
+		assert.Equal(t, []string{recoveryBlockedStopUnconfirmed}, client.patched)
+	})
+
+	t.Run("dropped when the server refuses the evidence", func(t *testing.T) {
+		latches := NewStopLatches(t.TempDir())
+		client := &fakeStopClient{current: failedProject("LocalRestartExhausted"), stoppedErr: ErrStaleAssignment}
+		stop(t, latches, client)
+		held, err := latches.Holds(failedProject("LocalRestartExhausted"))
+		require.NoError(t, err)
+		assert.False(t, held, "the server holds no evidence, so nothing needs guarding")
+	})
+
+	t.Run("kept while the answer is unknown", func(t *testing.T) {
+		latches := NewStopLatches(t.TempDir())
+		client := &fakeStopClient{current: failedProject("LocalRestartExhausted"), stoppedErr: errors.New("timeout")}
+		stop(t, latches, client)
+		held, err := latches.Holds(failedProject("LocalRestartExhausted"))
+		require.NoError(t, err)
+		assert.True(t, held, "the server may have recorded it")
+	})
 }
 
 func TestStopFailedProjects_LeavesAlone(t *testing.T) {
@@ -280,7 +356,7 @@ func TestLatchedGenerationIsNeverStarted(t *testing.T) {
 			p.Status.Phase = phase
 			client, updates := newReconcileServer(t, []v1.Project{p})
 			rt, any := touched()
-			reconcileProjects(context.Background(), client, rt, nil, nil, nil, nil, newRecoveryTracker(), zap.NewNop())
+			reconcileProjects(context.Background(), client, rt, nil, nil, nil, nil, newRecoveryTracker(), nil, zap.NewNop())
 			assert.False(t, *any, "phase %s: Docker untouched", phase)
 			assert.Empty(t, *updates)
 		}
@@ -307,7 +383,7 @@ func TestLatchedGenerationIsNeverStarted(t *testing.T) {
 		p.Status.Recovery = nil
 		client, _ := newReconcileServer(t, []v1.Project{p})
 		rt, any := touched()
-		reconcileProjects(context.Background(), client, rt, nil, nil, nil, nil, newRecoveryTracker(), zap.NewNop())
+		reconcileProjects(context.Background(), client, rt, nil, nil, nil, nil, newRecoveryTracker(), nil, zap.NewNop())
 		assert.True(t, *any)
 	})
 }

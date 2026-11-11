@@ -168,6 +168,14 @@ func main() {
 		}
 	}()
 
+	// Every start of a Project's containers, from the poll loop and from a
+	// backup alike, goes through this guard: an assignment this node has
+	// reported stopped is never started here again (CARA-92). The raw runtime
+	// is kept only for what never starts a Project container: capacity
+	// probes, the pgBackRest repo host, logs and port forwarding.
+	stopLatches := agent.NewStopLatches(cfg.DataRoot)
+	projectRuntime := agent.GuardRuntime(dockerRuntime, stopLatches)
+
 	// Parse agent port for heartbeat reporting.
 	agentPort, err := strconv.Atoi(cfg.ListenPort)
 	if err != nil {
@@ -185,7 +193,7 @@ func main() {
 	}()
 
 	// ── Managed volume backups ──────────────────────────────────────────
-	backupSupport, err := agent.NewBackupSupport(cfg, agentClient, dockerRuntime, routeTable, Version, logger)
+	backupSupport, err := agent.NewBackupSupport(cfg, agentClient, projectRuntime, routeTable, Version, logger)
 	if err != nil {
 		logger.Fatal("Failed to configure Managed volume backups", zap.Error(err))
 	}
@@ -214,7 +222,8 @@ func main() {
 
 	go agent.Run(ctx, agent.RunConfig{
 		Client:            agentClient,
-		Runtime:           dockerRuntime,
+		Runtime:           projectRuntime,
+		StopLatches:       stopLatches,
 		HeartbeatInterval: cfg.HeartbeatInterval,
 		AgentPort:         agentPort,
 		AdvertiseIP:       cfg.AdvertiseIP,

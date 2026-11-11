@@ -317,7 +317,11 @@ func (f *fakeDocker) ContainerList(_ context.Context, opts container.ListOptions
 		if !matchesLabelFilters(labels, opts.Filters.Get("label")) {
 			continue
 		}
-		out = append(out, types.Container{ID: c.ID, Names: []string{"/" + name}, Labels: labels})
+		var state string
+		if c.ContainerJSONBase != nil && c.State != nil {
+			state = c.State.Status
+		}
+		out = append(out, types.Container{ID: c.ID, Names: []string{"/" + name}, Labels: labels, State: state})
 	}
 	return out, nil
 }

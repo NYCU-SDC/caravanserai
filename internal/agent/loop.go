@@ -147,6 +147,11 @@ type RunConfig struct {
 	// loop skip Projects with an operation in flight. Nil disables backups.
 	Backups *BackupSupport
 
+	// StopLatches is this node's record of the assignments it reported
+	// stopped (CARA-92), which Runtime must also be guarded by (see
+	// GuardRuntime). Nil keeps it under DataRoot, or none without a DataRoot.
+	StopLatches *StopLatches
+
 	// PollInterval is how often assigned Projects are fetched and reconciled.
 	// Zero means defaultPollInterval. It is configurable so tests can drive the
 	// real loop at millisecond cadence; production leaves it unset.
@@ -225,6 +230,11 @@ func Run(ctx context.Context, cfg RunConfig) {
 	// against wall-clock time rather than tick count.
 	recovery := newRecoveryTracker()
 
+	latches := cfg.StopLatches
+	if latches == nil && cfg.DataRoot != "" {
+		latches = NewStopLatches(cfg.DataRoot)
+	}
+
 	// ── Bootstrap: health-check Running projects ──────────────────────────
 	// After a restart, the Agent has no memory of Running projects. Fetch
 	// them from the server and verify containers are still alive so that
@@ -287,7 +297,7 @@ func Run(ctx context.Context, cfg RunConfig) {
 			}
 
 		case <-pollTicker.C:
-			reconcileProjects(ctx, client, runtime, routes, cfg.Backups, orphans, cleaner, recovery, logger)
+			reconcileProjects(ctx, client, runtime, routes, cfg.Backups, orphans, cleaner, recovery, latches, logger)
 		}
 	}
 }
@@ -381,7 +391,7 @@ func bootstrapRunningProjects(ctx context.Context, client *Client, runtime docke
 // cleaner removes and accounts for an assignment's resources. It may be nil,
 // which disables cleanup tasks and leaves termination unable to report
 // ResourcesRemoved.
-func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, orphans *orphanTracker, cleaner *assignmentCleaner, recovery *recoveryTracker, logger *zap.Logger) {
+func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, orphans *orphanTracker, cleaner *assignmentCleaner, recovery *recoveryTracker, latches *StopLatches, logger *zap.Logger) {
 	assignedProjects, err := client.ListProjectsAssignedToNode(ctx)
 	if err != nil {
 		// Unknown ownership never counts toward destructive cleanup. Preserve
@@ -395,6 +405,11 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 	}
 
 	busy := coordinatorOf(backups)
+
+	// Stop records of assignments this node no longer holds are dropped, and
+	// evidence the server holds without a record here is recorded. Only on a
+	// complete listing, which this is.
+	latches.Sync(assignedProjects, time.Now(), logger)
 
 	// The orphan sweep must see the complete node ownership snapshot, including
 	// Failed projects. Filtering phases before this point would misclassify a
@@ -410,7 +425,7 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 	// Failed Projects a different node may fix are stopped and reported
 	// stopped, so Tier-2 recovery can move them (CARA-92). They are not in
 	// the reconcile list below; this is the only thing done to them here.
-	stopFailedProjects(ctx, client, runtime, busy, assignedProjects, logger)
+	stopFailedProjects(ctx, client, runtime, busy, latches, assignedProjects, logger)
 
 	projects := projectsForReconcile(assignedProjects)
 
