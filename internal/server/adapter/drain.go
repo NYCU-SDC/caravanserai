@@ -96,25 +96,25 @@ func (a *DrainStoreAdapter) ListProjectsOwedCleanup(ctx context.Context, node st
 
 // SetNodeDrainStatus satisfies controller.DrainStore. A nil status clears it.
 //
-// It reads the Node and writes its status back, so a heartbeat landing in
-// between can overwrite it; the next reconcile writes it again.
-func (a *DrainStoreAdapter) SetNodeDrainStatus(ctx context.Context, name string, status *v1.NodeDrainStatus) error {
-	n, err := a.s.GetNode(ctx, name)
-	if err != nil {
-		return err
-	}
-	n.Status.Drain = status
-	n.Status.Conditions = v1.RemoveConditions(n.Status.Conditions, v1.ConditionTypeNodeDrainIncomplete)
-	if status != nil && status.Phase == v1.NodeDrainIncomplete {
-		n.Status.Conditions = v1.UpsertCondition(n.Status.Conditions, v1.Condition{
-			Type:               v1.ConditionTypeNodeDrainIncomplete,
-			Status:             v1.ConditionTrue,
-			Reason:             "ProjectsCannotLeave",
-			Message:            strings.Join(status.Blocking, "; "),
-			LastTransitionTime: status.Since,
-		}, false)
-	}
-	return a.s.UpdateNodeStatus(ctx, name, n.Status)
+// It changes only status.drain and the NodeDrainIncomplete condition, on the
+// status as it is when written: the heartbeat and the health controller write
+// the same status, and writing back a copy read earlier would undo them — a
+// Node just marked NotReady would read Ready again.
+func (a *DrainStoreAdapter) SetNodeDrainStatus(ctx context.Context, name string, drain *v1.NodeDrainStatus) error {
+	return a.s.UpdateNodeStatusWithRetry(ctx, name, func(status *v1.NodeStatus) error {
+		status.Drain = drain
+		status.Conditions = v1.RemoveConditions(status.Conditions, v1.ConditionTypeNodeDrainIncomplete)
+		if drain != nil && drain.Phase == v1.NodeDrainIncomplete {
+			status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+				Type:               v1.ConditionTypeNodeDrainIncomplete,
+				Status:             v1.ConditionTrue,
+				Reason:             "ProjectsCannotLeave",
+				Message:            strings.Join(drain.Blocking, "; "),
+				LastTransitionTime: drain.Since,
+			}, false)
+		}
+		return nil
+	})
 }
 
 // CancelEviction satisfies controller.DrainStore. It calls off a planned move
