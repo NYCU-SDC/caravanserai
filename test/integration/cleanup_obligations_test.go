@@ -11,6 +11,7 @@ import (
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent"
 	"NYCU-SDC/caravanserai/internal/server/adapter"
+	"NYCU-SDC/caravanserai/internal/server/controller"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -152,4 +153,60 @@ func TestTeardownBlockedConditionIsAgentWritable(t *testing.T) {
 
 	require.NoError(t, client.ClearProjectCondition(ctx, name, fence, v1.ConditionTypeTeardownBlocked))
 	assert.False(t, hasProjectCondition(getProject(t, name), v1.ConditionTypeTeardownBlocked))
+}
+
+// CARA-92: the Agent's report that a Failed Project stopped is recorded as
+// the current assignment's WorkloadStopped evidence — which is what lets
+// Tier-2 recovery release it — and refused under any other assignment.
+func TestAgentClientReportsWorkloadStopped(t *testing.T) {
+	const name = "e2e-agent-workload-stopped"
+	ctx := context.Background()
+	uid, gen := createAssigned(t, name, "node-a", v1.ProjectPhaseFailed)
+
+	client := agent.NewClient(zap.NewNop(), suite.serverURL, "node-a")
+	client.SetToken(testAdminToken)
+	// Asked while the Project is still Failed on node-a, so the generation
+	// is the only thing that differs.
+	assert.ErrorIs(t, client.ReportWorkloadStopped(ctx, name, agent.AssignmentFence{UID: uid, NodeRef: "node-a", Generation: gen - 1}),
+		agent.ErrStaleAssignment, "an older generation is refused")
+	require.NoError(t, client.ReportWorkloadStopped(ctx, name, agent.AssignmentFence{UID: uid, NodeRef: "node-a", Generation: gen}))
+
+	assert.True(t, getProject(t, name).Status.Recovery.WorkloadStoppedFor(
+		v1.AssignmentIdentity{ProjectUID: uid, NodeName: "node-a", AssignmentGeneration: gen}),
+		"recorded for exactly the current assignment")
+	released, err := adapter.NewProjectStoreAdapter(suite.store).MoveFailedProject(ctx, snapshotOf(getProject(t, name)), "moved")
+	require.NoError(t, err)
+	assert.True(t, released, "with the evidence the Failed project can be moved")
+
+	assert.ErrorIs(t, client.ReportWorkloadStopped(ctx, "e2e-no-such-project", agent.AssignmentFence{UID: uid, NodeRef: "node-a", Generation: gen}),
+		agent.ErrProjectNotFound)
+}
+
+// Review A1: the agent's evidence for a planned move is refused once that move
+// was called off, so the Project is not left latched while it is meant to run
+// where it is.
+func TestAgentClientReportsAStopForAMoveThatWasCalledOff(t *testing.T) {
+	const name = "e2e-agent-stop-for-move"
+	ctx := context.Background()
+	uid, gen := createAssigned(t, name, "node-a", v1.ProjectPhaseRunning)
+	a := adapter.NewProjectStoreAdapter(suite.store)
+	require.NoError(t, a.RequestEviction(ctx, name, "node-a", "Drain", "", nil))
+	require.NoError(t, a.StartEvictionBackup(ctx, name, "node-a"))
+	since := getProject(t, name).Status.Eviction.StateSince
+
+	// Called off before the agent's evidence arrives.
+	snapshots, err := a.ListEvictions(ctx)
+	require.NoError(t, err)
+	for _, e := range snapshots {
+		if e.Name == name {
+			require.NoError(t, a.EndEviction(ctx, e, &controller.EvictionFailure{Reason: "AgentDidNotStart", Message: "too slow"}))
+		}
+	}
+
+	client := agent.NewClient(zap.NewNop(), suite.serverURL, "node-a")
+	client.SetToken(testAdminToken)
+	fence := agent.AssignmentFence{UID: uid, NodeRef: "node-a", Generation: gen}
+	assert.ErrorIs(t, client.ReportWorkloadStoppedForMove(ctx, name, fence, since), agent.ErrStaleAssignment)
+	assert.False(t, getProject(t, name).Status.Recovery.WorkloadStoppedFor(
+		v1.AssignmentIdentity{ProjectUID: uid, NodeName: "node-a", AssignmentGeneration: gen}), "no evidence left behind")
 }

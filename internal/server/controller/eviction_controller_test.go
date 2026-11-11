@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sort"
 	"sync"
@@ -36,9 +37,10 @@ type fakeEvictionProject struct {
 // controller through whole moves, and serves the capacity ledger from the
 // same Projects.
 type fakeEvictionStore struct {
-	mu       sync.Mutex
-	clock    *fakeClock
-	projects map[string]*fakeEvictionProject
+	mu              sync.Mutex
+	lastMoveMessage string
+	clock           *fakeClock
+	projects        map[string]*fakeEvictionProject
 
 	backupsAsked []string
 	requests     []string
@@ -149,9 +151,10 @@ func (f *fakeEvictionStore) StartEvictionBackup(_ context.Context, name, fromNod
 
 // MoveEvictedProject mirrors the adapter's release gate: no stop evidence,
 // no release.
-func (f *fakeEvictionStore) MoveEvictedProject(_ context.Context, e *EvictionSnapshot, _ string) (bool, error) {
+func (f *fakeEvictionStore) MoveEvictedProject(_ context.Context, e *EvictionSnapshot, message string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lastMoveMessage = message
 	p := f.projects[e.Name]
 	if p.Eviction == nil || p.Phase != v1.ProjectPhaseRunning || p.NodeRef != e.NodeRef || !p.Stopped {
 		return false, nil
@@ -183,12 +186,31 @@ func (f *fakeEvictionStore) RequestEviction(_ context.Context, name, fromNode, r
 	return nil
 }
 
-func (f *fakeEvictionStore) EndEviction(_ context.Context, name string, failure *EvictionFailure) error {
+// EndEviction mirrors the adapter: a move whose stop evidence is in is not
+// abandoned.
+func (f *fakeEvictionStore) EndEviction(_ context.Context, e *EvictionSnapshot, failure *EvictionFailure) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	p := f.projects[name]
+	p := f.projects[e.Name]
+	if p.Eviction == nil {
+		return nil
+	}
+	if failure != nil && p.Phase == v1.ProjectPhaseRunning && p.Stopped {
+		return fmt.Errorf("%w: reported stopped", store.ErrConflictState)
+	}
 	p.Eviction = nil
 	p.Failure = failure
+	return nil
+}
+
+func (f *fakeEvictionStore) MarkEvictionAgentStarted(_ context.Context, e *EvictionSnapshot, at time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.projects[e.Name]
+	if p.Eviction == nil || p.Eviction.State != v1.EvictionStateBackingUp || !p.Eviction.StateSince.Equal(e.Eviction.StateSince) || p.Eviction.AgentStartedAt != nil {
+		return nil
+	}
+	p.Eviction.AgentStartedAt = &at
 	return nil
 }
 
@@ -646,4 +668,120 @@ func TestEvictionController_PostgresDifferentialIsRefused(t *testing.T) {
 	assert.Equal(t, EvictionFailedUnsupportedBackupStrategy, p.Failure.Reason)
 	assert.Equal(t, v1.ProjectPhaseRunning, p.Phase, "left running where it is")
 	assert.Empty(t, env.store.backupsAsked, "nothing is stopped")
+}
+
+// ── Review A1: a move abandoned while its agent was finishing ────────────────
+
+func (e *evictionEnv) setConditions(name string, conds ...v1.Condition) {
+	e.store.mu.Lock()
+	defer e.store.mu.Unlock()
+	e.store.projects[name].Conditions = conds
+}
+
+func maintenanceAt(at time.Time) v1.Condition {
+	return v1.Condition{Type: v1.ConditionTypeMaintenance, Status: v1.ConditionTrue, LastTransitionTime: at}
+}
+
+func TestEvictionController_AStartedBackupIsNotTimedOut(t *testing.T) {
+	t.Run("the agent clears Maintenance before it reports", func(t *testing.T) {
+		env := newEvictionEnv(t, 1, "node-a", "node-b")
+		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+		env.store.request("app", "Drain", 0)
+		env.reconcile(t) // BackingUp
+		env.advance(time.Minute)
+		env.setConditions("app", maintenanceAt(env.clock.Now()))
+		env.reconcile(t)
+		require.NotNil(t, env.store.get("app").Eviction.AgentStartedAt, "seen at work once is remembered")
+
+		// The backup took 12 minutes; Maintenance is gone while old backups
+		// are pruned, and no result or evidence has arrived yet.
+		env.advance(11 * time.Minute)
+		env.setConditions("app")
+		env.reconcile(t)
+		assert.Equal(t, v1.EvictionStateBackingUp, stateOf(env.store.get("app")), "not taken for an agent that never started")
+	})
+
+	t.Run("a backup running past MaintenanceStaleAfter", func(t *testing.T) {
+		env := newEvictionEnv(t, 1, "node-a", "node-b")
+		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+		env.store.request("app", "Drain", 0)
+		env.reconcile(t)
+		env.setConditions("app", maintenanceAt(env.clock.Now()))
+		env.reconcile(t)
+		env.advance(v1.MaintenanceStaleAfter + time.Minute)
+		env.reconcile(t)
+		assert.Equal(t, v1.EvictionStateBackingUp, stateOf(env.store.get("app")))
+	})
+
+	t.Run("an agent that went silent is given up on in the end", func(t *testing.T) {
+		env := newEvictionEnv(t, 1, "node-a", "node-b")
+		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+		env.store.request("app", "Drain", 0)
+		env.reconcile(t)
+		env.setConditions("app", maintenanceAt(env.clock.Now()))
+		env.reconcile(t)
+		env.setConditions("app")
+		env.advance(evictionBackupTimeout)
+		env.reconcile(t)
+		p := env.store.get("app")
+		assert.Nil(t, p.Eviction)
+		require.NotNil(t, p.Failure)
+		assert.Equal(t, EvictionFailedAgentDidNotFinish, p.Failure.Reason)
+	})
+}
+
+// The decision to abandon was made on a read from before the evidence came
+// in. The write refuses, and the move goes on to release the Project.
+func TestEvictionController_EvidenceAfterTheReadKeepsTheMove(t *testing.T) {
+	env := newEvictionEnv(t, 1, "node-a", "node-b")
+	env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+	env.store.request("app", "Drain", 0)
+	env.reconcile(t)
+	snapshots, err := env.store.ListEvictions(context.Background())
+	require.NoError(t, err)
+	stale := snapshots[0] // no evidence in this read
+
+	env.store.mu.Lock()
+	env.store.projects["app"].Stopped = true
+	env.store.mu.Unlock()
+
+	require.NoError(t, env.ctrl.raiseEvictionFailedAlert(context.Background(), zap.NewNop(), stale,
+		EvictionFailedAgentDidNotStart, "too slow"))
+	assert.Equal(t, v1.EvictionStateBackingUp, stateOf(env.store.get("app")), "not abandoned")
+	assert.Nil(t, env.store.get("app").Failure)
+
+	env.reconcile(t)
+	assert.Equal(t, v1.EvictionStateMoving, stateOf(env.store.get("app")), "released on the evidence")
+}
+
+// A failed result's message is an error, not a backup to restore from.
+func TestEvictionController_MoveMessageNamesOnlyACommittedBackup(t *testing.T) {
+	for name, tc := range map[string]struct {
+		result v1.ConditionStatus
+		want   string
+	}{
+		"committed": {v1.ConditionTrue, "restored from backup b-42"},
+		"failed":    {v1.ConditionFalse, "restored from its fresh backup"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := newEvictionEnv(t, 1, "node-a", "node-b")
+			env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+			env.store.request("app", "Drain", 0)
+			env.reconcile(t)
+			msg := "b-42"
+			if tc.result == v1.ConditionFalse {
+				msg = "upload failed: disk full"
+			}
+			env.store.mu.Lock()
+			p := env.store.projects["app"]
+			p.Stopped = true
+			p.Conditions = []v1.Condition{{
+				Type: v1.ConditionTypeEvictionBackup, Status: tc.result, Message: msg, LastTransitionTime: env.clock.Now(),
+			}}
+			env.store.mu.Unlock()
+			env.reconcile(t)
+			assert.Contains(t, env.store.lastMoveMessage, tc.want)
+			assert.NotContains(t, env.store.lastMoveMessage, "disk full")
+		})
+	}
 }

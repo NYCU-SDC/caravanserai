@@ -3,10 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/agent/backup"
+	"NYCU-SDC/caravanserai/internal/agent/docker"
 
 	"go.uber.org/zap"
 )
@@ -32,7 +35,17 @@ type evictionRunner interface {
 type evictionClient interface {
 	GetProject(ctx context.Context, name string) (*v1.Project, error)
 	PatchProjectCondition(ctx context.Context, projectName string, fence AssignmentFence, condType v1.ConditionType, status v1.ConditionStatus, reason, message string) error
-	ReportWorkloadStopped(ctx context.Context, projectName string, fence AssignmentFence) error
+	ReportWorkloadStoppedForMove(ctx context.Context, projectName string, fence AssignmentFence, moveStateSince time.Time) error
+}
+
+// evictionRuntime is the part of the container runtime a move uses: stopping
+// and, when the move is called off, starting the Project again, and the
+// label-based stop and listing that make sure no container of the assignment
+// still runs before its stop is reported.
+type evictionRuntime interface {
+	backup.ContainerController
+	StopAssignment(ctx context.Context, project *v1.Project) error
+	ProjectContainers(ctx context.Context, project *v1.Project) ([]docker.ProjectContainer, error)
 }
 
 // evictionClaimer is the agent-local coordinator, so a Project being stopped
@@ -54,9 +67,10 @@ type evictionClaimer interface {
 type evictionBackups struct {
 	ctx        context.Context
 	runner     evictionRunner // nil when this agent has no object store
-	containers backup.ContainerController
+	containers evictionRuntime
 	claimer    evictionClaimer // nil when this agent has no object store
 	client     evictionClient
+	latches    *StopLatches
 	logger     *zap.Logger
 
 	mu      sync.Mutex
@@ -68,13 +82,14 @@ type evictionBackups struct {
 // runner and claimer may be nil, as on an agent with no object store: a
 // Project with Managed data then cannot be moved, since there is nowhere to
 // back it up, and one without can.
-func newEvictionBackups(ctx context.Context, runner evictionRunner, containers backup.ContainerController, claimer evictionClaimer, client evictionClient, logger *zap.Logger) *evictionBackups {
+func newEvictionBackups(ctx context.Context, runner evictionRunner, containers evictionRuntime, claimer evictionClaimer, client evictionClient, latches *StopLatches, logger *zap.Logger) *evictionBackups {
 	return &evictionBackups{
 		ctx:        ctx,
 		runner:     runner,
 		containers: containers,
 		claimer:    claimer,
 		client:     client,
+		latches:    latches,
 		logger:     logger,
 		running:    make(map[string]bool),
 	}
@@ -107,6 +122,16 @@ func (b *evictionBackups) handle(p *v1.Project) {
 	if !underEviction(p) || reported(p) {
 		return
 	}
+	// The server holds this move's stop evidence: it moves the Project on
+	// that alone, whatever result reaches it. Stopping or backing up again
+	// could only end in a restart, and the Project may already be starting
+	// on another node.
+	if workloadLatched(p) {
+		return
+	}
+	// Recorded here but not, as far as the server said, accepted: the
+	// evidence is sent again, and the containers are not touched.
+	resend, _ := b.latches.Holds(p)
 
 	b.mu.Lock()
 	if b.running[p.Name] {
@@ -124,6 +149,10 @@ func (b *evictionBackups) handle(p *v1.Project) {
 			delete(b.running, p.Name)
 			b.mu.Unlock()
 		}()
+		if resend {
+			b.resendStopped(p)
+			return
+		}
 		b.run(p)
 	}()
 }
@@ -174,6 +203,13 @@ func (b *evictionBackups) run(p *v1.Project) {
 			"The backup completed but the move could not be confirmed, so the project was started again here")
 	default:
 		log.Info("Fresh backup committed; leaving the project stopped for the move", zap.String("backup", backupID))
+		// The backup stopped the services the spec names. A container of
+		// this assignment for a service the spec has dropped is stopped
+		// here, so it is not left running beside the moved copy.
+		if err := b.containers.StopAssignment(context.WithoutCancel(b.ctx), p); err != nil {
+			b.abandonStop(log, p, fence, "Could not stop every container of the project for the move: "+err.Error())
+			return
+		}
 		b.confirmStopped(log, p, fence, evictionBackupSucceeded, backupID)
 	}
 }
@@ -192,7 +228,10 @@ func (b *evictionBackups) stopOnly(log *zap.Logger, p *v1.Project, fence Assignm
 	}
 
 	log.Info("Stopping a project with no Managed data for a planned move")
-	if err := b.containers.StopProject(b.ctx, p); err != nil {
+	// By label, not by spec: a stopped leftover of another assignment under
+	// a service's name does not refuse the stop, and a service the spec has
+	// dropped is stopped too.
+	if err := b.containers.StopAssignment(b.ctx, p); err != nil {
 		log.Error("Could not stop the project for the move; starting it again", zap.Error(err))
 		b.restart(log, p)
 		b.report(log, p, fence, v1.ConditionFalse, evictionStopFailed, err.Error())
@@ -209,19 +248,86 @@ func (b *evictionBackups) stopOnly(log *zap.Logger, p *v1.Project, fence Assignm
 }
 
 // confirmStopped records that the workload is stopped, which is what lets
-// the server release the assignment, and then reports the move's result. If
-// the evidence is not accepted, nothing is reported: the move keeps waiting
-// and the next poll, finding no result, stops (and backs up) again — the
-// containers are already stopped, so that costs no further downtime.
+// the server release the assignment, and then reports the move's result.
+//
+// The stop is confirmed by what Docker lists for the Project, not by the
+// services the spec names: nothing may run, of this assignment or another,
+// when the evidence is sent. The caller has stopped the containers with
+// StopAssignment, which also stops a service the spec has since dropped. Before it is sent the
+// stop is recorded on this node, so nothing here starts the assignment again
+// from then on.
+//
+// If the evidence is refused the move was called off, or the assignment is no
+// longer this node's: the record is dropped and the Project left to the poll
+// loop, which starts it again if it is still assigned here. If the answer is
+// unknown the record stays, and the next poll sends the evidence again
+// without touching the containers.
 func (b *evictionBackups) confirmStopped(log *zap.Logger, p *v1.Project, fence AssignmentFence, reason, message string) {
-	if err := b.client.ReportWorkloadStopped(context.WithoutCancel(b.ctx), p.Name, fence); err != nil {
-		log.Warn("Failed to confirm the workload stopped; the move will retry", zap.Error(err))
+	listed, err := b.containers.ProjectContainers(context.WithoutCancel(b.ctx), p)
+	if err != nil {
+		b.abandonStop(log, p, fence, "Could not confirm the project's containers stopped for the move: "+err.Error())
+		return
+	}
+	if running := append(runningOf(listed, true), runningOf(listed, false)...); len(running) > 0 {
+		b.abandonStop(log, p, fence, "Containers still running, so the move cannot go on: "+strings.Join(running, ", "))
+		return
+	}
+	if err := b.latches.Record(p, time.Now()); err != nil {
+		b.abandonStop(log, p, fence, "Could not record the stop on this node: "+err.Error())
+		return
+	}
+	if !b.sendStopped(log, p, fence) {
 		return
 	}
 	b.report(log, p, fence, v1.ConditionTrue, reason, message)
 }
 
+// resendStopped sends the stop evidence of a move whose stop this node
+// recorded but the server has not been seen to accept. The containers are
+// left as they are: a recorded stop is never undone here.
+func (b *evictionBackups) resendStopped(p *v1.Project) {
+	log := b.logger.With(zap.String("project", p.Name), zap.String("reason", p.Status.Eviction.Reason))
+	fence := fenceForProject(p)
+	if b.sendStopped(log, p, fence) {
+		log.Info("Stop evidence for the planned move sent again")
+	}
+}
+
+// sendStopped sends the evidence and reports whether the server took it.
+func (b *evictionBackups) sendStopped(log *zap.Logger, p *v1.Project, fence AssignmentFence) bool {
+	// Tied to this move: if it was called off meanwhile, the server refuses
+	// the evidence instead of keeping it on a Project that runs here again.
+	err := b.client.ReportWorkloadStoppedForMove(context.WithoutCancel(b.ctx), p.Name, fence, p.Status.Eviction.StateSince)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, ErrStaleAssignment) || errors.Is(err, ErrProjectNotFound):
+		if fErr := b.latches.Forget(p.Namespace, p.Name); fErr != nil {
+			log.Warn("Could not drop the local stop record", zap.Error(fErr))
+		}
+		log.Info("The server refused the move's stop evidence; the move was called off or the assignment moved on", zap.Error(err))
+	default:
+		log.Warn("Failed to confirm the workload stopped; it will be sent again", zap.Error(err))
+	}
+	return false
+}
+
+// abandonStop starts the Project again and reports why the move cannot go
+// on. Nothing was reported stopped, so starting it here is still allowed.
+func (b *evictionBackups) abandonStop(log *zap.Logger, p *v1.Project, fence AssignmentFence, message string) {
+	log.Error("The planned move cannot go on; starting the project again", zap.String("detail", message))
+	b.restart(log, p)
+	b.report(log, p, fence, v1.ConditionFalse, evictionStopFailed, message)
+}
+
+// restart starts the Project again after a move that did not happen. A stop
+// recorded on this node is never undone: the guarded runtime would refuse
+// the start anyway, and this says why in the log rather than in an error.
 func (b *evictionBackups) restart(log *zap.Logger, p *v1.Project) {
+	if held, err := b.latches.Holds(p); held {
+		log.Warn("Not starting the project: this node has reported it stopped", zap.Error(err))
+		return
+	}
 	if err := b.containers.StartProject(context.WithoutCancel(b.ctx), p); err != nil {
 		log.Error("Failed to start the project again after an abandoned move", zap.Error(err))
 	}

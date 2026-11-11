@@ -515,6 +515,11 @@
           "type": "string",
           "format": "date-time",
           "description": "StateSince is when State last changed. A result the agent reported\nbefore it belongs to an earlier move and is ignored."
+        },
+        "agentStartedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "AgentStartedAt is when the server first saw the agent on FromNode at\nwork on this move's backup. From then on the move is not abandoned for\nan agent that never started, however long the backup and its clean-up\ntake; it is bounded by evictionBackupTimeout instead."
         }
       },
       "additionalProperties": false,
