@@ -85,7 +85,7 @@ type fakeEvictionClient struct {
 	order   []string
 }
 
-func (f *fakeEvictionClient) ReportWorkloadStopped(_ context.Context, _ string, fence AssignmentFence) error {
+func (f *fakeEvictionClient) ReportWorkloadStoppedForMove(_ context.Context, _ string, fence AssignmentFence, _ time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.stoppedErr != nil {
@@ -99,6 +99,8 @@ func (f *fakeEvictionClient) ReportWorkloadStopped(_ context.Context, _ string, 
 // fakeContainers records stops and starts.
 type fakeContainers struct {
 	stopErr error
+	listErr error
+	listed  []docker.ProjectContainer // what Docker lists once stopped
 
 	mu    sync.Mutex
 	calls []string
@@ -118,6 +120,18 @@ func (f *fakeContainers) StartProject(context.Context, *v1.Project) error {
 	return nil
 }
 
+// StopAssignment counts as a stop, as StopProject does.
+func (f *fakeContainers) StopAssignment(context.Context, *v1.Project) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "stop")
+	return f.stopErr
+}
+
+func (f *fakeContainers) ProjectContainers(context.Context, *v1.Project) ([]docker.ProjectContainer, error) {
+	return f.listed, f.listErr
+}
+
 func (f *fakeEvictionClient) GetProject(context.Context, string) (*v1.Project, error) {
 	return f.current, f.getErr
 }
@@ -132,7 +146,7 @@ func (f *fakeEvictionClient) PatchProjectCondition(_ context.Context, _ string, 
 
 func runEvictionBackup(t *testing.T, runner evictionRunner, client *fakeEvictionClient, p *v1.Project) {
 	t.Helper()
-	b := newEvictionBackups(context.Background(), runner, &fakeContainers{}, nil, client, zap.NewNop())
+	b := newEvictionBackups(context.Background(), runner, &fakeContainers{}, nil, client, nil, zap.NewNop())
 	b.handle(p)
 	b.wait()
 }
@@ -227,7 +241,7 @@ func TestEvictionBackups_StillWanted(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cur := projectBeingMoved()
 			tt.current(cur)
-			b := newEvictionBackups(context.Background(), nil, &fakeContainers{}, nil, &fakeEvictionClient{current: cur}, zap.NewNop())
+			b := newEvictionBackups(context.Background(), nil, &fakeContainers{}, nil, &fakeEvictionClient{current: cur}, nil, zap.NewNop())
 			assert.Equal(t, tt.want, b.stillWanted(projectBeingMoved())(context.Background()))
 		})
 	}
@@ -237,7 +251,7 @@ func TestEvictionBackups_RunsOnce(t *testing.T) {
 	t.Run("not started twice while running", func(t *testing.T) {
 		runner := &fakeEvictionRunner{backupID: "b", leftStopped: true, block: make(chan struct{})}
 		client := &fakeEvictionClient{current: projectBeingMoved()}
-		b := newEvictionBackups(context.Background(), runner, &fakeContainers{}, nil, client, zap.NewNop())
+		b := newEvictionBackups(context.Background(), runner, &fakeContainers{}, nil, client, nil, zap.NewNop())
 
 		b.handle(projectBeingMoved())
 		b.handle(projectBeingMoved())
@@ -293,7 +307,7 @@ func TestReconcileProjectsLeavesProjectUnderEvictionAlone(t *testing.T) {
 		},
 	}
 	runner := &fakeEvictionRunner{err: backup.ErrProjectBusy}
-	evictions := newEvictionBackups(context.Background(), runner, &fakeContainers{}, nil, &fakeEvictionClient{}, zap.NewNop())
+	evictions := newEvictionBackups(context.Background(), runner, &fakeContainers{}, nil, &fakeEvictionClient{}, nil, zap.NewNop())
 
 	reconcileProjects(context.Background(), client, rt, nil, nil, evictions, nil, nil, nil, nil, zap.NewNop())
 	evictions.wait()
@@ -329,7 +343,7 @@ func TestEvictionBackups_ProjectWithoutData(t *testing.T) {
 		containers := &fakeContainers{}
 		runner := &fakeEvictionRunner{}
 		client := &fakeEvictionClient{current: noData()}
-		b := newEvictionBackups(context.Background(), runner, containers, nil, client, zap.NewNop())
+		b := newEvictionBackups(context.Background(), runner, containers, nil, client, nil, zap.NewNop())
 		b.handle(noData())
 		b.wait()
 
@@ -340,7 +354,7 @@ func TestEvictionBackups_ProjectWithoutData(t *testing.T) {
 
 	t.Run("works on an agent with no object store", func(t *testing.T) {
 		client := &fakeEvictionClient{current: noData()}
-		b := newEvictionBackups(context.Background(), nil, &fakeContainers{}, nil, client, zap.NewNop())
+		b := newEvictionBackups(context.Background(), nil, &fakeContainers{}, nil, client, nil, zap.NewNop())
 		b.handle(noData())
 		b.wait()
 		require.Len(t, client.reports, 1)
@@ -350,7 +364,7 @@ func TestEvictionBackups_ProjectWithoutData(t *testing.T) {
 	t.Run("is started again when the move cannot be confirmed", func(t *testing.T) {
 		containers := &fakeContainers{}
 		client := &fakeEvictionClient{getErr: errors.New("server unreachable")}
-		b := newEvictionBackups(context.Background(), nil, containers, nil, client, zap.NewNop())
+		b := newEvictionBackups(context.Background(), nil, containers, nil, client, nil, zap.NewNop())
 		b.handle(noData())
 		b.wait()
 
@@ -363,7 +377,7 @@ func TestEvictionBackups_ProjectWithoutData(t *testing.T) {
 	t.Run("is started again when it cannot be stopped", func(t *testing.T) {
 		containers := &fakeContainers{stopErr: errors.New("docker down")}
 		client := &fakeEvictionClient{current: noData()}
-		b := newEvictionBackups(context.Background(), nil, containers, nil, client, zap.NewNop())
+		b := newEvictionBackups(context.Background(), nil, containers, nil, client, nil, zap.NewNop())
 		b.handle(noData())
 		b.wait()
 
@@ -380,7 +394,7 @@ func TestEvictionBackups_PostgresDifferentialIsNotMoved(t *testing.T) {
 	containers := &fakeContainers{}
 	runner := &fakeEvictionRunner{}
 	client := &fakeEvictionClient{current: p}
-	b := newEvictionBackups(context.Background(), runner, containers, nil, client, zap.NewNop())
+	b := newEvictionBackups(context.Background(), runner, containers, nil, client, nil, zap.NewNop())
 	b.handle(p)
 	b.wait()
 
@@ -389,4 +403,122 @@ func TestEvictionBackups_PostgresDifferentialIsNotMoved(t *testing.T) {
 	assert.Empty(t, client.stopped)
 	require.Len(t, client.reports, 1)
 	assert.Equal(t, evictionUnsupportedStrategy, client.reports[0].Reason)
+}
+
+// ── Once the stop is reported (CARA-92 latch, review A2) ─────────────────────
+
+// The server holds this move's stop evidence; its result report was lost. The
+// next poll must not stop, back up or — on a failing second backup — start
+// the Project again: the server moves it on the evidence alone.
+func TestEvictionBackups_ReportedStopIsNotRedone(t *testing.T) {
+	p := projectBeingMoved()
+	latch(p, p.Status.AssignmentGeneration)
+	containers := &fakeContainers{}
+	runner := &fakeEvictionRunner{err: errors.New("second backup fails")}
+	client := &fakeEvictionClient{current: p}
+	b := newEvictionBackups(context.Background(), runner, containers, nil, client, NewStopLatches(t.TempDir()), zap.NewNop())
+
+	b.handle(p)
+	b.wait()
+
+	assert.Zero(t, runner.calls, "no second backup")
+	assert.Empty(t, containers.calls, "the containers are not touched")
+	assert.Empty(t, client.reports)
+}
+
+// Recorded here, not seen accepted by the server: only the evidence is sent
+// again.
+func TestEvictionBackups_RecordedStopIsOnlySentAgain(t *testing.T) {
+	p := projectBeingMoved()
+	latches := NewStopLatches(t.TempDir())
+	require.NoError(t, latches.Record(p, time.Now()))
+	containers := &fakeContainers{}
+	runner := &fakeEvictionRunner{backupID: "b-2", leftStopped: true}
+	client := &fakeEvictionClient{current: p}
+	b := newEvictionBackups(context.Background(), runner, containers, nil, client, latches, zap.NewNop())
+
+	b.handle(p)
+	b.wait()
+
+	assert.Zero(t, runner.calls)
+	assert.Empty(t, containers.calls)
+	assert.Equal(t, []string{"workload-stopped"}, client.order)
+}
+
+func TestEvictionBackups_ConfirmingTheStop(t *testing.T) {
+	committed := func() *fakeEvictionRunner { return &fakeEvictionRunner{backupID: "b-1", leftStopped: true} }
+
+	t.Run("the stop is recorded before the evidence is sent", func(t *testing.T) {
+		p := projectBeingMoved()
+		latches := NewStopLatches(t.TempDir())
+		client := &fakeEvictionClient{current: p}
+		b := newEvictionBackups(context.Background(), committed(), &fakeContainers{}, nil, client, latches, zap.NewNop())
+		b.handle(p)
+		b.wait()
+
+		held, err := latches.Holds(p)
+		require.NoError(t, err)
+		assert.True(t, held)
+		assert.Equal(t, []string{"workload-stopped", "result:" + evictionBackupSucceeded}, client.order)
+	})
+
+	t.Run("a container the spec no longer names keeps the move from going on", func(t *testing.T) {
+		p := projectBeingMoved()
+		containers := &fakeContainers{listed: []docker.ProjectContainer{
+			{Name: "blog-db", Service: "db", State: "exited"},
+			{Name: "blog-worker", Service: "worker", State: "running"},
+		}}
+		client := &fakeEvictionClient{current: p}
+		b := newEvictionBackups(context.Background(), committed(), containers, nil, client, NewStopLatches(t.TempDir()), zap.NewNop())
+		b.handle(p)
+		b.wait()
+
+		assert.Empty(t, client.stopped, "no evidence while a copy of the workload runs")
+		assert.Equal(t, []string{"stop", "start"}, containers.calls, "stopped by label, then started again")
+		require.Len(t, client.reports, 1)
+		assert.Equal(t, evictionStopFailed, client.reports[0].Reason)
+	})
+
+	t.Run("a refused report drops the record and leaves the restart to the poll loop", func(t *testing.T) {
+		p := projectBeingMoved()
+		latches := NewStopLatches(t.TempDir())
+		containers := &fakeContainers{}
+		client := &fakeEvictionClient{current: p, stoppedErr: ErrStaleAssignment}
+		b := newEvictionBackups(context.Background(), committed(), containers, nil, client, latches, zap.NewNop())
+		b.handle(p)
+		b.wait()
+
+		held, err := latches.Holds(p)
+		require.NoError(t, err)
+		assert.False(t, held, "the server holds no evidence: nothing to guard")
+		assert.NotContains(t, containers.calls, "start", "whether it is still this node's is the poll loop's to judge")
+		assert.Empty(t, client.reports, "no result for a move the server called off")
+	})
+
+	t.Run("an unanswered report keeps the record", func(t *testing.T) {
+		p := projectBeingMoved()
+		latches := NewStopLatches(t.TempDir())
+		client := &fakeEvictionClient{current: p, stoppedErr: errors.New("timeout")}
+		b := newEvictionBackups(context.Background(), committed(), &fakeContainers{}, nil, client, latches, zap.NewNop())
+		b.handle(p)
+		b.wait()
+
+		held, err := latches.Holds(p)
+		require.NoError(t, err)
+		assert.True(t, held)
+	})
+}
+
+// The extra guard the review asked for: a restart never undoes a stop this
+// node recorded, whichever path asks for it.
+func TestEvictionBackups_RestartRespectsARecordedStop(t *testing.T) {
+	p := projectBeingMoved()
+	latches := NewStopLatches(t.TempDir())
+	require.NoError(t, latches.Record(p, time.Now()))
+	containers := &fakeContainers{}
+	b := newEvictionBackups(context.Background(), nil, containers, nil, &fakeEvictionClient{current: p}, latches, zap.NewNop())
+
+	b.restart(zap.NewNop(), p)
+
+	assert.Empty(t, containers.calls)
 }

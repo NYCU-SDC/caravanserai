@@ -30,7 +30,7 @@ func ReleaseCleanly(t *testing.T, s *pgstore.Store, name string) {
 	require.NoError(t, err)
 	ref := store.AssignmentRef{UID: p.ObjectMeta.UID, NodeRef: p.Status.NodeRef, Generation: p.Status.AssignmentGeneration}
 
-	require.NoError(t, s.RecordWorkloadStopped(ctx, name, ref, time.Now()))
+	require.NoError(t, s.RecordWorkloadStopped(ctx, name, ref, nil, time.Now()))
 	released, err := adapter.NewProjectStoreAdapter(s).ReleaseAssignment(ctx, &controller.ProjectSnapshot{
 		Name:                 name,
 		UID:                  ref.UID,

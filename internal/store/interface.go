@@ -413,7 +413,12 @@ type ProjectStore interface {
 	// ObservedAt and bumps no version. Returns ErrStaleAssignment for a fence
 	// that is not current, ErrConflictState for a disallowed phase, and
 	// ErrNotFound when the Project is gone.
-	RecordWorkloadStopped(ctx context.Context, name string, ref AssignmentRef, observedAt time.Time) error
+	//
+	// forMove, when not nil, says the Agent stopped the Project for the
+	// planned move whose BackingUp state began then (CARA-119). The evidence
+	// is then accepted only while that move is still taking its backup off
+	// ref's Node, and refused with ErrConflictState once it was called off.
+	RecordWorkloadStopped(ctx context.Context, name string, ref AssignmentRef, forMove *time.Time, observedAt time.Time) error
 
 	// RecordManagedDataQuarantined records that owner's Node moved its local
 	// Managed data out of the active path (ADR-0024 C2). owner must be a cleanup

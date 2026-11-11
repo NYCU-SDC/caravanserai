@@ -65,7 +65,7 @@ func TestNodeAuthorization(t *testing.T) {
 	// moved: node-a held it and released it without reporting cleanup yet.
 	m := create(moved, secretMoved, nodeA)
 	oldFence := store.AssignmentRef{UID: m.ObjectMeta.UID, NodeRef: nodeA, Generation: m.Status.AssignmentGeneration}
-	require.NoError(t, suite.store.RecordWorkloadStopped(ctx, moved, oldFence, time.Now()))
+	require.NoError(t, suite.store.RecordWorkloadStopped(ctx, moved, oldFence, nil, time.Now()))
 	released, err := sched.ReleaseAssignment(ctx, &controller.ProjectSnapshot{
 		Name: moved, UID: oldFence.UID, Phase: m.Status.Phase, NodeRef: nodeA, AssignmentGeneration: oldFence.Generation,
 	})

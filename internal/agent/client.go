@@ -563,7 +563,30 @@ func (c *Client) CommitBackup(ctx context.Context, projectName string, fence Ass
 // It returns ErrStaleAssignment when the fence no longer names the Project's
 // current assignment, and ErrProjectNotFound when the Project is gone.
 func (c *Client) ReportWorkloadStopped(ctx context.Context, projectName string, fence AssignmentFence) error {
-	body, err := json.Marshal(evidenceRequest{UID: fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &fence.Generation})
+	return c.reportWorkloadStopped(ctx, projectName, fence, nil)
+}
+
+// workloadStoppedRequest is the body of PUT
+// /api/v1/projects/{name}/recovery/workload-stopped.
+type workloadStoppedRequest struct {
+	evidenceRequest
+	MoveStateSince *time.Time `json:"moveStateSince,omitempty"`
+}
+
+// ReportWorkloadStoppedForMove is ReportWorkloadStopped for a Project stopped
+// for the planned move whose BackingUp state began at moveStateSince. The
+// server accepts it only while that move is still taking its backup off this
+// node; once the move was called off it answers 409 (ErrStaleAssignment), and
+// the Project is to run here again.
+func (c *Client) ReportWorkloadStoppedForMove(ctx context.Context, projectName string, fence AssignmentFence, moveStateSince time.Time) error {
+	return c.reportWorkloadStopped(ctx, projectName, fence, &moveStateSince)
+}
+
+func (c *Client) reportWorkloadStopped(ctx context.Context, projectName string, fence AssignmentFence, moveStateSince *time.Time) error {
+	body, err := json.Marshal(workloadStoppedRequest{
+		evidenceRequest: evidenceRequest{UID: fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &fence.Generation},
+		MoveStateSince:  moveStateSince,
+	})
 	if err != nil {
 		return fmt.Errorf("marshal workload-stopped request: %w", err)
 	}

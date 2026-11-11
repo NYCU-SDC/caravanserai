@@ -233,6 +233,11 @@ func Run(ctx context.Context, cfg RunConfig) {
 	// against wall-clock time rather than tick count.
 	recovery := newRecoveryTracker()
 
+	latches := cfg.StopLatches
+	if latches == nil && cfg.DataRoot != "" {
+		latches = NewStopLatches(cfg.DataRoot)
+	}
+
 	// Planned moves (CARA-119) need this node's backup runner for a Project
 	// with Managed data; without an object store there is none, and such a
 	// move is failed. A Project with no Managed data is only stopped.
@@ -246,12 +251,7 @@ func Run(ctx context.Context, cfg RunConfig) {
 	if cfg.Backups != nil && cfg.Backups.Coordinator != nil {
 		evictionClaimerImpl = cfg.Backups.Coordinator
 	}
-	evictions := newEvictionBackups(ctx, evictionRunnerImpl, runtime, evictionClaimerImpl, client, logger)
-
-	latches := cfg.StopLatches
-	if latches == nil && cfg.DataRoot != "" {
-		latches = NewStopLatches(cfg.DataRoot)
-	}
+	evictions := newEvictionBackups(ctx, evictionRunnerImpl, runtime, evictionClaimerImpl, client, latches, logger)
 
 	// ── Bootstrap: health-check Running projects ──────────────────────────
 	// After a restart, the Agent has no memory of Running projects. Fetch

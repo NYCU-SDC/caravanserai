@@ -78,7 +78,7 @@ func TestOverlapForbidStillMovesOnStopEvidence(t *testing.T) {
 	setOverlap(t, name, v1.OverlapForbid)
 
 	ref := store.AssignmentRef{UID: p.ObjectMeta.UID, NodeRef: "node-a", Generation: p.Status.AssignmentGeneration}
-	require.NoError(t, suite.store.RecordWorkloadStopped(ctx, name, ref, time.Now()))
+	require.NoError(t, suite.store.RecordWorkloadStopped(ctx, name, ref, nil, time.Now()))
 	require.True(t, releaseOnGrace(t, on, name))
 	got := getProject(t, name)
 	require.Len(t, got.Status.Recovery.CleanupObligations, 1)
