@@ -78,6 +78,46 @@
       "title": "Node",
       "description": "Node represents a physical or virtual machine managed by a Caravanserai Agent."
     },
+    "NodeDrainPhase": {
+      "type": "string",
+      "enum": [
+        "Draining",
+        "Incomplete",
+        "Drained"
+      ],
+      "description": "How far draining a Node has got."
+    },
+    "NodeDrainStatus": {
+      "properties": {
+        "phase": {
+          "$ref": "#/$defs/NodeDrainPhase",
+          "description": "Phase is how far the drain has got."
+        },
+        "since": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Since is when Phase last changed."
+        },
+        "remaining": {
+          "type": "integer",
+          "description": "Remaining is how many Projects are still assigned to the Node or owed\ncleanup by it."
+        },
+        "blocking": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Blocking lists the Projects that cannot leave without help, one line\neach saying why."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "phase",
+        "since"
+      ],
+      "description": "NodeDrainStatus is the progress of draining a Node, written by the server while Spec.Drain is set."
+    },
     "NodeInfo": {
       "properties": {
         "kernelVersion": {
@@ -137,6 +177,10 @@
         "unschedulable": {
           "type": "boolean",
           "description": "Unschedulable, when true, prevents new Projects from being scheduled\nonto this Node. The TaintsController will automatically add a\nNoSchedule Taint when this field is true."
+        },
+        "drain": {
+          "type": "boolean",
+          "description": "Drain, when true, moves every Project off this Node so it can be\npowered off (CARA-120). Each is moved as a planned move: a fresh backup\nfirst, then the scheduler places it elsewhere. Progress is in\nStatus.Drain. A drained Node should also be Unschedulable, or new\nProjects could arrive while it empties; `caractl node drain` sets both,\nand the scheduler leaves out a draining Node either way."
         }
       },
       "additionalProperties": false,
@@ -193,6 +237,10 @@
           },
           "type": "array",
           "description": "RecentNotReady are the times the Node went NotReady, oldest first,\nkept for NotReadyHistoryRetention and at most NotReadyHistoryMax\nentries. Fail-back reads it to wait longer before trusting a Node that\nkeeps failing. Written by the server through SetState."
+        },
+        "drain": {
+          "$ref": "#/$defs/NodeDrainStatus",
+          "description": "Drain is the progress of draining the Node, set while Spec.Drain is."
         }
       },
       "additionalProperties": false,

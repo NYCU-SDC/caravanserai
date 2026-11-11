@@ -50,13 +50,23 @@ func (a *NodeStoreAdapter) GetNodeStatus(ctx context.Context, name string) (cont
 	}, nil
 }
 
-func (a *NodeStoreAdapter) SetNodeState(ctx context.Context, name string, state v1.NodeState, reason, message string) error {
-	node, err := a.s.GetNode(ctx, name)
-	if err != nil {
-		return err
-	}
-	node.Status.SetState(state, reason, message, time.Now().UTC())
-	return a.s.UpdateNodeStatus(ctx, name, node.Status)
+// SetNodeState satisfies controller.NodeStore.
+//
+// It changes only the state and the Ready condition, and only if no heartbeat
+// has arrived since the one the decision was made on: a NotReady decided on a
+// stale read must not land on a Node that has just been heard from. The write
+// is versioned, so a heartbeat or drain status written meanwhile is kept.
+func (a *NodeStoreAdapter) SetNodeState(ctx context.Context, name string, state v1.NodeState, reason, message string, observedHeartbeat time.Time) error {
+	now := time.Now().UTC()
+	return a.s.UpdateNodeStatusWithRetry(ctx, name, func(status *v1.NodeStatus) error {
+		if status.LastHeartbeat.After(observedHeartbeat) {
+			return nil
+		}
+		// Through SetState, so a NotReady is recorded for fail-back's flap
+		// count (CARA-122) on the status as it is when written.
+		status.SetState(state, reason, message, now)
+		return nil
+	})
 }
 
 // ListNotReadyNodeNames satisfies controller.ReschedulerNodeStore.
@@ -91,7 +101,9 @@ func (a *NodeReadyAdapter) ListReadyNodes(ctx context.Context) ([]controller.Rea
 	}
 	var ready []controller.ReadyNode
 	for _, n := range nodes {
-		if n.Status.State == v1.NodeStateReady && !n.Spec.Unschedulable {
+		// A Node being drained takes no new Projects even if it was not
+		// cordoned as well.
+		if n.Status.State == v1.NodeStateReady && !n.Spec.Unschedulable && !n.Spec.Drain {
 			ready = append(ready, controller.ReadyNode{
 				Name:           n.Name,
 				Labels:         n.Labels,

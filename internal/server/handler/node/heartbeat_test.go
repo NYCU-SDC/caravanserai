@@ -44,6 +44,25 @@ func (s *hbNodeStore) UpdateNodeStatus(_ context.Context, _ string, status v1.No
 	s.lastStatus = status
 	return nil
 }
+
+// UpdateNodeStatusWithRetry applies mutate to the stored node's status, as the
+// real store does on the row it read, and records the result like
+// UpdateNodeStatus.
+func (s *hbNodeStore) UpdateNodeStatusWithRetry(_ context.Context, _ string, mutate func(*v1.NodeStatus) error) error {
+	if s.updateErr != nil {
+		return s.updateErr
+	}
+	if s.getNotFound {
+		return store.ErrNotFound
+	}
+	status := s.node.Status
+	if err := mutate(&status); err != nil {
+		return err
+	}
+	s.updated = true
+	s.lastStatus = status
+	return nil
+}
 func (s *hbNodeStore) CreateNode(context.Context, *v1.Node) error     { return nil }
 func (s *hbNodeStore) UpdateNode(context.Context, *v1.Node) error     { return nil }
 func (s *hbNodeStore) UpdateNodeSpec(context.Context, *v1.Node) error { return nil }

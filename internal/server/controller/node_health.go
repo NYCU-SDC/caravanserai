@@ -34,8 +34,10 @@ type NodeStore interface {
 	// GetNodeStatus returns the current status of the named Node.
 	GetNodeStatus(ctx context.Context, name string) (NodeStatusSnapshot, error)
 
-	// SetNodeState writes the aggregated state and updates the Ready condition.
-	SetNodeState(ctx context.Context, name string, state v1.NodeState, reason, message string) error
+	// SetNodeState writes the aggregated state and updates the Ready
+	// condition. It writes nothing if a heartbeat newer than
+	// observedHeartbeat — the one the decision was made on — has arrived.
+	SetNodeState(ctx context.Context, name string, state v1.NodeState, reason, message string, observedHeartbeat time.Time) error
 }
 
 // NodeStatusSnapshot is a minimal view of NodeStatus used by this controller.
@@ -103,11 +105,6 @@ func (c *NodeHealthController) Reconcile(ctx context.Context, name string) (Resu
 	age := c.clock.Since(snap.LastHeartbeat)
 
 	switch {
-	case snap.State == v1.NodeStateDraining:
-		// Draining is an admin-set state; the health controller does not touch it.
-		log.Debug("Node is draining, skipping health check")
-		return Result{}, nil
-
 	case age > NodeHeartbeatTimeout && snap.State != v1.NodeStateNotReady:
 		log.Info("Node heartbeat timed out, marking NotReady",
 			zap.Duration("age", age),
@@ -116,6 +113,7 @@ func (c *NodeHealthController) Reconcile(ctx context.Context, name string) (Resu
 		if err := c.store.SetNodeState(ctx, name, v1.NodeStateNotReady,
 			"HeartbeatTimeout",
 			"Agent has not posted a heartbeat within the timeout window",
+			snap.LastHeartbeat,
 		); err != nil {
 			return Result{}, err
 		}
@@ -129,6 +127,7 @@ func (c *NodeHealthController) Reconcile(ctx context.Context, name string) (Resu
 		if err := c.store.SetNodeState(ctx, name, v1.NodeStateReady,
 			"AgentReady",
 			"Agent is healthy and posting heartbeats",
+			snap.LastHeartbeat,
 		); err != nil {
 			return Result{}, err
 		}

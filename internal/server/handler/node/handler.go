@@ -411,9 +411,46 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Merge incoming fields into existing status.
-	status := existing.Status
+	// Bind the heartbeat to the Cara Node its pre-auth key was issued for
+	// (CARA-68). Rejections here stop the status update so a mismatched or
+	// expired key cannot mutate a node it does not own. Checked against the
+	// overlay IP the merge below would leave.
+	overlayIP := existing.Status.Network.OverlayIP
+	if req.Network.OverlayIP != "" {
+		overlayIP = req.Network.OverlayIP
+	}
+	if ok := h.validatePreAuthKey(traceCtx, w, logger, name, req.KeyRef, overlayIP); !ok {
+		return
+	}
+
+	// Merged into the status as it is when written, not as it was read
+	// above: the health and drain controllers write the same status, and a
+	// whole-status write would undo what they wrote meanwhile.
 	now := time.Now().UTC()
+	err = h.store.UpdateNodeStatusWithRetry(traceCtx, name, func(status *v1.NodeStatus) error {
+		mergeHeartbeat(status, req, now)
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.problemWriter.WriteError(traceCtx, w,
+				fmt.Errorf("node not found: %s: %w", name, store.ErrNotFound), logger)
+			return
+		}
+		logger.Error("Node status update failed", zap.String("name", name), zap.Error(err))
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	logger.Debug("Heartbeat received", zap.String("node", name))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// mergeHeartbeat writes what a heartbeat reports into status. Fields the
+// heartbeat leaves empty keep their value; Network is merged field by field
+// so a heartbeat sending only AgentPort does not clobber a previously set
+// OverlayIP, or the other way round.
+func mergeHeartbeat(status *v1.NodeStatus, req heartbeatRequest, now time.Time) {
 	status.LastHeartbeat = now
 	if req.State != "" {
 		// Through SetState, so a heartbeat that brings a Node back also
@@ -422,8 +459,6 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 		// nothing new.
 		status.SetState(req.State, "AgentHeartbeat", "Agent reported "+string(req.State), now)
 	}
-	// Merge Network field-by-field so that a heartbeat sending only AgentPort
-	// does not clobber a previously-set OverlayIP (or vice versa).
 	if req.Network.OverlayIP != "" {
 		status.Network.OverlayIP = req.Network.OverlayIP
 	}
@@ -445,27 +480,6 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 	if len(req.Allocatable) > 0 {
 		status.Allocatable = req.Allocatable
 	}
-
-	// Bind the heartbeat to the Cara Node its pre-auth key was issued for
-	// (CARA-68). Rejections here stop the status update so a mismatched or
-	// expired key cannot mutate a node it does not own.
-	if ok := h.validatePreAuthKey(traceCtx, w, logger, name, req.KeyRef, status.Network.OverlayIP); !ok {
-		return
-	}
-
-	if err := h.store.UpdateNodeStatus(traceCtx, name, status); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			h.problemWriter.WriteError(traceCtx, w,
-				fmt.Errorf("node not found: %s: %w", name, store.ErrNotFound), logger)
-			return
-		}
-		logger.Error("UpdateNodeStatus failed", zap.String("name", name), zap.Error(err))
-		h.problemWriter.WriteError(traceCtx, w, err, logger)
-		return
-	}
-
-	logger.Debug("Heartbeat received", zap.String("node", name))
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // validatePreAuthKey binds a heartbeat's pre-auth key reference to the intended

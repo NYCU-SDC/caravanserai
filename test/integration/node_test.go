@@ -730,9 +730,12 @@ func TestNodeReadinessIsRecorded(t *testing.T) {
 	require.True(t, ok)
 	assert.True(t, again.Equal(first), "a heartbeat that changes nothing must not move the Ready time")
 
-	// The health controller marks it NotReady, then it comes back.
+	// The health controller marks it NotReady, on the heartbeat it read, then
+	// it comes back.
+	observed, err := suite.store.GetNode(ctx, nodeName)
+	require.NoError(t, err)
 	require.NoError(t, adapter.NewNodeStoreAdapter(suite.store).SetNodeState(ctx, nodeName,
-		v1.NodeStateNotReady, "HeartbeatTimeout", "gone"))
+		v1.NodeStateNotReady, "HeartbeatTimeout", "gone", observed.Status.LastHeartbeat))
 	n, err := suite.store.GetNode(ctx, nodeName)
 	require.NoError(t, err)
 	require.Len(t, n.Status.RecentNotReady, 1, "going NotReady is kept in the history")
