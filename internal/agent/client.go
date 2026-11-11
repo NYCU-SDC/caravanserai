@@ -554,10 +554,11 @@ func (c *Client) CommitBackup(ctx context.Context, projectName string, fence Ass
 }
 
 // ReportWorkloadStopped records the evidence that every container of the
-// assignment fence names is stopped. It is what lets the server release that
-// assignment (the release gate of CARA-84), so it is sent only once the
-// containers really are stopped and are meant to stay so — after the fresh
-// backup a planned move takes, for one.
+// assignment the fence names is stopped. It is what lets the server release
+// that assignment (the release gate of CARA-84), and it latches the
+// generation: once it is accepted, nothing on this node may start that
+// generation's containers again. So it is sent only once the containers
+// really are stopped and are meant to stay so.
 //
 // It returns ErrStaleAssignment when the fence no longer names the Project's
 // current assignment, and ErrProjectNotFound when the Project is gone.

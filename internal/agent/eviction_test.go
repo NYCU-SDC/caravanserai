@@ -295,7 +295,7 @@ func TestReconcileProjectsLeavesProjectUnderEvictionAlone(t *testing.T) {
 	runner := &fakeEvictionRunner{err: backup.ErrProjectBusy}
 	evictions := newEvictionBackups(context.Background(), runner, &fakeContainers{}, nil, &fakeEvictionClient{}, zap.NewNop())
 
-	reconcileProjects(context.Background(), client, rt, nil, nil, evictions, nil, nil, nil, zap.NewNop())
+	reconcileProjects(context.Background(), client, rt, nil, nil, evictions, nil, nil, nil, nil, zap.NewNop())
 	evictions.wait()
 
 	assert.False(t, inspected, "a project stopped for a move is not health-checked")

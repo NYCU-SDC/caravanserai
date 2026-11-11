@@ -153,3 +153,28 @@ func TestTeardownBlockedConditionIsAgentWritable(t *testing.T) {
 	require.NoError(t, client.ClearProjectCondition(ctx, name, fence, v1.ConditionTypeTeardownBlocked))
 	assert.False(t, hasProjectCondition(getProject(t, name), v1.ConditionTypeTeardownBlocked))
 }
+
+// CARA-92: the Agent's report that a Failed Project stopped is recorded as
+// the current assignment's WorkloadStopped evidence — which is what lets
+// Tier-2 recovery release it — and refused under any other assignment.
+func TestAgentClientReportsWorkloadStopped(t *testing.T) {
+	const name = "e2e-agent-workload-stopped"
+	ctx := context.Background()
+	uid, gen := createAssigned(t, name, "node-a", v1.ProjectPhaseFailed)
+
+	client := agent.NewClient(zap.NewNop(), suite.serverURL, "node-a")
+	client.SetToken(testAdminToken)
+	require.NoError(t, client.ReportWorkloadStopped(ctx, name, agent.AssignmentFence{UID: uid, NodeRef: "node-a", Generation: gen}))
+
+	assert.True(t, getProject(t, name).Status.Recovery.WorkloadStoppedFor(
+		v1.AssignmentIdentity{ProjectUID: uid, NodeName: "node-a", AssignmentGeneration: gen}),
+		"recorded for exactly the current assignment")
+	released, err := adapter.NewProjectStoreAdapter(suite.store).MoveFailedProject(ctx, snapshotOf(getProject(t, name)), "moved")
+	require.NoError(t, err)
+	assert.True(t, released, "with the evidence the Failed project can be moved")
+
+	assert.ErrorIs(t, client.ReportWorkloadStopped(ctx, name, agent.AssignmentFence{UID: uid, NodeRef: "node-a", Generation: gen - 1}),
+		agent.ErrStaleAssignment, "an older generation is refused")
+	assert.ErrorIs(t, client.ReportWorkloadStopped(ctx, "e2e-no-such-project", agent.AssignmentFence{UID: uid, NodeRef: "node-a", Generation: gen}),
+		agent.ErrProjectNotFound)
+}
