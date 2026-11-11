@@ -24,6 +24,17 @@ const (
 	// Interim value pending product sign-off.
 	evictionStartTimeout = 10 * time.Minute
 
+	// evictionBackupTimeout bounds a move once its agent has been seen at
+	// work: if neither a result nor the stop evidence has arrived this long
+	// after, and the agent shows no sign of still working, the move is
+	// abandoned. Generous on purpose — a large backup and the clean-up after
+	// it may take hours — since it only catches an agent that died mid-move.
+	// Abandoning is safe whenever it lands: evidence that arrives later is
+	// refused, and evidence already in keeps the move going.
+	//
+	// Interim value pending product sign-off.
+	evictionBackupTimeout = 6 * time.Hour
+
 	// evictionPlaceTimeout is how long a moved Project may wait in Pending
 	// for the scheduler before the move is declared stuck and its slot is
 	// freed. The Project stays Pending and the scheduler keeps trying.
@@ -97,7 +108,10 @@ const (
 	EvictionFailedNoCapacity       = "NoCapacity"
 	EvictionFailedBackupFailed     = "BackupFailed"
 	EvictionFailedAgentDidNotStart = "AgentDidNotStart"
-	EvictionFailedNotPlaced        = "NotPlaced"
+	// EvictionFailedAgentDidNotFinish: the agent started the backup and then
+	// went silent for evictionBackupTimeout.
+	EvictionFailedAgentDidNotFinish = "AgentDidNotFinish"
+	EvictionFailedNotPlaced         = "NotPlaced"
 
 	// EvictionFailedUnsupportedBackupStrategy: the Project has a
 	// PostgresDifferential volume. A move takes an offline backup, and moving
@@ -128,8 +142,15 @@ type EvictionStore interface {
 	MoveEvictedProject(ctx context.Context, e *EvictionSnapshot, message string) (bool, error)
 
 	// EndEviction clears the move; a non-nil failure records why it was
-	// abandoned.
-	EndEviction(ctx context.Context, name string, failure *EvictionFailure) error
+	// abandoned. It writes nothing for another lifetime than the snapshot's,
+	// and refuses to abandon the move with store.ErrConflictState once the
+	// Agent's stop evidence for the current assignment is in.
+	EndEviction(ctx context.Context, e *EvictionSnapshot, failure *EvictionFailure) error
+
+	// MarkEvictionAgentStarted records when the agent was first seen at work
+	// on the move's backup. It does nothing if the move changed since the
+	// snapshot or is already marked.
+	MarkEvictionAgentStarted(ctx context.Context, e *EvictionSnapshot, at time.Time) error
 }
 
 // EvictionController carries out planned moves: a Project moved off a healthy
@@ -324,7 +345,9 @@ func (c *EvictionController) reconcileBackingUp(ctx context.Context, log *zap.Lo
 		how := "it has no Managed volume"
 		if e.HasManagedVolumes {
 			how = "restored from its fresh backup"
-			if reported && result.Message != "" {
+			// Only a successful result carries the backup's ID; a failure's
+			// message is an error, not something to restore from.
+			if reported && result.Status == v1.ConditionTrue && result.Message != "" {
 				how = "restored from backup " + result.Message
 			}
 		}
@@ -338,10 +361,29 @@ func (c *EvictionController) reconcileBackingUp(ctx context.Context, log *zap.Lo
 		return true, nil
 	}
 
-	started := v1.IsMaintenanceActive(e.Conditions, c.clock.Now()) || reported
-	if waited := c.clock.Since(e.Eviction.StateSince); !started && waited >= evictionStartTimeout {
+	// Maintenance is how the agent shows it is at work, but it is cleared
+	// before the agent has finished — old backups are pruned and the
+	// evidence sent after — and is ignored once it is older than
+	// MaintenanceStaleAfter. So once seen it is remembered on the move, and
+	// the start timeout no longer applies.
+	working := v1.IsMaintenanceActive(e.Conditions, c.clock.Now()) || reported
+	startedAt := e.Eviction.AgentStartedAt
+	if working && startedAt == nil {
+		now := c.clock.Now()
+		if err := c.projects.MarkEvictionAgentStarted(ctx, e, now); err != nil {
+			log.Warn("Could not record that the agent started the move's backup", zap.Error(err))
+		} else {
+			startedAt = &now
+		}
+	}
+
+	switch {
+	case startedAt == nil && c.clock.Since(e.Eviction.StateSince) >= evictionStartTimeout:
 		return false, c.raiseEvictionFailedAlert(ctx, log, e, EvictionFailedAgentDidNotStart,
 			fmt.Sprintf("The agent on node %q did not start the fresh backup within %s", e.Eviction.FromNode, evictionStartTimeout))
+	case startedAt != nil && !working && c.clock.Since(*startedAt) >= evictionBackupTimeout:
+		return false, c.raiseEvictionFailedAlert(ctx, log, e, EvictionFailedAgentDidNotFinish,
+			fmt.Sprintf("The agent on node %q started the fresh backup but has not finished it within %s", e.Eviction.FromNode, evictionBackupTimeout))
 	}
 	return true, nil
 }
@@ -352,7 +394,7 @@ func (c *EvictionController) reconcileMoving(ctx context.Context, log *zap.Logge
 	switch {
 	case e.NodeRef != "":
 		log.Info("Planned move complete", zap.String("toNode", e.NodeRef))
-		return false, ignoreNotFound(c.projects.EndEviction(ctx, e.Name, nil))
+		return false, ignoreNotFound(c.projects.EndEviction(ctx, e, nil))
 
 	case e.Phase != v1.ProjectPhasePending:
 		// Deleted or failed on the way; nothing left to finish.
@@ -372,7 +414,7 @@ func (c *EvictionController) reconcileMoving(ctx context.Context, log *zap.Logge
 func (c *EvictionController) abandonQuietly(ctx context.Context, log *zap.Logger, e *EvictionSnapshot) error {
 	log.Info("Project is no longer on the node it was being moved off; dropping the move",
 		zap.String("phase", string(e.Phase)), zap.String("nodeRef", e.NodeRef))
-	return ignoreNotFound(c.projects.EndEviction(ctx, e.Name, nil))
+	return ignoreNotFound(c.projects.EndEviction(ctx, e, nil))
 }
 
 // raiseEvictionFailedAlert is the one place an abandoned move is announced. It
@@ -382,8 +424,17 @@ func (c *EvictionController) abandonQuietly(ctx context.Context, log *zap.Logger
 // TODO(discord): post here too once Discord notifications exist; see the
 // TODO(discord) on raiseRescheduleExhaustedAlert for what to handle.
 func (c *EvictionController) raiseEvictionFailedAlert(ctx context.Context, log *zap.Logger, e *EvictionSnapshot, reason, message string) error {
-	log.Error("Planned move abandoned", zap.String("failure", reason), zap.String("detail", message))
-	return ignoreNotFound(c.projects.EndEviction(ctx, e.Name, &EvictionFailure{Reason: reason, Message: message}))
+	err := c.projects.EndEviction(ctx, e, &EvictionFailure{Reason: reason, Message: message})
+	if errors.Is(err, store.ErrConflictState) {
+		// The stop evidence arrived after the read this decision was made
+		// on. The move goes on; the next pass releases the Project.
+		log.Info("Not abandoning the move: the agent has reported the project stopped", zap.String("failure", reason))
+		return nil
+	}
+	if err == nil {
+		log.Error("Planned move abandoned", zap.String("failure", reason), zap.String("detail", message))
+	}
+	return ignoreNotFound(err)
 }
 
 // onSourceNode reports whether the Project is still running on the Node the

@@ -662,6 +662,12 @@ type ProjectEviction struct {
 	// StateSince is when State last changed. A result the agent reported
 	// before it belongs to an earlier move and is ignored.
 	StateSince time.Time `json:"stateSince" yaml:"stateSince"`
+
+	// AgentStartedAt is when the server first saw the agent on FromNode at
+	// work on this move's backup. From then on the move is not abandoned for
+	// an agent that never started, however long the backup and its clean-up
+	// take; it is bounded by evictionBackupTimeout instead.
+	AgentStartedAt *time.Time `json:"agentStartedAt,omitempty" yaml:"agentStartedAt,omitempty"`
 }
 
 // InitialProjectStatus is the status every Project is created with: Pending,

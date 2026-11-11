@@ -1362,6 +1362,15 @@ type evidenceRequest struct {
 	AssignmentGeneration *int64 `json:"assignmentGeneration"`
 }
 
+// workloadStoppedRequest is the body of PUT
+// /api/v1/projects/{name}/recovery/workload-stopped: the assignment fence and,
+// when the Agent stopped the Project for a planned move, the StateSince of
+// that move's BackingUp state.
+type workloadStoppedRequest struct {
+	evidenceRequest
+	MoveStateSince *time.Time `json:"moveStateSince,omitempty"`
+}
+
 // stanzaRequest is the body of PUT /api/v1/projects/{name}/backup/stanzas: the
 // assignment fence, and the volume whose stanza the Agent is about to create.
 type stanzaRequest struct {
@@ -1520,6 +1529,11 @@ func (h *Handler) decodeEvidenceFence(ctx context.Context, w http.ResponseWriter
 			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
 		return store.AssignmentRef{}, false
 	}
+	return h.checkEvidenceFence(ctx, w, logger, name, req)
+}
+
+// checkEvidenceFence validates a decoded fence and that the caller owns it.
+func (h *Handler) checkEvidenceFence(ctx context.Context, w http.ResponseWriter, logger *zap.Logger, name string, req evidenceRequest) (store.AssignmentRef, bool) {
 	if req.UID == "" || req.NodeRef == "" || req.AssignmentGeneration == nil {
 		h.problemWriter.WriteError(ctx, w,
 			fmt.Errorf("%w: project %q: evidence requires a complete assignment fence", store.ErrStaleAssignment, name), logger)
@@ -1560,11 +1574,17 @@ func (h *Handler) putWorkloadStopped(w http.ResponseWriter, r *http.Request) {
 	logger := logutil.WithContext(traceCtx, h.logger)
 	name := r.PathValue("name")
 
-	ref, ok := h.decodeEvidenceFence(traceCtx, w, r, logger, name)
+	var req workloadStoppedRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.problemWriter.WriteError(traceCtx, w,
+			handlerutil.NewValidationError("body", nil, "invalid request body: "+err.Error()), logger)
+		return
+	}
+	ref, ok := h.checkEvidenceFence(traceCtx, w, logger, name, req.evidenceRequest)
 	if !ok {
 		return
 	}
-	err := h.store.RecordWorkloadStopped(traceCtx, name, ref, time.Now().UTC())
+	err := h.store.RecordWorkloadStopped(traceCtx, name, ref, req.MoveStateSince, time.Now().UTC())
 	h.writeEvidenceResult(traceCtx, w, logger, name, "WorkloadStopped", err)
 }
 

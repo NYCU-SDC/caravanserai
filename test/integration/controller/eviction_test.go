@@ -9,6 +9,7 @@ import (
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 	"NYCU-SDC/caravanserai/internal/server/adapter"
+	"NYCU-SDC/caravanserai/internal/server/controller"
 	"NYCU-SDC/caravanserai/internal/store"
 	"NYCU-SDC/caravanserai/test/integration/controllerhelper"
 
@@ -41,9 +42,10 @@ func agentReportsBackup(t *testing.T, s *controllerhelper.Suite, name string, st
 	if status == v1.ConditionTrue {
 		p, err := s.Store.GetProject(ctx, name)
 		require.NoError(t, err)
+		require.NotNil(t, p.Status.Eviction, "the agent reports for the move it was asked to back up for")
 		require.NoError(t, s.Store.RecordWorkloadStopped(ctx, name,
 			store.AssignmentRef{UID: p.UID, NodeRef: p.Status.NodeRef, Generation: p.Status.AssignmentGeneration},
-			time.Now().UTC()))
+			&p.Status.Eviction.StateSince, time.Now().UTC()))
 	}
 	require.NoError(t, s.Store.UpdateProjectStatusWithRetry(ctx, name, func(st *v1.ProjectStatus) error {
 		st.Conditions = append(st.Conditions, v1.Condition{
@@ -224,4 +226,87 @@ func TestRequestEviction(t *testing.T) {
 	assert.True(t, again.Status.Eviction.RequestedAt.Equal(first.Status.Eviction.RequestedAt))
 
 	assert.ErrorIs(t, evictor.RequestEviction(ctx, "no-such-project", "node-a", "Drain", ""), store.ErrNotFound)
+}
+
+// Review A1: evidence the agent sends for a planned move counts only while
+// that very move is taking its backup. Evidence that arrives after the move
+// was called off would otherwise stay on a Project about to be started again,
+// for a later release to rest on. Evidence sent for no move keeps the rules
+// it had (a NotReady node's agent may report a Running Project stopped).
+func TestStopEvidenceForAMoveNeedsThatMove(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+	ctx := context.Background()
+	a := adapter.NewProjectStoreAdapter(s.Store)
+
+	report := func(name string, forMove *time.Time) error {
+		p, err := s.Store.GetProject(ctx, name)
+		require.NoError(t, err)
+		return s.Store.RecordWorkloadStopped(ctx, name,
+			store.AssignmentRef{UID: p.UID, NodeRef: p.Status.NodeRef, Generation: p.Status.AssignmentGeneration}, forMove, time.Now().UTC())
+	}
+	since := func(name string) time.Time {
+		p, err := s.Store.GetProject(ctx, name)
+		require.NoError(t, err)
+		require.NotNil(t, p.Status.Eviction)
+		return p.Status.Eviction.StateSince
+	}
+	someMove := time.Now().UTC().Add(-time.Hour)
+
+	createRunningProject(t, s, "no-move", "evict-a")
+	assert.ErrorIs(t, report("no-move", &someMove), store.ErrConflictState, "the move was called off")
+
+	createRunningProject(t, s, "queued", "evict-a")
+	require.NoError(t, a.RequestEviction(ctx, "queued", "evict-a", "Drain", ""))
+	queuedSince := since("queued")
+	assert.ErrorIs(t, report("queued", &queuedSince), store.ErrConflictState, "the move has not asked for the backup yet")
+
+	createRunningProject(t, s, "backing-up", "evict-a")
+	require.NoError(t, a.RequestEviction(ctx, "backing-up", "evict-a", "Drain", ""))
+	require.NoError(t, a.StartEvictionBackup(ctx, "backing-up", "evict-a"))
+	assert.ErrorIs(t, report("backing-up", &someMove), store.ErrConflictState, "an earlier move's evidence")
+	current := since("backing-up")
+	assert.NoError(t, report("backing-up", &current))
+
+	createRunningProject(t, s, "untagged", "evict-a")
+	assert.NoError(t, report("untagged", nil), "evidence for no move keeps its old rules")
+}
+
+// Review A1: a move is not abandoned once its stop evidence is in, even if the
+// decision to abandon it was made on an older read.
+func TestEndEvictionKeepsAMoveWhoseStopIsReported(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+	ctx := context.Background()
+	a := adapter.NewProjectStoreAdapter(s.Store)
+
+	createRunningProject(t, s, "evict-app", "evict-a")
+	require.NoError(t, a.RequestEviction(ctx, "evict-app", "evict-a", "Drain", ""))
+	require.NoError(t, a.StartEvictionBackup(ctx, "evict-app", "evict-a"))
+	snapshots, err := a.ListEvictions(ctx)
+	require.NoError(t, err)
+	require.Len(t, snapshots, 1)
+	stale := snapshots[0]
+	require.False(t, stale.WorkloadStopped)
+
+	agentReportsBackup(t, s, "evict-app", v1.ConditionTrue, "b-1")
+
+	err = a.EndEviction(ctx, stale, &controller.EvictionFailure{Reason: controller.EvictionFailedAgentDidNotStart, Message: "too slow"})
+	assert.ErrorIs(t, err, store.ErrConflictState)
+	assert.Equal(t, v1.EvictionStateBackingUp, evictionState(t, s, "evict-app"), "the move goes on")
+
+	// A snapshot of another lifetime writes nothing.
+	other := *stale
+	other.UID = "uid-of-another-lifetime"
+	assert.NoError(t, a.EndEviction(ctx, &other, nil))
+	assert.Equal(t, v1.EvictionStateBackingUp, evictionState(t, s, "evict-app"))
+
+	// Stamping the start is a one-off for this move.
+	first := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, a.MarkEvictionAgentStarted(ctx, stale, first))
+	require.NoError(t, a.MarkEvictionAgentStarted(ctx, stale, first.Add(time.Hour)))
+	p, err := s.Store.GetProject(ctx, "evict-app")
+	require.NoError(t, err)
+	require.NotNil(t, p.Status.Eviction.AgentStartedAt)
+	assert.True(t, p.Status.Eviction.AgentStartedAt.Equal(first))
 }

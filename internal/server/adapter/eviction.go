@@ -174,11 +174,23 @@ func (a *ProjectStoreAdapter) MoveEvictedProject(ctx context.Context, e *control
 
 // EndEviction satisfies controller.EvictionStore. It clears the move, and
 // when failure is not nil records why it was abandoned.
-func (a *ProjectStoreAdapter) EndEviction(ctx context.Context, name string, failure *controller.EvictionFailure) error {
+//
+// It is pinned to the lifetime the snapshot read. And a move is not abandoned
+// once the Agent's stop evidence for the current assignment is in, whatever
+// the controller decided on an older read: the evidence is accepted only
+// while the move is taking its backup, so it is either recorded before this
+// write — and the move must go on, since the Agent will not start the
+// Project again — or refused after it, and the Agent starts it again.
+func (a *ProjectStoreAdapter) EndEviction(ctx context.Context, e *controller.EvictionSnapshot, failure *controller.EvictionFailure) error {
 	now := time.Now().UTC()
-	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+	return ignoreOtherLifetime(a.s.UpdateProjectStatusForUID(ctx, e.Name, e.UID, func(status *v1.ProjectStatus) error {
 		if status.Eviction == nil {
 			return nil
+		}
+		current := v1.AssignmentIdentity{ProjectUID: e.UID, NodeName: status.NodeRef, AssignmentGeneration: status.AssignmentGeneration}
+		if failure != nil && status.Phase == v1.ProjectPhaseRunning && status.Recovery.WorkloadStoppedFor(current) {
+			return fmt.Errorf("%w: project %q: the agent has reported it stopped for the move, so the move goes on",
+				store.ErrConflictState, e.Name)
 		}
 		status.Eviction = nil
 		status.Conditions = v1.RemoveConditions(status.Conditions, v1.ConditionTypeEvictionBackup)
@@ -192,5 +204,20 @@ func (a *ProjectStoreAdapter) EndEviction(ctx context.Context, name string, fail
 			}, true)
 		}
 		return nil
-	})
+	}))
+}
+
+// MarkEvictionAgentStarted satisfies controller.EvictionStore. It stamps when
+// the agent was first seen at work on the move's backup, unless the move has
+// changed since the snapshot or is already stamped.
+func (a *ProjectStoreAdapter) MarkEvictionAgentStarted(ctx context.Context, e *controller.EvictionSnapshot, at time.Time) error {
+	at = at.UTC()
+	return ignoreOtherLifetime(a.s.UpdateProjectStatusForUID(ctx, e.Name, e.UID, func(status *v1.ProjectStatus) error {
+		cur := status.Eviction
+		if cur == nil || cur.State != v1.EvictionStateBackingUp || !cur.StateSince.Equal(e.Eviction.StateSince) || cur.AgentStartedAt != nil {
+			return nil
+		}
+		cur.AgentStartedAt = &at
+		return nil
+	}))
 }
