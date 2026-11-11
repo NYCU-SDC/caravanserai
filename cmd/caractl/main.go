@@ -59,6 +59,7 @@ func init() {
 	rootCmd.AddCommand(cli.NewTakeoverAuditCmd())
 	rootCmd.AddCommand(cli.NewOverlayCmd())
 	rootCmd.AddCommand(cli.NewTokenCmd())
+	rootCmd.AddCommand(cli.NewRolloutCmd())
 }
 
 func main() {

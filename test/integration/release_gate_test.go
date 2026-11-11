@@ -167,7 +167,7 @@ func TestAssignmentBlockedByCleanupObligation(t *testing.T) {
 
 	before := getProject(t, name).ObjectMeta.ResourceVersion
 	for _, node := range []string{"node-b", "node-a"} {
-		err := projects.SetProjectScheduled(ctx, name, node)
+		err := projects.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), node)
 		assert.ErrorIs(t, err, store.ErrConflictState, "assigned to %s with cleanup outstanding", node)
 	}
 	assert.Equal(t, before, getProject(t, name).ObjectMeta.ResourceVersion, "a refused assignment wrote")
@@ -179,11 +179,11 @@ func TestAssignmentBlockedByCleanupObligation(t *testing.T) {
 			s.Recovery.CleanupObligations[0].ReleasedAt, v1.ReleaseByOperatorOverride)
 		return nil
 	}))
-	assert.ErrorIs(t, projects.SetProjectScheduled(ctx, name, "node-b"), store.ErrConflictState)
+	assert.ErrorIs(t, projects.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-b"), store.ErrConflictState)
 
 	require.Equal(t, http.StatusNoContent,
 		putEvidence(t, name, "resources-removed", evidenceBody(uid, "node-a", gen)))
-	require.NoError(t, projects.SetProjectScheduled(ctx, name, "node-b"))
+	require.NoError(t, projects.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-b"))
 
 	p := getProject(t, name)
 	assert.Equal(t, "node-b", p.Status.NodeRef)
@@ -252,7 +252,7 @@ func TestSetProjectScheduledRequiresPending(t *testing.T) {
 		require.Equal(t, http.StatusAccepted, resp.StatusCode)
 		before := getProject(t, name)
 
-		assert.ErrorIs(t, projects.SetProjectScheduled(ctx, name, "node-b"), store.ErrConflictState)
+		assert.ErrorIs(t, projects.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-b"), store.ErrConflictState)
 		after := getProject(t, name)
 		assert.Equal(t, v1.ProjectPhaseTerminating, after.Status.Phase, "a late assignment undid the deletion")
 		assert.Equal(t, before.ObjectMeta.ResourceVersion, after.ObjectMeta.ResourceVersion)
@@ -263,7 +263,7 @@ func TestSetProjectScheduledRequiresPending(t *testing.T) {
 		_, gen := createAssigned(t, name, "node-a", v1.ProjectPhaseScheduled)
 		before := getProject(t, name)
 
-		assert.ErrorIs(t, projects.SetProjectScheduled(ctx, name, "node-b"), store.ErrConflictState)
+		assert.ErrorIs(t, projects.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-b"), store.ErrConflictState)
 		after := getProject(t, name)
 		assert.Equal(t, "node-a", after.Status.NodeRef)
 		assert.Equal(t, gen, after.Status.AssignmentGeneration)
@@ -275,7 +275,7 @@ func TestSetProjectScheduledRequiresPending(t *testing.T) {
 		_, gen := createAssigned(t, name, "node-a", v1.ProjectPhaseScheduled)
 		before := getProject(t, name)
 
-		require.NoError(t, projects.SetProjectScheduled(ctx, name, "node-a"))
+		require.NoError(t, projects.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-a"))
 		after := getProject(t, name)
 		assert.Equal(t, gen, after.Status.AssignmentGeneration)
 		assert.Equal(t, before.ObjectMeta.ResourceVersion, after.ObjectMeta.ResourceVersion)
@@ -285,7 +285,7 @@ func TestSetProjectScheduledRequiresPending(t *testing.T) {
 		for _, phase := range []v1.ProjectPhase{v1.ProjectPhaseRunning, v1.ProjectPhaseFailed} {
 			name := "e2e-schedule-" + strings.ToLower(string(phase))
 			createAssigned(t, name, "node-a", phase)
-			assert.ErrorIs(t, projects.SetProjectScheduled(ctx, name, "node-a"), store.ErrConflictState, "%s", phase)
+			assert.ErrorIs(t, projects.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-a"), store.ErrConflictState, "%s", phase)
 			assert.Equal(t, phase, getProject(t, name).Status.Phase)
 		}
 	})

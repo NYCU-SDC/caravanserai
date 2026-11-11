@@ -70,7 +70,7 @@ func TestCommittedBackupFollowsTheCurrentAssignment(t *testing.T) {
 		assert.Equal(t, first, getProject(t, name).Status.Recovery.CommittedBackupID())
 	})
 
-	require.NoError(t, adapter.NewProjectStoreAdapter(suite.store).SetProjectScheduled(context.Background(), name, "node-b"))
+	require.NoError(t, adapter.NewProjectStoreAdapter(suite.store).SetProjectScheduled(context.Background(), name, testhelper.UID(t, suite.store, name), "node-b"))
 	p := getProject(t, name)
 
 	t.Run("a new assignment keeps the restore source", func(t *testing.T) {

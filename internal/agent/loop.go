@@ -571,7 +571,7 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 			runningCount++
 		}
 	}
-	if runningCount == len(p.Spec.Services) && len(p.Spec.Services) > 0 {
+	if runningCount == len(p.Spec.Services) && len(p.Spec.Services) > 0 && !outdatedWhilePlacing(ctx, runtime, p, log) {
 		log.Debug("All containers running, nothing to do")
 		// A PostgreSQL started on an earlier tick whose archiving was not yet
 		// proven: Running still waits for it.
@@ -584,6 +584,8 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 			"All containers running",
 		); err != nil {
 			log.Warn("Failed to update project status", zap.Error(err))
+		} else {
+			reportSpecRunning(ctx, client, p, log)
 		}
 		updateProxyRoutes(ctx, runtime, routes, p, log)
 		return
@@ -675,9 +677,26 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 		"All containers running",
 	); err != nil {
 		log.Warn("Failed to update project status to Running", zap.Error(err))
+	} else {
+		// ReconcileProject built every container from p's spec.
+		reportSpecRunning(ctx, client, p, log)
 	}
 
 	updateProxyRoutes(ctx, runtime, routes, p, log)
+}
+
+// outdatedWhilePlacing reports whether a Scheduled Project's running
+// containers were built from another spec, or a removed service left one
+// behind, so the placement goes through ReconcileProject instead of reporting
+// Running on them. An error reads as outdated: ReconcileProject then asks
+// Docker again and reports what it finds.
+func outdatedWhilePlacing(ctx context.Context, runtime docker.Runtime, p *v1.Project, log *zap.Logger) bool {
+	drift, err := runtime.SpecDrift(ctx, p)
+	if err != nil {
+		log.Warn("Could not compare containers with the spec", zap.Error(err))
+		return true
+	}
+	return drift.Changes()
 }
 
 // reconcileContainers creates and starts the Project's missing containers, and
@@ -793,8 +812,10 @@ func resolveSecretsFor(ctx context.Context, client *Client, p *v1.Project, inclu
 					Err: errSecretKeyNotFound}
 			}
 
+			// The reference stays next to the value: the container is built
+			// from Value, and the spec hash names the Secret by its reference,
+			// never by what it holds (ADR-0026).
 			env.Value = value
-			env.ValueFrom = nil
 		}
 	}
 
@@ -959,6 +980,15 @@ func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime,
 		return
 	}
 
+	// After the stale check, before health is judged (ADR-0026): a container
+	// an update removed and has not yet replaced must not be read as a crash,
+	// and the recreate is not a tier-1 restart.
+	took, upToDate := applySpecUpdate(ctx, client, runtime, routes, busy, recovery, p, log)
+	if took {
+		clearTransient()
+		return
+	}
+
 	states, err := runtime.InspectProject(ctx, p)
 	if err != nil {
 		log.Warn("Failed to inspect project containers", zap.Error(err))
@@ -1000,6 +1030,9 @@ func healthCheckOne(ctx context.Context, client *Client, runtime docker.Runtime,
 		// restores the data and starts the container by hand. The condition
 		// would then claim cara refuses to act on a Project that is fine.
 		clearRecoveryBlocked(ctx, client, p, log)
+		if upToDate {
+			reportSpecRunning(ctx, client, p, log)
+		}
 		updateProxyRoutes(ctx, runtime, routes, p, log)
 		return
 	}
@@ -1645,7 +1678,12 @@ func failureReason(bad []serviceState) (reason, summary string) {
 // for a project.  It is a no-op if routes is nil or the project has no ingress
 // definitions.
 func updateProxyRoutes(ctx context.Context, runtime docker.Runtime, routes RouteUpdater, p *v1.Project, log *zap.Logger) {
-	if routes == nil || len(p.Spec.Ingress) == 0 {
+	if routes == nil {
+		return
+	}
+	if len(p.Spec.Ingress) == 0 {
+		// An update can remove every ingress rule; the routes go with them.
+		routes.Remove(p.Name)
 		return
 	}
 

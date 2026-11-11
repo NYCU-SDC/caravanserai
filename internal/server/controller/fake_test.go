@@ -47,6 +47,7 @@ type setNodeStateCall struct {
 // setProjectScheduledCall records a single invocation of SetProjectScheduled.
 type setProjectScheduledCall struct {
 	Name    string
+	UID     string
 	NodeRef string
 }
 
@@ -197,20 +198,6 @@ func (f *fakeSchedulerProjectStore) ListProjectNamesByPhase(_ context.Context, p
 	return names, nil
 }
 
-func (f *fakeSchedulerProjectStore) GetProjectPhase(_ context.Context, name string) (v1.ProjectPhase, string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if err, ok := f.errs[name]; ok {
-		return "", "", err
-	}
-	r, ok := f.projects[name]
-	if !ok {
-		return "", "", store.ErrNotFound
-	}
-	return r.Phase, r.NodeRef, nil
-}
-
 func (f *fakeSchedulerProjectStore) GetProjectPlacement(_ context.Context, name string) (ProjectPlacement, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -222,7 +209,7 @@ func (f *fakeSchedulerProjectStore) GetProjectPlacement(_ context.Context, name 
 	if !ok {
 		return ProjectPlacement{}, store.ErrNotFound
 	}
-	return ProjectPlacement{Size: r.Size, ExcludedNodes: r.FailedNodes, RequiredTier: r.RequiredTier}, nil
+	return ProjectPlacement{UID: "uid-" + name, Phase: r.Phase, Size: r.Size, ExcludedNodes: r.FailedNodes, RequiredTier: r.RequiredTier}, nil
 }
 
 // ListProjectsByNodeRef serves the capacity ledger from the same records the
@@ -241,14 +228,14 @@ func (f *fakeSchedulerProjectStore) ListProjectsByNodeRef(_ context.Context, nod
 	return out, nil
 }
 
-func (f *fakeSchedulerProjectStore) SetSchedulingBlocked(_ context.Context, _, reason, message string) error {
+func (f *fakeSchedulerProjectStore) SetSchedulingBlocked(_ context.Context, _, _, reason, message string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.SchedulingBlockedCalls = append(f.SchedulingBlockedCalls, reason+": "+message)
 	return nil
 }
 
-func (f *fakeSchedulerProjectStore) SetProjectScheduled(_ context.Context, name, nodeRef string) error {
+func (f *fakeSchedulerProjectStore) SetProjectScheduled(_ context.Context, name, uid, nodeRef string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -261,6 +248,7 @@ func (f *fakeSchedulerProjectStore) SetProjectScheduled(_ context.Context, name,
 
 	f.SetProjectScheduledCalls = append(f.SetProjectScheduledCalls, setProjectScheduledCall{
 		Name:    name,
+		UID:     uid,
 		NodeRef: nodeRef,
 	})
 
@@ -493,9 +481,10 @@ type clearRescheduleClocksCall struct {
 // decided on, are both left alone.
 func (f *fakeReschedulerProjectStore) ClearRescheduleClocks(
 	_ context.Context,
-	name, nodeRef string,
+	snap *ProjectSnapshot,
 	notAfter time.Time,
 ) error {
+	name, nodeRef := snap.Name, snap.NodeRef
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -556,7 +545,8 @@ func (f *fakeReschedulerProjectStore) ReleaseAssignment(_ context.Context, snap 
 	return released, nil
 }
 
-func (f *fakeReschedulerProjectStore) SetTerminatingAt(_ context.Context, name string, at time.Time) error {
+func (f *fakeReschedulerProjectStore) SetTerminatingAt(_ context.Context, snap *ProjectSnapshot, at, _ time.Time) error {
+	name := snap.Name
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -586,7 +576,8 @@ func (f *fakeReschedulerProjectStore) SetTerminatingAt(_ context.Context, name s
 	return nil
 }
 
-func (f *fakeReschedulerProjectStore) SetNotReadyAt(_ context.Context, name string, at time.Time) error {
+func (f *fakeReschedulerProjectStore) SetNotReadyAt(_ context.Context, snap *ProjectSnapshot, at, _ time.Time) error {
+	name := snap.Name
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -618,7 +609,8 @@ func (f *fakeReschedulerProjectStore) SetNotReadyAt(_ context.Context, name stri
 
 // SetTerminationBlocked mirrors the adapter: only a Terminating Project is
 // marked, and the phase never changes.
-func (f *fakeReschedulerProjectStore) SetTerminationBlocked(_ context.Context, name, nodeRef string, at time.Time) error {
+func (f *fakeReschedulerProjectStore) SetTerminationBlocked(_ context.Context, snap *ProjectSnapshot, at, _ time.Time) error {
+	name, nodeRef := snap.Name, snap.NodeRef
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

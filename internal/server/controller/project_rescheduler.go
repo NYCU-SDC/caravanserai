@@ -79,32 +79,39 @@ type ReschedulerProjectStore interface {
 	// and ErrNotFound when it is gone.
 	ReleaseAssignment(ctx context.Context, p *ProjectSnapshot) (released bool, err error)
 
-	// SetTerminatingAt writes (or replaces) a TerminatingAt condition on the
-	// Project to record when the rescheduler first observed the node as
-	// NotReady.  This timestamp is used to calculate the termination timeout.
-	SetTerminatingAt(ctx context.Context, name string, at time.Time) error
+	// The four writes below record what the controller decided from a
+	// snapshot p read earlier. Each re-checks, in the same compare-and-swap,
+	// everything that decision depended on: the lifetime (p's UID), the
+	// assignment (p's nodeRef and generation), the phase where it matters, and
+	// for a clock the outage (lastHeartbeat, the Node's heartbeat the decision
+	// was based on). A precondition that no longer holds ends the write without
+	// changing anything and without an error (CARA-81 stage 3): a same-name
+	// Project created since, a Project moved to another generation or Node, or
+	// a clock already started for this outage is not this decision's to write.
 
-	// SetNotReadyAt writes (or replaces) a NotReadyAt condition on the
-	// Project to record when the rescheduler first observed the node as
-	// NotReady while the project was Running.  This timestamp is used to
-	// calculate the running grace period before trying to release it.
-	SetNotReadyAt(ctx context.Context, name string, at time.Time) error
+	// SetTerminatingAt starts the termination clock at at, for a Project still
+	// Terminating under p's assignment that has no TerminatingAt stamped since
+	// lastHeartbeat.
+	SetTerminatingAt(ctx context.Context, p *ProjectSnapshot, at, lastHeartbeat time.Time) error
 
-	// SetTerminationBlocked writes (or replaces) a TerminationBlocked condition
-	// stamped at, on a Project that is still Terminating. The phase does not
-	// change: the Project stays Terminating until its node returns and reports
-	// the resources removed.
-	SetTerminationBlocked(ctx context.Context, name, nodeRef string, at time.Time) error
+	// SetNotReadyAt starts the running grace-period clock at at, for a Project
+	// still Running under p's assignment that has no NotReadyAt stamped since
+	// lastHeartbeat.
+	SetNotReadyAt(ctx context.Context, p *ProjectSnapshot, at, lastHeartbeat time.Time) error
+
+	// SetTerminationBlocked marks a Project still Terminating under p's
+	// assignment, once per outage: a mark stamped since lastHeartbeat is left
+	// alone. The phase does not change: the Project stays Terminating until
+	// its node returns and reports the resources removed.
+	SetTerminationBlocked(ctx context.Context, p *ProjectSnapshot, at, lastHeartbeat time.Time) error
 
 	// ClearRescheduleClocks removes the outage conditions (see
-	// IsOutageCondition) from the Project without touching its phase. Called
-	// when the node recovers before the Project was released.
-	//
-	// It must ignore a Project no longer assigned to nodeRef, and a condition
-	// stamped after notAfter — that one belongs to an outage which began after
-	// this cleanup was decided on, and deleting it would restart a timeout
-	// that is legitimately running.
-	ClearRescheduleClocks(ctx context.Context, name, nodeRef string, notAfter time.Time) error
+	// IsOutageCondition) from a Project still under p's assignment, without
+	// touching its phase. Called when the node recovers before the Project was
+	// released. A condition stamped after notAfter is kept: it belongs to an
+	// outage which began after this cleanup was decided on, and deleting it
+	// would restart a timeout that is legitimately running.
+	ClearRescheduleClocks(ctx context.Context, p *ProjectSnapshot, notAfter time.Time) error
 }
 
 // ReschedulerNodeStore is the store surface needed to check node state.
@@ -313,7 +320,7 @@ func (c *ProjectReschedulerController) clearRescheduleClocks(
 			continue
 		}
 		log.Info("Node recovered, clearing reschedule clock", zap.String("project", p.Name))
-		if err := c.projects.ClearRescheduleClocks(ctx, p.Name, nodeName, notAfter); err != nil {
+		if err := c.projects.ClearRescheduleClocks(ctx, p, notAfter); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				log.Debug("Project disappeared before clock clear, skipping",
 					zap.String("project", p.Name))
@@ -424,7 +431,7 @@ func (c *ProjectReschedulerController) handleTerminating(
 		}
 
 		now := c.clock.Now().UTC()
-		if err := c.projects.SetTerminatingAt(ctx, p.Name, now); err != nil {
+		if err := c.projects.SetTerminatingAt(ctx, p, now, lastHeartbeat); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				log.Debug("Project disappeared before TerminatingAt write, skipping")
 				return false, nil
@@ -455,7 +462,7 @@ func (c *ProjectReschedulerController) handleTerminating(
 		zap.Duration("elapsed", elapsed),
 		zap.Duration("timeout", c.terminatingTimeout),
 	)
-	if err := c.projects.SetTerminationBlocked(ctx, p.Name, p.NodeRef, c.clock.Now().UTC()); err != nil {
+	if err := c.projects.SetTerminationBlocked(ctx, p, c.clock.Now().UTC(), lastHeartbeat); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			log.Debug("Project disappeared before TerminationBlocked write, skipping")
 			return false, nil
@@ -491,7 +498,7 @@ func (c *ProjectReschedulerController) handleRunning(
 		}
 
 		now := c.clock.Now().UTC()
-		if err := c.projects.SetNotReadyAt(ctx, p.Name, now); err != nil {
+		if err := c.projects.SetNotReadyAt(ctx, p, now, lastHeartbeat); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				log.Debug("Project disappeared before NotReadyAt write, skipping")
 				return false, nil

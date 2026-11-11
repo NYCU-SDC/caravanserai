@@ -114,6 +114,12 @@ type Config struct {
 	// must still be free once the Project is placed there.
 	FailbackMinFreePercent float64 `yaml:"failback_min_free_percent" envconfig:"FAILBACK_MIN_FREE_PERCENT"`
 
+	// DefaultBackupInterval is the backup interval a Project with a Managed
+	// volume and no spec.backup gets when it is created or updated (ADR-0029).
+	// Zero means 24h. A Project's own spec.backup wins, and
+	// spec.backup.disabled turns backup off for that Project.
+	DefaultBackupInterval time.Duration `yaml:"default_backup_interval" envconfig:"DEFAULT_BACKUP_INTERVAL"`
+
 	// configFileError is why a config file named explicitly could not be used.
 	configFileError error
 }
@@ -229,6 +235,14 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		}
 	}
 
+	if raw := os.Getenv("DEFAULT_BACKUP_INTERVAL"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			envConfig.DefaultBackupInterval = d
+		} else {
+			logger.Warn("Invalid DEFAULT_BACKUP_INTERVAL, ignoring", err, map[string]string{"value": raw})
+		}
+	}
+
 	if raw := os.Getenv("TERMINATING_TIMEOUT"); raw != "" {
 		if d, err := time.ParseDuration(raw); err == nil {
 			envConfig.TerminatingTimeout = d
@@ -295,6 +309,7 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.DurationVar(&flagConfig.TerminatingTimeout, "terminating-timeout", 0, "how long a Terminating project's node may be NotReady before the deletion is reported blocked (default: 10m)")
 	flag.DurationVar(&flagConfig.RunningGracePeriod, "running-grace-period", 0, "how long a Running Project may stay on a NotReady node before its release is attempted (default: 3m)")
 	flag.BoolVar(&flagConfig.GraceExpiredRelease, "grace-expired-release", false, "move Projects off a node that stayed NotReady past the grace period; one with a Managed volume needs a committed backup")
+	flag.DurationVar(&flagConfig.DefaultBackupInterval, "default-backup-interval", 0, "backup interval of a Project with a Managed volume and no spec.backup (default: 24h)")
 	flag.StringVar(&flagConfig.BreakGlassTokenFile, "break-glass-token-file", "", "file holding the break-glass admin token")
 	flag.String(configFlag, "", configFlagUsage)
 	flag.IntVar(&flagConfig.MaxInFlightEvictions, "max-inflight-evictions", 0, "planned moves (drain, fail-back) allowed at once across the cluster (default: 1)")
