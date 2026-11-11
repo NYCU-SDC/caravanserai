@@ -402,13 +402,20 @@ func newRecoverFixture(t *testing.T, volType v1.VolumeType) *recoverFixture {
 // ownedLabels are the labels ensureContainer puts on a service's container
 // for the fixture's current assignment.
 func (f *recoverFixture) ownedLabels(service string) map[string]string {
-	return map[string]string{
+	labels := map[string]string{
 		labelProject:    f.project.Name,
 		labelService:    service,
 		labelNamespace:  f.project.Namespace,
 		labelUID:        f.project.UID,
 		labelGeneration: generationLabel(f.project.Status.AssignmentGeneration),
 	}
+	// Built from the current spec, as a container this assignment made would be.
+	for _, svc := range f.project.Spec.Services {
+		if svc.Name == service {
+			labels[labelSpecHash] = ServiceSpecHash(svc, f.project.Spec)
+		}
+	}
+	return labels
 }
 
 // container registers a container for service that belongs to the current

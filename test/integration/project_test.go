@@ -436,7 +436,7 @@ func TestProjectUpdate(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "name mismatch: expected 400")
 	drainBody(resp)
 
-	// ── 4. Transition to Running, then PUT → 409 ──────────────────────────────
+	// ── 4. Transition to Running, then PUT → 200 (ADR-0026) ──────────────────
 
 	// Assign the Project, then report it Running and Failed through the status
 	// endpoint as its Agent would.
@@ -445,9 +445,13 @@ func TestProjectUpdate(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, resp.StatusCode, "patch to Running: expected 204")
 	drainBody(resp)
 
-	resp = doRequest(t, http.MethodPut, "/api/v1/projects/"+projectName, updateBody)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "update Running project: expected 409")
+	resp = doRequest(t, http.MethodPut, "/api/v1/projects/"+projectName, mustMarshal(t, v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: projectName},
+		Spec:       v1.ProjectSpec{Services: []v1.ServiceDef{{Name: "api", Image: "myapp:v3"}}},
+	}))
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "update Running project: its Agent recreates what changed")
 	drainBody(resp)
+	assert.Equal(t, v1.ProjectPhaseRunning, getProject(t, projectName).Status.Phase, "an update is not a reschedule")
 
 	// ── 5. Transition to Failed, then PUT → 200 (allowed) ────────────────────
 

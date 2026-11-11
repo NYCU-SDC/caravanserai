@@ -2,6 +2,7 @@ package v1
 
 import (
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/invopop/jsonschema"
@@ -312,10 +313,22 @@ type TakeoverAuditRecord struct {
 // Managed volume is captured and committed together. Per-volume intervals
 // could not be honoured without producing generations whose volumes are from
 // different points in time — exactly what stopping the whole Project avoids.
+//
+// A Project with a Managed volume and no backup section gets the server's
+// default interval when it is created or updated (ADR-0029), so leaving the
+// section out means "back up on the default schedule", not "never". Disabled
+// is how a Project opts out.
 type ProjectBackupConfig struct {
 	// Interval is the time between backup runs, e.g. "168h", "1h". Parsed with
-	// time.ParseDuration; must be positive.
-	Interval string `json:"interval" yaml:"interval"`
+	// time.ParseDuration; must be positive unless Disabled is set, and empty
+	// when it is.
+	Interval string `json:"interval,omitempty" yaml:"interval,omitempty"`
+
+	// Disabled turns periodic backup off. A disabled Project is never moved off
+	// a lost Node automatically: its last backup, if any, falls further behind
+	// the data every day, and restoring it would discard everything since
+	// without anyone deciding to. Interval, OnMissing and Items must be empty.
+	Disabled bool `json:"disabled,omitempty" yaml:"disabled,omitempty"`
 
 	// OnMissing selects behaviour when no backup exists at restore time.
 	// Defaults to InitializeEmpty when empty.
@@ -517,9 +530,17 @@ type ProjectSpec struct {
 	Volumes []VolumeDef `json:"volumes,omitempty" yaml:"volumes,omitempty"`
 
 	// Backup configures periodic backup of every Managed volume in this
-	// Project. Omitting it means the volumes persist on the node but are
-	// never uploaded.
+	// Project. A Project with a Managed volume that omits it is given the
+	// server's default interval on create and update (ADR-0029); backup is
+	// turned off with backup.disabled.
 	Backup *ProjectBackupConfig `json:"backup,omitempty" yaml:"backup,omitempty"`
+
+	// Overlap says whether two copies of this Project may run at once, as they
+	// do when a Node is cut off from the server but keeps running and the
+	// Project is started elsewhere. Forbid is for a service with side effects
+	// outside its own data: scheduled jobs, webhooks, mail, bots. Omitting it
+	// means OverlapAllow (ADR-0036).
+	Overlap Overlap `json:"overlap,omitempty" yaml:"overlap,omitempty"`
 
 	// Ingress defines public or internal HTTP routing rules.
 	Ingress []IngressDef `json:"ingress,omitempty" yaml:"ingress,omitempty"`
@@ -527,6 +548,50 @@ type ProjectSpec struct {
 	// ExpireAt, when set, causes the GC controller to delete the Project
 	// after this time. Useful for ephemeral preview environments.
 	ExpireAt *time.Time `json:"expireAt,omitempty" yaml:"expireAt,omitempty"`
+
+	// RestartedAt is when `caractl rollout restart` last asked for every
+	// service to be recreated. It is part of every service's spec hash, so a
+	// new value recreates them all; that is how a rotated Secret reaches the
+	// containers (ADR-0026). An update that leaves it out keeps the stored
+	// value, so applying a manifest after a restart does not restart again.
+	RestartedAt *time.Time `json:"restartedAt,omitempty" yaml:"restartedAt,omitempty"`
+}
+
+// Overlap declares whether two copies of a Project may run at the same time.
+// It describes the service, not a move policy: what Cara does with it depends
+// on what can stop the old copy. Today a Forbid Project is never moved on the
+// grace period alone; once Agent leases exist it may move after the old Node
+// has stopped it itself (ADR-0030).
+type Overlap string
+
+const (
+	// OverlapAllow: running twice for a while costs at most the writes the old
+	// copy makes, which a move after a lost Node already gives up.
+	OverlapAllow Overlap = "Allow"
+	// OverlapForbid: running twice does harm outside the Project, such as a
+	// job or a message sent twice.
+	OverlapForbid Overlap = "Forbid"
+)
+
+// IsValid reports whether o is one of the declared values. Empty is not valid
+// here; callers treat an omitted value as OverlapAllow before asking.
+func (o Overlap) IsValid() bool {
+	return o == OverlapAllow || o == OverlapForbid
+}
+
+// JSONSchema returns a JSON Schema with the allowed Overlap values.
+func (Overlap) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Enum:        []any{string(OverlapAllow), string(OverlapForbid)},
+		Description: "Whether two copies of the Project may run at once. Defaults to Allow when omitted.",
+	}
+}
+
+// ForbidsOverlap reports whether the spec declares that two copies must not
+// run at once.
+func (s ProjectSpec) ForbidsOverlap() bool {
+	return s.Overlap == OverlapForbid
 }
 
 // EffectiveSize returns the declared Size, or DefaultProjectSize when none was
@@ -648,6 +713,11 @@ type ProjectStatus struct {
 
 	// Conditions is a list of granular observable states.
 	Conditions []Condition `json:"conditions,omitempty" yaml:"conditions,omitempty"`
+
+	// ObservedSpecRevision is the latest metadata.specRevision the assigned
+	// Agent has reported running in full. It never exceeds specRevision and
+	// never goes back. While it is behind, the SpecApplied condition says why.
+	ObservedSpecRevision int64 `json:"observedSpecRevision,omitempty" yaml:"observedSpecRevision,omitempty"`
 
 	// Recovery is the durable state of cross-Node recovery: retry bookkeeping
 	// and the evidence that lets an assignment be released or a record be
@@ -975,6 +1045,41 @@ func (r *ProjectRecoveryStatus) NodesOwingCleanup() []string {
 		}
 	}
 	return nodes
+}
+
+// DefaultBackupInterval is the backup interval a Project with a Managed volume
+// and no spec.backup gets when the server is not configured with another one
+// (ADR-0029). Club data rarely needs more than daily backups, and each
+// Offline backup stops the Project.
+const DefaultBackupInterval = 24 * time.Hour
+
+// WithDefaultBackup returns the spec with spec.backup set to interval when the
+// spec declares a Managed volume and no backup section. Any section the spec
+// has, including a disabled one, is kept as written.
+func (s ProjectSpec) WithDefaultBackup(interval time.Duration) ProjectSpec {
+	if s.Backup != nil || !s.HasManagedVolume() {
+		return s
+	}
+	s.Backup = &ProjectBackupConfig{Interval: shortDuration(interval)}
+	return s
+}
+
+// shortDuration formats d the way people write it: "24h" rather than
+// time.Duration's "24h0m0s".
+func shortDuration(d time.Duration) string {
+	out := d.String()
+	if strings.HasSuffix(out, "m0s") {
+		out = out[:len(out)-2]
+	}
+	if strings.HasSuffix(out, "h0m") {
+		out = out[:len(out)-2]
+	}
+	return out
+}
+
+// BackupDisabled reports whether the spec explicitly turns backup off.
+func (s ProjectSpec) BackupDisabled() bool {
+	return s.Backup != nil && s.Backup.Disabled
 }
 
 // HasManagedVolume reports whether the spec declares a Managed volume.

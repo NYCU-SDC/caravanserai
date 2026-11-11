@@ -99,6 +99,7 @@ var nodeRoutes = map[string]rule{
 
 	// Fenced writes: RequireFenceOwner checks the fence in the handler.
 	"PATCH /api/v1/projects/{name}/status":                          allowRoute,
+	"PUT /api/v1/projects/{name}/status/spec-applied":               allowRoute,
 	"PATCH /api/v1/projects/{name}/conditions/{type}":               allowRoute,
 	"DELETE /api/v1/projects/{name}/conditions/{type}":              allowRoute,
 	"PUT /api/v1/projects/{name}/recovery/workload-stopped":         allowRoute,

@@ -358,17 +358,25 @@ func TestApplyingAgainResetsRetryBudget(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, before.Status.Conditions, 2)
 
+	// A new image, not a new size: the Project keeps its nodeRef while Failed,
+	// and an assigned Project cannot change size (ADR-0026).
 	updated := *before
-	updated.Spec.Size = v1.ProjectSizeLarge
+	updated.Spec.Services = []v1.ServiceDef{{Name: "web", Image: "nginx:fixed"}}
 	require.NoError(t, s.Store.UpdateProjectSpec(ctx, &updated))
 
 	after, err := s.Store.GetProject(ctx, "reapply-project")
 	require.NoError(t, err)
-	assert.Equal(t, v1.ProjectSizeLarge, after.Spec.Size, "the spec was updated")
+	assert.Equal(t, "nginx:fixed", after.Spec.Services[0].Image, "the spec was updated")
 	assert.Empty(t, after.Status.FailedNodes, "the nodes it failed on are no longer ruled out")
-	require.Len(t, after.Status.Conditions, 1, "only the exhausted marker is dropped")
-	assert.Equal(t, v1.ConditionTypePhase, after.Status.Conditions[0].Type)
-	assert.Equal(t, "LocalRestartExhausted", after.Status.Conditions[0].Reason)
+	types := make([]v1.ConditionType, 0, len(after.Status.Conditions))
+	for _, c := range after.Status.Conditions {
+		types = append(types, c.Type)
+		if c.Type == v1.ConditionTypePhase {
+			assert.Equal(t, "LocalRestartExhausted", c.Reason, "the Phase condition is kept")
+		}
+	}
+	assert.ElementsMatch(t, []v1.ConditionType{v1.ConditionTypePhase, v1.ConditionTypeSpecApplied}, types,
+		"the exhausted marker is dropped, and the new revision is marked not yet applied")
 	assert.Equal(t, v1.ProjectPhaseFailed, after.Status.Phase)
 	assert.Equal(t, "node-c", after.Status.NodeRef)
 }

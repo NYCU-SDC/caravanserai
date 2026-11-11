@@ -592,6 +592,56 @@ func (c *Client) ReportWorkloadStopped(ctx context.Context, projectName string, 
 	}
 }
 
+// specAppliedRequest is the body of PUT /api/v1/projects/{name}/status/spec-applied.
+type specAppliedRequest struct {
+	evidenceRequest
+	SpecRevision int64  `json:"specRevision"`
+	Applied      bool   `json:"applied"`
+	Reason       string `json:"reason,omitempty"`
+	Message      string `json:"message,omitempty"`
+}
+
+// ReportSpecApplied tells the server, under the assignment fence, whether this
+// Node runs a spec revision: applied once every service does, or not with the
+// reason an update failed before anything was stopped. A 409 means the fence
+// or the revision is no longer current (ErrStaleAssignment).
+func (c *Client) ReportSpecApplied(ctx context.Context, projectName string, fence AssignmentFence, revision int64, applied bool, reason, message string) error {
+	gen := fence.Generation
+	body, err := json.Marshal(specAppliedRequest{
+		evidenceRequest: evidenceRequest{UID: fence.UID, NodeRef: fence.NodeRef, AssignmentGeneration: &gen},
+		SpecRevision:    revision,
+		Applied:         applied,
+		Reason:          reason,
+		Message:         message,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal spec-applied request: %w", err)
+	}
+	url := fmt.Sprintf("%s/api/v1/projects/%s/status/spec-applied", c.serverURL, projectName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build spec-applied request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("spec-applied request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrStaleAssignment
+	case http.StatusNotFound:
+		return ErrProjectNotFound
+	default:
+		return fmt.Errorf("report spec applied: unexpected status %s", resp.Status)
+	}
+}
+
 // stanzaRequest is the body of PUT /api/v1/projects/{name}/backup/stanzas.
 type stanzaRequest struct {
 	evidenceRequest
