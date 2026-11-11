@@ -248,7 +248,22 @@ type NodeStore interface {
 	// This is the preferred path for the Agent heartbeat and the
 	// NodeHealthController to avoid overwriting Spec changes made concurrently
 	// by the API server.
+	//
+	// It overwrites the whole status with no version check, so a write
+	// racing another loses that one's fields. Writers that change part of
+	// the status use UpdateNodeStatusWithRetry instead.
 	UpdateNodeStatus(ctx context.Context, name string, status v1.NodeStatus) error
+
+	// UpdateNodeStatusWithRetry reads the named Node's status, applies mutate
+	// to a copy, and writes it back only if the Node has not been written
+	// since the read; on a conflict it reads again and re-applies mutate. So
+	// each writer changes only the fields it means to, and a concurrent
+	// writer's fields survive — the heartbeat, the health controller and the
+	// drain controller all write the same status. mutate may run more than
+	// once and must decide from what it is given. A mutate that changes
+	// nothing writes nothing; one that returns an error writes nothing and
+	// returns it. Returns ErrNotFound when the Node is gone.
+	UpdateNodeStatusWithRetry(ctx context.Context, name string, mutate func(*v1.NodeStatus) error) error
 }
 
 // ============================================================

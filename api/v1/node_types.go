@@ -90,6 +90,10 @@ type NodeState string
 const (
 	NodeStateReady    NodeState = "Ready"
 	NodeStateNotReady NodeState = "NotReady"
+	// NodeStateDraining is no longer set: draining is requested with
+	// NodeSpec.Drain and reported in NodeStatus.Drain (CARA-120), so the
+	// state keeps saying only whether the Node is healthy. The value is kept
+	// so existing records and agents still validate.
 	NodeStateDraining NodeState = "Draining"
 )
 
@@ -135,6 +139,55 @@ type NodeSpec struct {
 	// onto this Node. The TaintsController will automatically add a
 	// NoSchedule Taint when this field is true.
 	Unschedulable bool `json:"unschedulable,omitempty" yaml:"unschedulable,omitempty"`
+
+	// Drain, when true, moves every Project off this Node so it can be
+	// powered off (CARA-120). Each is moved as a planned move: a fresh backup
+	// first, then the scheduler places it elsewhere. Progress is in
+	// Status.Drain. A drained Node should also be Unschedulable, or new
+	// Projects could arrive while it empties; `caractl node drain` sets both,
+	// and the scheduler leaves out a draining Node either way.
+	Drain bool `json:"drain,omitempty" yaml:"drain,omitempty"`
+}
+
+// NodeDrainPhase is how far draining a Node has got.
+type NodeDrainPhase string
+
+const (
+	// NodeDrainDraining means Projects are still leaving and none is stuck.
+	NodeDrainDraining NodeDrainPhase = "Draining"
+	// NodeDrainIncomplete means at least one Project cannot leave without
+	// help; Blocking says which and why.
+	NodeDrainIncomplete NodeDrainPhase = "Incomplete"
+	// NodeDrainDrained means no Project is assigned to the Node and it owes
+	// no cleanup: it can be powered off.
+	NodeDrainDrained NodeDrainPhase = "Drained"
+)
+
+// JSONSchema returns a JSON Schema with the allowed NodeDrainPhase values.
+func (NodeDrainPhase) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type:        "string",
+		Enum:        []any{string(NodeDrainDraining), string(NodeDrainIncomplete), string(NodeDrainDrained)},
+		Description: "How far draining a Node has got.",
+	}
+}
+
+// NodeDrainStatus is the progress of draining a Node, written by the server
+// while Spec.Drain is set.
+type NodeDrainStatus struct {
+	// Phase is how far the drain has got.
+	Phase NodeDrainPhase `json:"phase" yaml:"phase"`
+
+	// Since is when Phase last changed.
+	Since time.Time `json:"since" yaml:"since"`
+
+	// Remaining is how many Projects are still assigned to the Node or owed
+	// cleanup by it.
+	Remaining int `json:"remaining,omitempty" yaml:"remaining,omitempty"`
+
+	// Blocking lists the Projects that cannot leave without help, one line
+	// each saying why.
+	Blocking []string `json:"blocking,omitempty" yaml:"blocking,omitempty"`
 }
 
 // NodeStatus is written by the Agent (heartbeat fields) and the Controller
@@ -163,6 +216,9 @@ type NodeStatus struct {
 
 	// Conditions is a list of observable Node conditions.
 	Conditions []Condition `json:"conditions,omitempty" yaml:"conditions,omitempty"`
+
+	// Drain is the progress of draining the Node, set while Spec.Drain is.
+	Drain *NodeDrainStatus `json:"drain,omitempty" yaml:"drain,omitempty"`
 }
 
 // Node represents a physical or virtual machine managed by a Caravanserai
