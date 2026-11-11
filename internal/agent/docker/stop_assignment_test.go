@@ -101,3 +101,24 @@ func TestProjectContainerStopped(t *testing.T) {
 		assert.Equal(t, want, ProjectContainer{State: state}.Stopped(), state)
 	}
 }
+
+// RestartContainer must not start what is stopped: a node that reported a
+// Project stopped must not see a settings change bring it back (CARA-92).
+func TestRestartContainerNeverStartsAStoppedContainer(t *testing.T) {
+	f := newStrictFixture(t)
+	f.container("db", "exited")
+
+	err := f.runtime.RestartContainer(t.Context(), ContainerName("blog", "db"))
+
+	require.ErrorIs(t, err, ErrContainerNotRunning)
+	assert.Empty(t, f.docker.mutations, "neither stopped nor started")
+}
+
+func TestRestartContainerRestartsARunningContainer(t *testing.T) {
+	f := newStrictFixture(t)
+	f.container("db", "running")
+
+	require.NoError(t, f.runtime.RestartContainer(t.Context(), ContainerName("blog", "db")))
+
+	assert.Equal(t, []string{"ContainerStop:blog-db", "ContainerStart:blog-db"}, f.docker.mutations)
+}
