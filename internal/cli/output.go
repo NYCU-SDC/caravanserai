@@ -94,10 +94,10 @@ func (p *Printer) PrintProject(project v1.Project) error {
 }
 
 // printProjectTable writes a human-readable table with columns:
-// NAME  PHASE  NODE  CONDITIONS  AGE
+// NAME  PHASE  SPEC  NODE  CONDITIONS  AGE
 func (p *Printer) printProjectTable(projects []v1.Project) error {
 	w := tabwriter.NewWriter(p.Out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "NAME\tPHASE\tNODE\tCONDITIONS\tAGE")
+	fmt.Fprintln(w, "NAME\tPHASE\tSPEC\tNODE\tCONDITIONS\tAGE")
 
 	for _, proj := range projects {
 		name := proj.Name
@@ -111,10 +111,30 @@ func (p *Printer) printProjectTable(projects []v1.Project) error {
 		}
 		conditions := latestConditionReason(proj.Status.Conditions)
 		age := humanAge(proj.CreatedAt)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", name, phase, node, conditions, age)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", name, phase, specColumn(proj), node, conditions, age)
 	}
 
 	return w.Flush()
+}
+
+// specColumn says which spec revision a Project is at and whether it runs:
+// "3" once revision 3 runs; "3 (running 2)" while the Agent has not reported
+// it; "3 (running 2, ImagePullFailed)" when the Agent reported why not.
+func specColumn(proj v1.Project) string {
+	rev, observed := proj.SpecRevision, proj.Status.ObservedSpecRevision
+	if rev == 0 {
+		return "-"
+	}
+	if observed >= rev {
+		return fmt.Sprintf("%d", rev)
+	}
+	for _, c := range proj.Status.Conditions {
+		if c.Type == v1.ConditionTypeSpecApplied && c.Status == v1.ConditionFalse &&
+			c.Reason != "" && c.Reason != v1.ReasonSpecUpdatePending {
+			return fmt.Sprintf("%d (running %d, %s)", rev, observed, c.Reason)
+		}
+	}
+	return fmt.Sprintf("%d (running %d)", rev, observed)
 }
 
 // redactedValue is printed in place of every real Secret value in CLI output.

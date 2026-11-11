@@ -36,7 +36,7 @@ func TestBuildManifest(t *testing.T) {
 	assert.Equal(t, "default", m.Namespace)
 	assert.Equal(t, "blog", m.Project)
 	assert.Equal(t, "node-a", m.SourceNode)
-	assert.Equal(t, int64(12), m.ProjectResourceVersion)
+	assert.Equal(t, int64(12), m.ProjectSpecRevision)
 	assert.Equal(t, "tar-offline", m.BackupMethod)
 	assert.Equal(t, "1.0.0", m.CaraVersion)
 	assert.Equal(t, now, m.CreatedAt)

@@ -79,7 +79,7 @@ func TestPostgresPlacementArchivesThroughTheRepoHost(t *testing.T) {
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano()%1_000_000)
 	dataRoot := t.TempDir()
 
-	runtime, err := docker.NewDockerRuntime("unix:///var/run/docker.sock", dataRoot, true, zap.NewNop())
+	runtime, err := docker.NewDockerRuntime("unix:///var/run/docker.sock", dataRoot, zap.NewNop())
 	require.NoError(t, err)
 
 	project := func() *v1.Project {

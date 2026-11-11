@@ -32,6 +32,22 @@ type mockRuntime struct {
 	listLocalFn     func(ctx context.Context) ([]docker.ProjectIdentity, error)
 	stopOrphanFn    func(ctx context.Context, project docker.ProjectIdentity) error
 	removeOrphanFn  func(ctx context.Context, project docker.ProjectIdentity) error
+	driftFn         func(ctx context.Context, project *v1.Project) (docker.SpecDrift, error)
+	updateFn        func(ctx context.Context, project *v1.Project, drift docker.SpecDrift) error
+}
+
+func (m *mockRuntime) SpecDrift(ctx context.Context, project *v1.Project) (docker.SpecDrift, error) {
+	if m.driftFn != nil {
+		return m.driftFn(ctx, project)
+	}
+	return docker.SpecDrift{}, nil
+}
+
+func (m *mockRuntime) UpdateServices(ctx context.Context, project *v1.Project, drift docker.SpecDrift) error {
+	if m.updateFn != nil {
+		return m.updateFn(ctx, project, drift)
+	}
+	return nil
 }
 
 func (m *mockRuntime) InspectProject(ctx context.Context, project *v1.Project) ([]docker.ContainerState, error) {
@@ -462,11 +478,17 @@ func TestResolveSecretsHappyPathAndCache(t *testing.T) {
 	resolved, err := resolveSecrets(context.Background(), client, p)
 	require.NoError(t, err)
 
-	// Both references resolved to the literal value; ValueFrom cleared.
+	// Both references resolved to the literal value. The reference stays, so
+	// the spec hash of the resolved copy names the Secret and not its value.
 	assert.Equal(t, "hunter2", resolved.Spec.Services[0].Env[0].Value)
-	assert.Nil(t, resolved.Spec.Services[0].Env[0].ValueFrom)
+	assert.Equal(t, p.Spec.Services[0].Env[0].ValueFrom, resolved.Spec.Services[0].Env[0].ValueFrom)
 	assert.Equal(t, "hunter2", resolved.Spec.Services[1].Env[0].Value)
-	assert.Nil(t, resolved.Spec.Services[1].Env[0].ValueFrom)
+	assert.Equal(t, p.Spec.Services[1].Env[0].ValueFrom, resolved.Spec.Services[1].Env[0].ValueFrom)
+	for i := range p.Spec.Services {
+		assert.Equal(t, docker.ServiceSpecHash(p.Spec.Services[i], p.Spec),
+			docker.ServiceSpecHash(resolved.Spec.Services[i], resolved.Spec),
+			"resolving a Secret does not change a service's hash")
+	}
 
 	// Literal env var untouched.
 	assert.Equal(t, "wp", resolved.Spec.Services[0].Env[1].Value)

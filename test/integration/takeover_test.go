@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"NYCU-SDC/caravanserai/test/integration/testhelper"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -57,7 +58,7 @@ func createAssignedProject(t *testing.T, name string, marked bool) v1.Project {
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	drainBody(resp)
 
-	require.NoError(t, adapter.NewProjectStoreAdapter(suite.store).SetProjectScheduled(ctx, name, "node-a"))
+	require.NoError(t, adapter.NewProjectStoreAdapter(suite.store).SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-a"))
 	require.NoError(t, suite.store.UpdateProjectStatusWithRetry(ctx, name, func(s *v1.ProjectStatus) error {
 		s.Phase = v1.ProjectPhaseRunning
 		if marked {
@@ -168,8 +169,8 @@ func TestOperatorTakeoverReleases(t *testing.T) {
 	placement, err := stores.GetProjectPlacement(ctx, name)
 	require.NoError(t, err)
 	assert.Contains(t, placement.ExcludedNodes, "node-a")
-	require.ErrorIs(t, stores.SetProjectScheduled(ctx, name, "node-a"), store.ErrConflictState)
-	require.NoError(t, stores.SetProjectScheduled(ctx, name, "node-b"))
+	require.ErrorIs(t, stores.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-a"), store.ErrConflictState)
+	require.NoError(t, stores.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-b"))
 	got = getProject(t, name)
 	assert.Equal(t, p.Status.AssignmentGeneration+1, got.Status.AssignmentGeneration)
 
@@ -205,7 +206,7 @@ func TestOperatorTakeoverUnblocksWorkloadStoppedRelease(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, released)
-	require.ErrorIs(t, stores.SetProjectScheduled(ctx, name, "node-b"), store.ErrConflictState)
+	require.ErrorIs(t, stores.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-b"), store.ErrConflictState)
 
 	resp := postTakeover(t, name, testAdminToken, map[string]any{
 		"uid": ref.UID, "nodeRef": ref.NodeRef, "assignmentGeneration": ref.Generation, "requestID": "pending-" + ref.UID,
@@ -222,7 +223,7 @@ func TestOperatorTakeoverUnblocksWorkloadStoppedRelease(t *testing.T) {
 	got := getProject(t, name)
 	require.Len(t, got.Status.Recovery.CleanupObligations, 1, "the override must not add a second obligation")
 	assert.False(t, got.Status.Recovery.CleanupObligations[0].Resolved())
-	require.NoError(t, stores.SetProjectScheduled(ctx, name, "node-b"))
+	require.NoError(t, stores.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-b"))
 }
 
 // TestGraceExpiredRelease: with the ADR-0024 transitional release on, only a
@@ -252,8 +253,8 @@ func TestGraceExpiredRelease(t *testing.T) {
 	o := got.Status.Recovery.CleanupObligations[0]
 	assert.Equal(t, v1.ReleaseByGraceExpired, o.ReleaseAuthorization)
 	assert.False(t, o.Resolved(), "the old Node still owes cleanup")
-	require.ErrorIs(t, on.SetProjectScheduled(ctx, p.Name, "node-a"), store.ErrConflictState, "not back to the Node that owes cleanup")
-	require.NoError(t, on.SetProjectScheduled(ctx, p.Name, "node-b"))
+	require.ErrorIs(t, on.SetProjectScheduled(ctx, p.Name, testhelper.UID(t, suite.store, p.Name), "node-a"), store.ErrConflictState, "not back to the Node that owes cleanup")
+	require.NoError(t, on.SetProjectScheduled(ctx, p.Name, testhelper.UID(t, suite.store, p.Name), "node-b"))
 
 	const managed = "e2e-grace-managed"
 	drainBody(doRequest(t, http.MethodDelete, "/api/v1/projects/"+managed+"?force=true", nil))
@@ -266,7 +267,7 @@ func TestGraceExpiredRelease(t *testing.T) {
 	}))
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	drainBody(resp)
-	require.NoError(t, on.SetProjectScheduled(ctx, managed, "node-a"))
+	require.NoError(t, on.SetProjectScheduled(ctx, managed, testhelper.UID(t, suite.store, managed), "node-a"))
 	require.NoError(t, suite.store.UpdateProjectStatusWithRetry(ctx, managed, func(s *v1.ProjectStatus) error {
 		s.Phase = v1.ProjectPhaseRunning
 		return nil
@@ -288,7 +289,7 @@ func TestGraceExpiredRelease(t *testing.T) {
 	assert.True(t, o.ManagedDataOwed)
 
 	require.Equal(t, http.StatusNoContent, putEvidence(t, managed, "resources-removed", evidenceBody(uid, "node-a", gen)))
-	require.ErrorIs(t, on.SetProjectScheduled(ctx, managed, "node-a"), store.ErrConflictState, "local data still owed")
+	require.ErrorIs(t, on.SetProjectScheduled(ctx, managed, testhelper.UID(t, suite.store, managed), "node-a"), store.ErrConflictState, "local data still owed")
 
 	require.Equal(t, http.StatusNoContent, putEvidence(t, managed, "managed-data-quarantined", evidenceBody(uid, "node-a", gen)))
 	first := getProject(t, managed).Status.Recovery.CleanupObligations[0].ManagedDataQuarantined
@@ -299,7 +300,7 @@ func TestGraceExpiredRelease(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, putEvidence(t, managed, "managed-data-quarantined", evidenceBody(uid, "node-b", gen)), "not this Node's obligation")
 
 	// Back on the same Node it is a new generation that restores, per ADR-0024.
-	require.NoError(t, on.SetProjectScheduled(ctx, managed, "node-a"))
+	require.NoError(t, on.SetProjectScheduled(ctx, managed, testhelper.UID(t, suite.store, managed), "node-a"))
 	assert.Equal(t, gen+1, getProject(t, managed).Status.AssignmentGeneration)
 	assert.Equal(t, "20261031T000000Z-aaaaaaaa", getProject(t, managed).Status.Recovery.CommittedBackupID())
 }
@@ -328,16 +329,16 @@ func TestSchedulingBlockedCondition(t *testing.T) {
 		return nil
 	}
 
-	require.NoError(t, stores.SetSchedulingBlocked(ctx, name, "NoSuitableNode", "node-b lacks cpu"))
+	require.NoError(t, stores.SetSchedulingBlocked(ctx, name, testhelper.UID(t, suite.store, name), "NoSuitableNode", "node-b lacks cpu"))
 	c := find()
 	require.NotNil(t, c)
 	assert.Equal(t, "node-b lacks cpu", c.Message)
 	version := getProject(t, name).ObjectMeta.ResourceVersion
-	require.NoError(t, stores.SetSchedulingBlocked(ctx, name, "NoSuitableNode", "node-b lacks cpu"))
+	require.NoError(t, stores.SetSchedulingBlocked(ctx, name, testhelper.UID(t, suite.store, name), "NoSuitableNode", "node-b lacks cpu"))
 	assert.Equal(t, version, getProject(t, name).ObjectMeta.ResourceVersion, "a repeated reason must not write")
 
-	require.NoError(t, stores.SetProjectScheduled(ctx, name, "node-a"))
+	require.NoError(t, stores.SetProjectScheduled(ctx, name, testhelper.UID(t, suite.store, name), "node-a"))
 	assert.Nil(t, find(), "the assignment ends the wait")
-	require.NoError(t, stores.SetSchedulingBlocked(ctx, name, "NoSuitableNode", "late report"))
+	require.NoError(t, stores.SetSchedulingBlocked(ctx, name, testhelper.UID(t, suite.store, name), "NoSuitableNode", "late report"))
 	assert.Nil(t, find(), "a Project no longer Pending is not marked")
 }

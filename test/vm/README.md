@@ -69,6 +69,9 @@ Available: `vm`, `srv`, `api`, `ctl`, `wait_for`, `expect`, `observe`, `power_of
 | `join-tokens` | the 2026-11-06 CARA-138 trial |
 | `packages` | new with CARA-143; run it after `join-tokens` when both are given |
 | `node-authz` | new with CARA-140 |
+| `spec-update` | new with CARA-134 |
+| `overlap-partition` | new with ADR-0036 (`spec.overlap`) |
+| `default-backup` | new with the ADR-0029 default backup interval |
 
 Porting the offline-retention and pgdiff-restore trials (2026-11-05) is follow-up work.
 

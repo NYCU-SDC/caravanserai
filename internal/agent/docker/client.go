@@ -161,6 +161,24 @@ func (r *DockerRuntime) ReconcileProject(ctx context.Context, project *v1.Projec
 		log.Info("Service container reconciled", zap.String("service", svc.Name))
 	}
 
+	// 4. A service an update removed while the Project was still being
+	//    placed leaves its container behind; only this assignment's go.
+	listed := make(map[string]bool, len(project.Spec.Services))
+	for _, svc := range project.Spec.Services {
+		listed[svc.Name] = true
+	}
+	removed, err := r.unlistedContainers(ctx, project, listed)
+	if err != nil {
+		return err
+	}
+	owner := ownerOf(project)
+	for _, c := range removed {
+		if err := r.removeOwnedContainer(ctx, c.Name, owner, c.Service); err != nil {
+			return fmt.Errorf("remove container of removed service %q: %w", c.Service, err)
+		}
+		log.Info("Container of a removed service removed", zap.String("service", c.Service))
+	}
+
 	return nil
 }
 
@@ -946,11 +964,19 @@ func (r *DockerRuntime) buildBinds(namespace, projectName, uid string, svc v1.Se
 // is not already running. vols is the project's volume list, used to resolve
 // each mount's bind source by volume type.
 func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectName, uid string, generation int64, svc v1.ServiceDef, spec v1.ProjectSpec) (created bool, err error) {
+	return r.ensureContainerPulled(ctx, namespace, projectName, uid, generation, svc, spec, false)
+}
+
+// ensureContainerPulled is ensureContainer for a caller that may already have
+// pulled svc's image, as UpdateServices does before it stops anything.
+func (r *DockerRuntime) ensureContainerPulled(ctx context.Context, namespace, projectName, uid string, generation int64, svc v1.ServiceDef, spec v1.ProjectSpec, pulled bool) (created bool, err error) {
 	cName := ContainerName(projectName, svc.Name)
 	log := r.logger.With(
 		zap.String("container", cName),
 		zap.String("image", svc.Image),
 	)
+
+	specHash := ServiceSpecHash(svc, spec)
 
 	info, err := r.client.ContainerInspect(ctx, cName)
 	if err != nil && !dockerclient.IsErrNotFound(err) {
@@ -971,31 +997,43 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 		if oErr := r.checkContainerOwnership(cName, info, owner, svc.Name); oErr != nil {
 			return false, fmt.Errorf("refuse to adopt: %w", oErr)
 		}
-		if info.State.Running {
-			log.Debug("Container already running")
+		if labelsOf(info)[labelSpecHash] == specHash {
+			if info.State.Running {
+				log.Debug("Container already running")
+				return false, nil
+			}
+			// Stopped or exited — try to start it.
+			log.Info("Container stopped, restarting", zap.String("status", info.State.Status))
+			if startErr := r.client.ContainerStart(ctx, info.ID, container.StartOptions{}); startErr != nil {
+				return false, fmt.Errorf("start existing container: %w", startErr)
+			}
 			return false, nil
 		}
-		// Stopped or exited — try to start it.
-		log.Info("Container stopped, restarting", zap.String("status", info.State.Status))
-		if startErr := r.client.ContainerStart(ctx, info.ID, container.StartOptions{}); startErr != nil {
-			return false, fmt.Errorf("start existing container: %w", startErr)
+
+		// Ours, but built from another spec (ADR-0026). The new image is
+		// pulled before the old container goes, so a pull that fails leaves it
+		// in place.
+		log.Info("Container was built from an older spec, recreating")
+		if !pulled {
+			if err := r.pullImage(ctx, svc.Image); err != nil {
+				return false, err
+			}
+			pulled = true
 		}
-		return false, nil
+		if err := r.removeOwnedContainer(ctx, cName, owner, svc.Name); err != nil {
+			return false, fmt.Errorf("remove outdated container: %w", err)
+		}
 	}
 
 	// Container does not exist — pull image if needed, then create + start.
-
-	// Pull image (pull-on-create would also work, but explicit pull gives a
-	// better error message when the image is unavailable).
-	log.Info("Pulling image")
-	rc, pullErr := r.client.ImagePull(ctx, svc.Image, pullOptions())
-	if pullErr != nil {
-		return false, fmt.Errorf("pull image %q: %w", svc.Image, pullErr)
+	// An explicit pull, rather than pull-on-create, gives a better error when
+	// the image is unavailable.
+	if !pulled {
+		log.Info("Pulling image")
+		if err := r.pullImage(ctx, svc.Image); err != nil {
+			return false, err
+		}
 	}
-	// Drain and discard the pull progress stream; errors are reflected in the
-	// close of the reader.
-	_, _ = io.Copy(io.Discard, rc)
-	_ = rc.Close()
 
 	// Build env slice: ["KEY=VALUE", ...]
 	env := make([]string, len(svc.Env))
@@ -1014,6 +1052,7 @@ func (r *DockerRuntime) ensureContainer(ctx context.Context, namespace, projectN
 		labelNamespace:  namespace,
 		labelUID:        uid,
 		labelGeneration: generationLabel(generation),
+		labelSpecHash:   specHash,
 	}
 	if len(managedNames) > 0 {
 		labels[labelVolume] = strings.Join(managedNames, ",")

@@ -2,6 +2,7 @@ package project
 
 import (
 	"testing"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 
@@ -146,6 +147,36 @@ func TestValidateProjectSpecBackup(t *testing.T) {
 		{
 			name:    "negative interval is rejected",
 			spec:    specWithBackup(managed, &v1.ProjectBackupConfig{Interval: "-1h"}),
+			wantErr: "positive duration",
+		},
+		{
+			name: "disabled backup is valid",
+			spec: specWithBackup(managed, &v1.ProjectBackupConfig{Disabled: true}),
+		},
+		{
+			name:    "disabled backup with an interval is rejected",
+			spec:    specWithBackup(managed, &v1.ProjectBackupConfig{Disabled: true, Interval: "24h"}),
+			wantErr: "must be left out",
+		},
+		{
+			name:    "disabled backup with onMissing is rejected",
+			spec:    specWithBackup(managed, &v1.ProjectBackupConfig{Disabled: true, OnMissing: v1.VolumeOnMissingInitializeEmpty}),
+			wantErr: "must be left out",
+		},
+		{
+			name: "disabled backup with items is rejected",
+			spec: specWithBackup(managed, &v1.ProjectBackupConfig{Disabled: true,
+				Items: []v1.BackupItem{{Volume: "db-data", Strategy: v1.BackupStrategyOffline}}}),
+			wantErr: "must be left out",
+		},
+		{
+			name:    "disabled backup without any managed volume is rejected",
+			spec:    specWithBackup(ephemeral, &v1.ProjectBackupConfig{Disabled: true}),
+			wantErr: "requires at least one volume with type \"Managed\"",
+		},
+		{
+			name:    "an empty backup section is rejected rather than read as disabled",
+			spec:    specWithBackup(managed, &v1.ProjectBackupConfig{}),
 			wantErr: "positive duration",
 		},
 		{
@@ -446,4 +477,25 @@ func TestValidateProjectSpecConfiguredPostgresImage(t *testing.T) {
 	assert.Equal(t, v1.PostgresDifferentialImage, h.postgresImage, "an empty setting keeps the published image")
 	h = NewHandler(nil, nil, nil, WithPostgresDifferentialImage(copied))
 	assert.Equal(t, copied, h.postgresImage)
+}
+
+func TestDefaultBackupIntervalOption(t *testing.T) {
+	assert.Equal(t, v1.DefaultBackupInterval, NewHandler(nil, nil, nil).defaultBackupInterval)
+	assert.Equal(t, v1.DefaultBackupInterval, NewHandler(nil, nil, nil, WithDefaultBackupInterval(0)).defaultBackupInterval,
+		"zero keeps the default rather than producing an interval validation rejects")
+	assert.Equal(t, 168*time.Hour, NewHandler(nil, nil, nil, WithDefaultBackupInterval(168*time.Hour)).defaultBackupInterval)
+}
+
+func TestValidateProjectSpecOverlap(t *testing.T) {
+	spec := func(o v1.Overlap) v1.ProjectSpec {
+		s := specWithVolumes(nil, nil)
+		s.Overlap = o
+		return s
+	}
+	assert.NoError(t, validateProjectSpec(spec("")), "omitted means Allow")
+	assert.NoError(t, validateProjectSpec(spec(v1.OverlapAllow)))
+	assert.NoError(t, validateProjectSpec(spec(v1.OverlapForbid)))
+	assert.ErrorContains(t, validateProjectSpec(spec("forbid")), `spec.overlap must be "Allow" or "Forbid"`,
+		"values are case-sensitive, like every other enum in the spec")
+	assert.ErrorContains(t, validateProjectSpec(spec("Never")), `spec.overlap must be "Allow" or "Forbid"`)
 }

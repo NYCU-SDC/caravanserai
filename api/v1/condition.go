@@ -63,6 +63,10 @@
 //
 //	  ConditionTypeBackupActive — server-owned, part of the initial status of
 //	  a Project whose backup uses a strategy that is not running yet.
+//
+//	  ConditionTypeSpecApplied — set to False by the server when an update
+//	  changes the spec, and reported by the assigned agent once it runs the new
+//	  revision or fails to.
 package v1
 
 import "time"
@@ -224,6 +228,11 @@ const (
 	// says which. It is cleared when another move is asked for.
 	ConditionTypeEvictionFailed ConditionType = "EvictionFailed"
 
+	// ConditionTypeSpecApplied says whether the containers run the Project's
+	// latest spec revision. False while an update is waiting for the Agent or
+	// failed before anything was stopped; True once every service runs it.
+	ConditionTypeSpecApplied ConditionType = "SpecApplied"
+
 	// ConditionTypeDiskPressure indicates whether the node's disk usage is
 	// approaching capacity. Set by the NodeConditionController based on
 	// the Agent's reported Capacity and Allocatable values.
@@ -250,6 +259,19 @@ const ReasonBackupAttemptFailed = "BackupAttemptFailed"
 
 // ReasonRestoredFromBackup is the reason of DataRestored.
 const ReasonRestoredFromBackup = "RestoredFromBackup"
+
+// SpecApplied reasons. An Agent reporting a failure may give its own reason,
+// such as ImagePullFailed.
+const (
+	// ReasonSpecUpdatePending: the spec changed and the assigned Agent has
+	// not reported the new revision running yet.
+	ReasonSpecUpdatePending = "UpdatePending"
+	// ReasonSpecApplied: every service runs the latest revision.
+	ReasonSpecApplied = "Applied"
+	// ReasonImagePullFailed: an image of the new revision could not be
+	// pulled, so the old containers were left running.
+	ReasonImagePullFailed = "ImagePullFailed"
+)
 
 // MaintenanceStaleAfter is how long a Maintenance condition stays meaningful.
 // An agent that dies mid-backup leaves the condition behind with nothing to

@@ -96,9 +96,8 @@ func TestProjectSchedulerReconcile(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, res.Requeue, "should requeue when no node fits")
 		assert.Empty(t, ps.SetProjectScheduledCalls, "must not over-commit")
-		phase, nodeRef, _ := ps.GetProjectPhase(context.Background(), "my-app")
-		assert.Equal(t, v1.ProjectPhasePending, phase)
-		assert.Empty(t, nodeRef)
+		placement, _ := ps.GetProjectPlacement(context.Background(), "my-app")
+		assert.Equal(t, v1.ProjectPhasePending, placement.Phase)
 	})
 
 	t.Run("booked capacity is counted so a node fills up", func(t *testing.T) {
@@ -176,7 +175,7 @@ func TestProjectSchedulerReconcile(t *testing.T) {
 
 	t.Run("project not found returns without error", func(t *testing.T) {
 		ps := newFakeSchedulerProjectStore()
-		// Do not add "my-app" — GetProjectPhase returns store.ErrNotFound.
+		// Do not add "my-app" — GetProjectPlacement returns store.ErrNotFound.
 		ns := newFakeSchedulerNodeStore("node-1")
 		ctrl := NewProjectSchedulerController(zap.NewNop(), ps, ns, nil)
 
@@ -204,4 +203,31 @@ func TestProjectSchedulerWaitsOutCleanupObligation(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, res.Requeue)
 	assert.Equal(t, v1.ProjectPhasePending, ps.projects["my-app"].Phase)
+}
+
+// CARA-81 stage 3: the assignment is written for the lifetime the scheduler
+// read, and a Project recreated in between is left to its own pass.
+func TestSchedulerAssignsTheLifetimeItRead(t *testing.T) {
+	t.Run("the read UID goes with the write", func(t *testing.T) {
+		ps := newFakeSchedulerProjectStore()
+		ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhasePending}
+		ctrl := NewProjectSchedulerController(zap.NewNop(), ps, newFakeSchedulerNodeStore("node-a"), nil)
+
+		_, err := ctrl.Reconcile(context.Background(), "my-app")
+		require.NoError(t, err)
+		require.Len(t, ps.SetProjectScheduledCalls, 1)
+		assert.Equal(t, "uid-my-app", ps.SetProjectScheduledCalls[0].UID)
+	})
+
+	t.Run("a Project recreated since the read is not reported blocked", func(t *testing.T) {
+		ps := newFakeSchedulerProjectStore()
+		ps.projects["my-app"] = schedulerProjectRecord{Phase: v1.ProjectPhasePending}
+		ps.scheduleErrs["my-app"] = fmt.Errorf("%w: project %q is no longer lifetime uid-my-app", store.ErrStaleAssignment, "my-app")
+		ctrl := NewProjectSchedulerController(zap.NewNop(), ps, newFakeSchedulerNodeStore("node-a"), nil)
+
+		res, err := ctrl.Reconcile(context.Background(), "my-app")
+		require.NoError(t, err)
+		assert.True(t, res.Requeue, "the new lifetime is looked at again")
+		assert.Empty(t, ps.SchedulingBlockedCalls, "nothing from this pass may land on the new lifetime")
+	})
 }

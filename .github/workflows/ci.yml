@@ -23,6 +23,13 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # Tests behind the e2e tag outside test/integration (Docker-backed
+      # agent tests, store races) are not run by CI, but they must still
+      # compile: internal/agent/pgdiff_docker_test.go once stopped compiling
+      # and nothing noticed.
+      - name: Compile e2e-tagged tests
+        run: go vet -tags e2e ./...
+
       - name: Run unit tests
         run: make test
 
