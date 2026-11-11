@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -207,7 +208,11 @@ func TestSupervisorRunsBackupOnSchedule(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond, "a scheduled backup should have completed")
 
 	assert.Contains(t, containers.history(), "stop")
-	assert.Contains(t, containers.history(), "start")
+	// The containers are started again on the way out of the run, after the
+	// backup is committed: the manifest can be seen a moment before it.
+	assert.Eventually(t, func() bool {
+		return slices.Contains(containers.history(), "start")
+	}, 2*time.Second, 10*time.Millisecond, "the containers should be started again")
 }
 
 func TestSupervisorStopHaltsScheduledBackups(t *testing.T) {
