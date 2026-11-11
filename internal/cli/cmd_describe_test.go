@@ -83,6 +83,8 @@ var describeNodeCoveredFields = newStringSet(
 	"UID",
 	"Namespace",
 	"ResourceVersion",
+	// Always zero on a Node; not printed.
+	"SpecRevision",
 	"Labels",
 	"Annotations",
 	"CreatedAt",
@@ -122,19 +124,23 @@ var describeProjectCoveredFields = newStringSet(
 	"UID",
 	"Namespace",
 	"ResourceVersion",
+	"SpecRevision",
 	"Labels",
 	"Annotations",
 	"CreatedAt",
 	"UpdatedAt",
 	// Spec
 	"Spec.Size",
+	"Spec.Overlap",
 	"Spec.Services",
 	"Spec.Volumes",
 	"Spec.Backup.Interval",
+	"Spec.Backup.Disabled",
 	"Spec.Backup.OnMissing",
 	"Spec.Backup.Items",
 	"Spec.Ingress",
 	"Spec.ExpireAt",
+	"Spec.RestartedAt",
 	// Status
 	"Status.Phase",
 	"Status.NodeRef",
@@ -144,6 +150,7 @@ var describeProjectCoveredFields = newStringSet(
 	"Status.Eviction.State",
 	"Status.Eviction.TargetTier",
 	"Status.AssignmentGeneration",
+	"Status.ObservedSpecRevision",
 	"Status.AssignmentHistory",
 	"Status.Recovery.CleanupObligations",
 	"Status.Recovery.HealthySinceGeneration",
@@ -174,6 +181,8 @@ var describeSecretCoveredFields = newStringSet(
 	"UID",
 	"Namespace",
 	"ResourceVersion",
+	// Always zero on a Secret; not printed.
+	"SpecRevision",
 	"Labels",
 	"Annotations",
 	"CreatedAt",
@@ -383,6 +392,25 @@ func TestDescribeProjectEviction(t *testing.T) {
 			var buf bytes.Buffer
 			describeProject(&buf, &v1.Project{Status: v1.ProjectStatus{Eviction: tt.eviction}})
 			assert.Regexp(t, `(?m)^  Eviction:\s+`+regexp.QuoteMeta(tt.want)+`$`, buf.String())
+		})
+	}
+}
+
+func TestDescribeProjectOverlap(t *testing.T) {
+	tests := []struct {
+		name    string
+		overlap v1.Overlap
+		want    string
+	}{
+		{name: "declared", overlap: v1.OverlapForbid, want: "Forbid"},
+		{name: "omitted shows the default", overlap: "", want: "Allow (default)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			describeProject(&buf, &v1.Project{Spec: v1.ProjectSpec{Overlap: tt.overlap}})
+			assert.Regexp(t, `(?m)^  Overlap:\s+`+regexp.QuoteMeta(tt.want)+`$`, buf.String())
 		})
 	}
 }

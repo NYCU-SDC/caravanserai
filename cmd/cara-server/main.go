@@ -189,7 +189,8 @@ func main() {
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
 	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, pgStore, agentDialer, problemWriter))
 	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter,
-		projecthandler.WithPostgresDifferentialImage(cfg.PostgresDifferentialImage)))
+		projecthandler.WithPostgresDifferentialImage(cfg.PostgresDifferentialImage),
+		projecthandler.WithDefaultBackupInterval(cfg.DefaultBackupInterval)))
 	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
 	apiSrv.Register(tokenhandler.NewHandler(logger, pgStore, problemWriter))
 

@@ -360,6 +360,10 @@
           "type": "integer",
           "description": "ResourceVersion is set by the server and incremented on every write. It\nis currently a pure write-counter; optimistic-concurrency conflict\nchecking is a separate post-1.0 task."
         },
+        "specRevision": {
+          "type": "integer",
+          "description": "SpecRevision counts the versions of a Project's spec: 1 when the\nProject is created, and one more each time an update changes the spec's\ncontent. An update that sends the same spec leaves it alone. It is what\nstatus.observedSpecRevision is compared with to tell whether the latest\nspec is running. Unlike ResourceVersion it does not move on status\nwrites, and it is not the assignment generation, which counts\nplacements on Nodes. Set by the server; any client value is ignored.\nZero on kinds other than Project."
+        },
         "labels": {
           "additionalProperties": {
             "type": "string"
@@ -391,6 +395,14 @@
         "name"
       ],
       "description": "ObjectMeta holds identity and classification metadata common to all resources."
+    },
+    "Overlap": {
+      "type": "string",
+      "enum": [
+        "Allow",
+        "Forbid"
+      ],
+      "description": "Whether two copies of the Project may run at once. Defaults to Allow when omitted."
     },
     "Project": {
       "properties": {
@@ -426,7 +438,11 @@
       "properties": {
         "interval": {
           "type": "string",
-          "description": "Interval is the time between backup runs, e.g. \"168h\", \"1h\". Parsed with\ntime.ParseDuration; must be positive."
+          "description": "Interval is the time between backup runs, e.g. \"168h\", \"1h\". Parsed with\ntime.ParseDuration; must be positive unless Disabled is set, and empty\nwhen it is."
+        },
+        "disabled": {
+          "type": "boolean",
+          "description": "Disabled turns periodic backup off. A disabled Project is never moved off\na lost Node automatically: its last backup, if any, falls further behind\nthe data every day, and restoring it would discard everything since\nwithout anyone deciding to. Interval, OnMissing and Items must be empty."
         },
         "onMissing": {
           "$ref": "#/$defs/VolumeOnMissing",
@@ -442,9 +458,6 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "interval"
-      ],
       "description": "ProjectBackupConfig configures periodic object-store backup of a Project's Managed volumes."
     },
     "ProjectBackupStatus": {
@@ -595,7 +608,11 @@
         },
         "backup": {
           "$ref": "#/$defs/ProjectBackupConfig",
-          "description": "Backup configures periodic backup of every Managed volume in this\nProject. Omitting it means the volumes persist on the node but are\nnever uploaded."
+          "description": "Backup configures periodic backup of every Managed volume in this\nProject. A Project with a Managed volume that omits it is given the\nserver's default interval on create and update (ADR-0029); backup is\nturned off with backup.disabled."
+        },
+        "overlap": {
+          "$ref": "#/$defs/Overlap",
+          "description": "Overlap says whether two copies of this Project may run at once, as they\ndo when a Node is cut off from the server but keeps running and the\nProject is started elsewhere. Forbid is for a service with side effects\noutside its own data: scheduled jobs, webhooks, mail, bots. Omitting it\nmeans OverlapAllow (ADR-0036)."
         },
         "ingress": {
           "items": {
@@ -608,6 +625,11 @@
           "type": "string",
           "format": "date-time",
           "description": "ExpireAt, when set, causes the GC controller to delete the Project\nafter this time. Useful for ephemeral preview environments."
+        },
+        "restartedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RestartedAt is when `caractl rollout restart` last asked for every\nservice to be recreated. It is part of every service's spec hash, so a\nnew value recreates them all; that is how a rotated Secret reaches the\ncontainers (ADR-0026). An update that leaves it out keeps the stored\nvalue, so applying a manifest after a restart does not restart again."
         }
       },
       "additionalProperties": false,
@@ -652,6 +674,10 @@
           },
           "type": "array",
           "description": "Conditions is a list of granular observable states."
+        },
+        "observedSpecRevision": {
+          "type": "integer",
+          "description": "ObservedSpecRevision is the latest metadata.specRevision the assigned\nAgent has reported running in full. It never exceeds specRevision and\nnever goes back. While it is behind, the SpecApplied condition says why."
         },
         "recovery": {
           "$ref": "#/$defs/ProjectRecoveryStatus",

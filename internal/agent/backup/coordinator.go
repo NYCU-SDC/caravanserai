@@ -40,6 +40,12 @@ const (
 	// starts the database, then restarts it to turn archiving on. A backup or
 	// recovery alongside would see a database that stops underneath it.
 	OpPlacement Operation = "Placement"
+
+	// OpUpdate is the agent recreating a Running Project's outdated containers
+	// after its spec changed (ADR-0026). A backup alongside would archive a
+	// volume while a container was being swapped, and a recovery would read
+	// the containers the update removed as crashed.
+	OpUpdate Operation = "Update"
 )
 
 // Coordinator serialises operations per Project and lets unrelated parts of

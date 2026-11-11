@@ -176,3 +176,31 @@ func TestDescribeSecret_NoData(t *testing.T) {
 	assert.True(t, strings.Contains(buf.String(), "<none>"),
 		"describeSecret should show <none> when Spec.Data is empty")
 }
+
+func TestSpecColumn(t *testing.T) {
+	project := func(rev, observed int64, conds ...v1.Condition) v1.Project {
+		var p v1.Project
+		p.SpecRevision = rev
+		p.Status.ObservedSpecRevision = observed
+		p.Status.Conditions = conds
+		return p
+	}
+	pending := v1.Condition{Type: v1.ConditionTypeSpecApplied, Status: v1.ConditionFalse, Reason: v1.ReasonSpecUpdatePending}
+	pullFailed := v1.Condition{Type: v1.ConditionTypeSpecApplied, Status: v1.ConditionFalse, Reason: v1.ReasonImagePullFailed}
+
+	for _, tc := range []struct {
+		name string
+		p    v1.Project
+		want string
+	}{
+		{"a server without revisions", project(0, 0), "-"},
+		{"the latest revision runs", project(3, 3), "3"},
+		{"waiting for the Agent", project(3, 2, pending), "3 (running 2)"},
+		{"the Agent said why not", project(3, 2, pullFailed), "3 (running 2, ImagePullFailed)"},
+		{"never reported yet", project(1, 0), "1 (running 0)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, specColumn(tc.p))
+		})
+	}
+}

@@ -38,6 +38,16 @@ type ObjectMeta struct {
 	// checking is a separate post-1.0 task.
 	ResourceVersion int64 `json:"resourceVersion,omitempty" yaml:"resourceVersion,omitempty"`
 
+	// SpecRevision counts the versions of a Project's spec: 1 when the
+	// Project is created, and one more each time an update changes the spec's
+	// content. An update that sends the same spec leaves it alone. It is what
+	// status.observedSpecRevision is compared with to tell whether the latest
+	// spec is running. Unlike ResourceVersion it does not move on status
+	// writes, and it is not the assignment generation, which counts
+	// placements on Nodes. Set by the server; any client value is ignored.
+	// Zero on kinds other than Project.
+	SpecRevision int64 `json:"specRevision,omitempty" yaml:"specRevision,omitempty"`
+
 	// Labels are arbitrary key/value pairs used for selection and grouping.
 	Labels map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 
