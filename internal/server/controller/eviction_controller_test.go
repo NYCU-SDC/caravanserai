@@ -180,7 +180,7 @@ func (f *fakeEvictionStore) CancelQueuedEviction(_ context.Context, name, fromNo
 	return true, nil
 }
 
-func (f *fakeEvictionStore) RequestEviction(_ context.Context, name, fromNode, reason string, tier v1.NodeTier) error {
+func (f *fakeEvictionStore) RequestEviction(_ context.Context, name, fromNode, reason string, tier v1.NodeTier, avoid []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.projects[name]
@@ -194,7 +194,7 @@ func (f *fakeEvictionStore) RequestEviction(_ context.Context, name, fromNode, r
 		return store.ErrConflictState
 	}
 	now := f.clock.Now()
-	p.Eviction = &v1.ProjectEviction{Reason: reason, FromNode: fromNode, State: v1.EvictionStateQueued, TargetTier: tier, RequestedAt: now, StateSince: now}
+	p.Eviction = &v1.ProjectEviction{Reason: reason, FromNode: fromNode, State: v1.EvictionStateQueued, TargetTier: tier, AvoidNodes: avoid, RequestedAt: now, StateSince: now}
 	f.requests = append(f.requests, name)
 	return nil
 }
@@ -603,6 +603,33 @@ func TestEvictionController_TargetTier(t *testing.T) {
 		env := newTieredEvictionEnv(t, map[string]string{"node-a": "primary", "node-b": "backup"})
 		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
 		env.store.request("app", "Drain", 0)
+
+		env.reconcile(t)
+		assert.Equal(t, v1.EvictionStateBackingUp, stateOf(env.store.get("app")))
+	})
+}
+
+func TestEvictionController_AvoidNodes(t *testing.T) {
+	t.Run("the precheck does not count nodes the move must avoid", func(t *testing.T) {
+		env := newTieredEvictionEnv(t, map[string]string{"node-a": "backup", "node-b": "primary"})
+		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+		env.store.request("app", "FailBack", 0)
+		env.store.projects["app"].Eviction.TargetTier = v1.NodeTierPrimary
+		env.store.projects["app"].Eviction.AvoidNodes = []string{"node-b"}
+
+		env.reconcile(t)
+		p := env.store.get("app")
+		require.NotNil(t, p.Failure)
+		assert.Equal(t, EvictionFailedNoCapacity, p.Failure.Reason)
+		assert.Empty(t, env.store.backupsAsked)
+	})
+
+	t.Run("another node in the tier is still a candidate", func(t *testing.T) {
+		env := newTieredEvictionEnv(t, map[string]string{"node-a": "backup", "node-b": "primary", "node-c": "primary"})
+		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+		env.store.request("app", "FailBack", 0)
+		env.store.projects["app"].Eviction.TargetTier = v1.NodeTierPrimary
+		env.store.projects["app"].Eviction.AvoidNodes = []string{"node-b"}
 
 		env.reconcile(t)
 		assert.Equal(t, v1.EvictionStateBackingUp, stateOf(env.store.get("app")))

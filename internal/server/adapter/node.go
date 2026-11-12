@@ -62,25 +62,9 @@ func (a *NodeStoreAdapter) SetNodeState(ctx context.Context, name string, state 
 		if status.LastHeartbeat.After(observedHeartbeat) {
 			return nil
 		}
-		status.State = state
-		condStatus := v1.ConditionTrue
-		if state != v1.NodeStateReady {
-			condStatus = v1.ConditionFalse
-		}
-		ready := v1.Condition{
-			Type:               v1.ConditionTypeReady,
-			Status:             condStatus,
-			Reason:             reason,
-			Message:            message,
-			LastTransitionTime: now,
-		}
-		for i, c := range status.Conditions {
-			if c.Type == v1.ConditionTypeReady {
-				status.Conditions[i] = ready
-				return nil
-			}
-		}
-		status.Conditions = append(status.Conditions, ready)
+		// Through SetState, so a NotReady is recorded for fail-back's flap
+		// count (CARA-122) on the status as it is when written.
+		status.SetState(state, reason, message, now)
 		return nil
 	})
 }
@@ -121,10 +105,11 @@ func (a *NodeReadyAdapter) ListReadyNodes(ctx context.Context) ([]controller.Rea
 		// cordoned as well.
 		if n.Status.State == v1.NodeStateReady && !n.Spec.Unschedulable && !n.Spec.Drain {
 			ready = append(ready, controller.ReadyNode{
-				Name:        n.Name,
-				Labels:      n.Labels,
-				Allocatable: n.Status.Allocatable,
-				Conditions:  n.Status.Conditions,
+				Name:           n.Name,
+				Labels:         n.Labels,
+				Allocatable:    n.Status.Allocatable,
+				Conditions:     n.Status.Conditions,
+				RecentNotReady: n.Status.RecentNotReady,
 			})
 		}
 	}

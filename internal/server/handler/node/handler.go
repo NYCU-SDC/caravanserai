@@ -453,7 +453,11 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 func mergeHeartbeat(status *v1.NodeStatus, req heartbeatRequest, now time.Time) {
 	status.LastHeartbeat = now
 	if req.State != "" {
-		status.State = req.State
+		// Through SetState, so a heartbeat that brings a Node back also
+		// records when: the Ready condition is how fail-back tells how long a
+		// Node has been stable. A heartbeat that changes nothing writes
+		// nothing new.
+		status.SetState(req.State, "AgentHeartbeat", "Agent reported "+string(req.State), now)
 	}
 	if req.Network.OverlayIP != "" {
 		status.Network.OverlayIP = req.Network.OverlayIP

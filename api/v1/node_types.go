@@ -221,6 +221,12 @@ type NodeStatus struct {
 	// Conditions is a list of observable Node conditions.
 	Conditions []Condition `json:"conditions,omitempty" yaml:"conditions,omitempty"`
 
+	// RecentNotReady are the times the Node went NotReady, oldest first,
+	// kept for NotReadyHistoryRetention and at most NotReadyHistoryMax
+	// entries. Fail-back reads it to wait longer before trusting a Node that
+	// keeps failing. Written by the server through SetState.
+	RecentNotReady []time.Time `json:"recentNotReady,omitempty" yaml:"recentNotReady,omitempty"`
+
 	// Drain is the progress of draining the Node, set while Spec.Drain is.
 	Drain *NodeDrainStatus `json:"drain,omitempty" yaml:"drain,omitempty"`
 }

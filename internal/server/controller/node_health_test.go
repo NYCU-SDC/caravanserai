@@ -109,3 +109,33 @@ func TestNodeHealthReconcile(t *testing.T) {
 		assert.Empty(t, s.SetNodeStateCalls)
 	})
 }
+
+// After a server outage every heartbeat is old. Within the startup grace no
+// Node is marked NotReady, a NotReady Node is still marked Ready once heard
+// from, and after the grace a silent Node is marked NotReady as usual.
+func TestNodeHealthStartupGrace(t *testing.T) {
+	clk := newFakeClock()
+	s := newFakeNodeStore()
+	s.nodes["silent"] = NodeStatusSnapshot{LastHeartbeat: clk.Time.Add(-time.Hour), State: v1.NodeStateReady}
+	s.nodes["back"] = NodeStatusSnapshot{LastHeartbeat: clk.Time.Add(-time.Second), State: v1.NodeStateNotReady}
+	ctrl := NewNodeHealthController(zap.NewNop(), s, nil, WithClock(clk), WithStartupGrace(NodeHeartbeatTimeout))
+
+	for _, n := range []string{"silent", "back"} {
+		_, err := ctrl.Reconcile(context.Background(), n)
+		require.NoError(t, err)
+	}
+	require.Len(t, s.SetNodeStateCalls, 1, "only the node heard from is changed")
+	assert.Equal(t, "back", s.SetNodeStateCalls[0].Name)
+	assert.Equal(t, v1.NodeStateReady, s.SetNodeStateCalls[0].State)
+
+	clk.Time = clk.Time.Add(NodeHeartbeatTimeout - time.Second)
+	_, err := ctrl.Reconcile(context.Background(), "silent")
+	require.NoError(t, err)
+	assert.Len(t, s.SetNodeStateCalls, 1, "still within the grace")
+
+	clk.Time = clk.Time.Add(time.Second)
+	_, err = ctrl.Reconcile(context.Background(), "silent")
+	require.NoError(t, err)
+	require.Len(t, s.SetNodeStateCalls, 2)
+	assert.Equal(t, v1.NodeStateNotReady, s.SetNodeStateCalls[1].State)
+}

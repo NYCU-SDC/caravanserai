@@ -31,7 +31,7 @@ type fakeDrainStore struct {
 
 var _ DrainStore = (*fakeDrainStore)(nil)
 
-func (f *fakeDrainStore) RequestEviction(_ context.Context, name, fromNode, reason string, _ v1.NodeTier) error {
+func (f *fakeDrainStore) RequestEviction(_ context.Context, name, fromNode, reason string, _ v1.NodeTier, _ []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i := range f.projects {

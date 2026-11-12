@@ -228,7 +228,8 @@ func main() {
 
 	ctrlManager := controller.NewManager(logger)
 
-	ctrlManager.Add(controller.NewNodeHealthController(logger, nodeAdapter, eventBus))
+	ctrlManager.Add(controller.NewNodeHealthController(logger, nodeAdapter, eventBus,
+		controller.WithStartupGrace(controller.NodeHeartbeatTimeout)))
 	ctrlManager.Add(controller.NewProjectSchedulerController(logger,
 		projectAdapter,
 		adapter.NewNodeReadyAdapter(pgStore),
@@ -271,11 +272,23 @@ func main() {
 	if failbackWindow == nil {
 		logger.Info("Fail-back disabled (failback_window is not set)")
 	} else {
-		logger.Info("Fail-back enabled", zap.String("window", failbackWindow.Describe(time.Now())))
+		policy := failbackPolicy(cfg)
+		if err := policy.Validate(); err != nil {
+			logger.Fatal("Invalid fail-back configuration", zap.Error(err))
+		}
+		logger.Info("Fail-back enabled",
+			zap.String("window", failbackWindow.Describe(time.Now())),
+			zap.Duration("stableWindow", policy.StableWindow),
+			zap.Duration("flapWindow", policy.FlapWindow),
+			zap.Int("backoffMultiplier", policy.BackoffMultiplier),
+			zap.Duration("maxStableWindow", policy.MaxStableWindow),
+			zap.Duration("cooldown", policy.Cooldown),
+			zap.Float64("minFreePercent", policy.MinFreePercent))
 		ctrlManager.Add(controller.NewFailbackController(logger,
 			projectAdapter,
 			adapter.NewNodeReadyAdapter(pgStore),
 			failbackWindow,
+			policy,
 		))
 	}
 	// TODO: ProjectGCController — handle spec.expireAt (post-MVP)
@@ -320,6 +333,33 @@ func main() {
 	}
 
 	logger.Info("cara-server stopped")
+}
+
+// failbackPolicy is the default fail-back policy with whatever the
+// configuration overrides; a zero setting keeps the default. So the cooldown
+// and the free-room threshold cannot be switched off with 0; a tiny value
+// (1s, 0.01) has the same effect.
+func failbackPolicy(cfg config.Config) controller.FailbackPolicy {
+	p := controller.DefaultFailbackPolicy()
+	if cfg.FailbackStableWindow > 0 {
+		p.StableWindow = cfg.FailbackStableWindow
+	}
+	if cfg.FailbackFlapWindow > 0 {
+		p.FlapWindow = cfg.FailbackFlapWindow
+	}
+	if cfg.FailbackBackoffMultiplier > 0 {
+		p.BackoffMultiplier = cfg.FailbackBackoffMultiplier
+	}
+	if cfg.FailbackMaxStableWindow > 0 {
+		p.MaxStableWindow = cfg.FailbackMaxStableWindow
+	}
+	if cfg.FailbackCooldown > 0 {
+		p.Cooldown = cfg.FailbackCooldown
+	}
+	if cfg.FailbackMinFreePercent > 0 {
+		p.MinFreePercent = cfg.FailbackMinFreePercent
+	}
+	return p
 }
 
 // readBreakGlassToken returns the token in path, or "" when path is empty. A

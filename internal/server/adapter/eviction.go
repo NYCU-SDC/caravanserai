@@ -26,7 +26,7 @@ var (
 // a trigger may repeat itself; a move asked for by another trigger, or off
 // another node, is store.ErrConflictState, so the caller is not told its own
 // move was queued when it was not.
-func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNode, reason string, targetTier v1.NodeTier) error {
+func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNode, reason string, targetTier v1.NodeTier, avoid []string) error {
 	if targetTier != "" && !targetTier.IsValid() {
 		return fmt.Errorf("request eviction of %q: invalid target tier %q", name, targetTier)
 	}
@@ -48,6 +48,7 @@ func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNod
 			FromNode:    fromNode,
 			State:       v1.EvictionStateQueued,
 			TargetTier:  targetTier,
+			AvoidNodes:  slices.Clone(avoid),
 			RequestedAt: now,
 			StateSince:  now,
 		}

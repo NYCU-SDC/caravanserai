@@ -28,7 +28,12 @@ func createRunningProject(t *testing.T, s *controllerhelper.Suite, name, node st
 			Size:    v1.ProjectSizeSmall,
 			Volumes: []v1.VolumeDef{{Name: "data", Type: v1.VolumeTypeManaged}},
 		},
-		Status: v1.ProjectStatus{Phase: v1.ProjectPhaseRunning, NodeRef: node, AssignmentGeneration: 1},
+		Status: v1.ProjectStatus{
+			Phase: v1.ProjectPhaseRunning, NodeRef: node, AssignmentGeneration: 1,
+			Conditions: []v1.Condition{{
+				Type: v1.ConditionTypePhase, Status: v1.ConditionTrue, Reason: "ContainersRunning", LastTransitionTime: longStable,
+			}},
+		},
 	}))
 }
 
@@ -115,7 +120,7 @@ func TestPlannedMoveEndToEnd(t *testing.T) {
 	s.Start(t)
 
 	ctx := context.Background()
-	require.NoError(t, adapter.NewProjectStoreAdapter(s.Store).RequestEviction(ctx, "evict-app", "evict-a", "Drain", ""))
+	require.NoError(t, adapter.NewProjectStoreAdapter(s.Store).RequestEviction(ctx, "evict-app", "evict-a", "Drain", "", nil))
 
 	waitForEvictionState(t, s, "evict-app", v1.EvictionStateBackingUp)
 	p, err := s.Store.GetProject(ctx, "evict-app")
@@ -153,8 +158,8 @@ func TestPlannedMovesRunOneAtATime(t *testing.T) {
 
 	ctx := context.Background()
 	evictor := adapter.NewProjectStoreAdapter(s.Store)
-	require.NoError(t, evictor.RequestEviction(ctx, "evict-first", "evict-a", "Drain", ""))
-	require.NoError(t, evictor.RequestEviction(ctx, "evict-second", "evict-a", "Drain", ""))
+	require.NoError(t, evictor.RequestEviction(ctx, "evict-first", "evict-a", "Drain", "", nil))
+	require.NoError(t, evictor.RequestEviction(ctx, "evict-second", "evict-a", "Drain", "", nil))
 
 	waitForEvictionState(t, s, "evict-first", v1.EvictionStateBackingUp)
 	assert.Never(t, func() bool {
@@ -178,7 +183,7 @@ func TestPlannedMoveRefusedWithoutCapacity(t *testing.T) {
 	s.Start(t)
 
 	ctx := context.Background()
-	require.NoError(t, adapter.NewProjectStoreAdapter(s.Store).RequestEviction(ctx, "evict-app", "evict-only", "Drain", ""))
+	require.NoError(t, adapter.NewProjectStoreAdapter(s.Store).RequestEviction(ctx, "evict-app", "evict-only", "Drain", "", nil))
 
 	controllerhelper.WaitForCondition(t, 20*time.Second, 200*time.Millisecond, "EvictionFailed NoCapacity", func() bool {
 		p, err := s.Store.GetProject(ctx, "evict-app")
@@ -208,10 +213,10 @@ func TestRequestEviction(t *testing.T) {
 
 	createRunningProject(t, s, "req-app", "node-a")
 
-	err := evictor.RequestEviction(ctx, "req-app", "node-b", "Drain", "")
+	err := evictor.RequestEviction(ctx, "req-app", "node-b", "Drain", "", nil)
 	assert.ErrorIs(t, err, store.ErrConflictState, "not running on the node named")
 
-	require.NoError(t, evictor.RequestEviction(ctx, "req-app", "node-a", "Drain", ""))
+	require.NoError(t, evictor.RequestEviction(ctx, "req-app", "node-a", "Drain", "", nil))
 	first, err := s.Store.GetProject(ctx, "req-app")
 	require.NoError(t, err)
 	require.NotNil(t, first.Status.Eviction)
@@ -219,15 +224,15 @@ func TestRequestEviction(t *testing.T) {
 	assert.Equal(t, "Drain", first.Status.Eviction.Reason)
 	assert.Equal(t, "node-a", first.Status.Eviction.FromNode)
 
-	require.NoError(t, evictor.RequestEviction(ctx, "req-app", "node-a", "Drain", ""), "asking again for the same move")
-	assert.ErrorIs(t, evictor.RequestEviction(ctx, "req-app", "node-a", "FailBack", ""), store.ErrConflictState,
+	require.NoError(t, evictor.RequestEviction(ctx, "req-app", "node-a", "Drain", "", nil), "asking again for the same move")
+	assert.ErrorIs(t, evictor.RequestEviction(ctx, "req-app", "node-a", "FailBack", "", nil), store.ErrConflictState,
 		"another trigger is told its move was not queued")
 	again, err := s.Store.GetProject(ctx, "req-app")
 	require.NoError(t, err)
 	assert.Equal(t, "Drain", again.Status.Eviction.Reason, "asking again does not start a second move")
 	assert.True(t, again.Status.Eviction.RequestedAt.Equal(first.Status.Eviction.RequestedAt))
 
-	assert.ErrorIs(t, evictor.RequestEviction(ctx, "no-such-project", "node-a", "Drain", ""), store.ErrNotFound)
+	assert.ErrorIs(t, evictor.RequestEviction(ctx, "no-such-project", "node-a", "Drain", "", nil), store.ErrNotFound)
 }
 
 // Review A1: evidence the agent sends for a planned move counts only while
@@ -259,12 +264,12 @@ func TestStopEvidenceForAMoveNeedsThatMove(t *testing.T) {
 	assert.ErrorIs(t, report("no-move", &someMove), store.ErrConflictState, "the move was called off")
 
 	createRunningProject(t, s, "queued", "evict-a")
-	require.NoError(t, a.RequestEviction(ctx, "queued", "evict-a", "Drain", ""))
+	require.NoError(t, a.RequestEviction(ctx, "queued", "evict-a", "Drain", "", nil))
 	queuedSince := since("queued")
 	assert.ErrorIs(t, report("queued", &queuedSince), store.ErrConflictState, "the move has not asked for the backup yet")
 
 	createRunningProject(t, s, "backing-up", "evict-a")
-	require.NoError(t, a.RequestEviction(ctx, "backing-up", "evict-a", "Drain", ""))
+	require.NoError(t, a.RequestEviction(ctx, "backing-up", "evict-a", "Drain", "", nil))
 	require.NoError(t, a.StartEvictionBackup(ctx, "backing-up", "evict-a"))
 	assert.ErrorIs(t, report("backing-up", &someMove), store.ErrConflictState, "an earlier move's evidence")
 	current := since("backing-up")
@@ -283,7 +288,7 @@ func TestEndEvictionKeepsAMoveWhoseStopIsReported(t *testing.T) {
 	a := adapter.NewProjectStoreAdapter(s.Store)
 
 	createRunningProject(t, s, "evict-app", "evict-a")
-	require.NoError(t, a.RequestEviction(ctx, "evict-app", "evict-a", "Drain", ""))
+	require.NoError(t, a.RequestEviction(ctx, "evict-app", "evict-a", "Drain", "", nil))
 	require.NoError(t, a.StartEvictionBackup(ctx, "evict-app", "evict-a"))
 	snapshots, err := a.ListEvictions(ctx)
 	require.NoError(t, err)
@@ -322,7 +327,7 @@ func TestCancelQueuedEviction(t *testing.T) {
 	a := adapter.NewProjectStoreAdapter(s.Store)
 
 	createRunningProject(t, s, "queued", "node-a")
-	require.NoError(t, a.RequestEviction(ctx, "queued", "node-a", "FailBack", v1.NodeTierPrimary))
+	require.NoError(t, a.RequestEviction(ctx, "queued", "node-a", "FailBack", v1.NodeTierPrimary, nil))
 
 	cancelled, err := a.CancelQueuedEviction(ctx, "queued", "node-a", "Drain")
 	require.NoError(t, err)
@@ -337,7 +342,7 @@ func TestCancelQueuedEviction(t *testing.T) {
 	assert.Equal(t, v1.ProjectPhaseRunning, p.Status.Phase, "nothing was stopped")
 
 	createRunningProject(t, s, "started", "node-a")
-	require.NoError(t, a.RequestEviction(ctx, "started", "node-a", "FailBack", v1.NodeTierPrimary))
+	require.NoError(t, a.RequestEviction(ctx, "started", "node-a", "FailBack", v1.NodeTierPrimary, nil))
 	require.NoError(t, a.StartEvictionBackup(ctx, "started", "node-a"))
 	cancelled, err = a.CancelQueuedEviction(ctx, "started", "node-a", "FailBack")
 	require.NoError(t, err)

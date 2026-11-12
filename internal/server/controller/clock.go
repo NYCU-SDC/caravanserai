@@ -24,6 +24,7 @@ type options struct {
 	seedInterval       time.Duration
 	terminatingTimeout time.Duration
 	runningGracePeriod time.Duration
+	startupGrace       time.Duration
 }
 
 // Option configures optional behaviour on controllers that accept it.
@@ -60,6 +61,16 @@ func WithTerminatingTimeout(d time.Duration) Option {
 func WithRunningGracePeriod(d time.Duration) Option {
 	return func(o *options) {
 		o.runningGracePeriod = d
+	}
+}
+
+// WithStartupGrace makes NodeHealthController wait this long after it is
+// created before it marks any Node NotReady. The server passes
+// NodeHeartbeatTimeout. Zero, the default, waits not at all, which is what
+// tests that start the controller over stale heartbeats want.
+func WithStartupGrace(d time.Duration) Option {
+	return func(o *options) {
+		o.startupGrace = d
 	}
 }
 
