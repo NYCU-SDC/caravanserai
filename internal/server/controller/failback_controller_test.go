@@ -186,3 +186,54 @@ func TestFailback_OtherMovesDoNotHoldItBack(t *testing.T) {
 	env.reconcile(t)
 	assert.Equal(t, []string{"app"}, env.store.requests)
 }
+
+func TestFailback_ARecentlyFailedMoveIsNotRetried(t *testing.T) {
+	failedAgo := func(env *failbackEnv, name string, ago time.Duration) {
+		env.store.projects[name].Conditions = append(env.store.projects[name].Conditions, v1.Condition{
+			Type: v1.ConditionTypeEvictionFailed, Status: v1.ConditionTrue, Reason: EvictionFailedBackupFailed,
+			LastTransitionTime: env.clock.Now().Add(-ago),
+		})
+	}
+
+	t.Run("failed a minute ago: left alone, and the next project gets its turn", func(t *testing.T) {
+		env := newFailbackEnv(t, taipeiWindow(t), inWindow)
+		env.store.running("a-failed", "twcc1", v1.ProjectSizeSmall, true)
+		env.store.running("b-next", "twcc1", v1.ProjectSizeSmall, true)
+		failedAgo(env, "a-failed", time.Minute)
+		env.reconcile(t)
+		assert.Equal(t, []string{"b-next"}, env.store.requests)
+	})
+
+	t.Run("failed 23h59m ago: still left alone", func(t *testing.T) {
+		env := newFailbackEnv(t, taipeiWindow(t), inWindow)
+		env.store.running("app", "twcc1", v1.ProjectSizeSmall, true)
+		failedAgo(env, "app", failbackRetryAfter-time.Minute)
+		env.reconcile(t)
+		assert.Empty(t, env.store.requests)
+	})
+
+	t.Run("failed a day ago: tried again", func(t *testing.T) {
+		env := newFailbackEnv(t, taipeiWindow(t), inWindow)
+		env.store.running("app", "twcc1", v1.ProjectSizeSmall, true)
+		failedAgo(env, "app", failbackRetryAfter)
+		env.reconcile(t)
+		assert.Equal(t, []string{"app"}, env.store.requests)
+	})
+}
+
+func TestFailback_AQueuedMoveIsCalledOffWhenTheWindowEnds(t *testing.T) {
+	env := newFailbackEnv(t, taipeiWindow(t), outWindow)
+	env.store.running("queued", "twcc1", v1.ProjectSizeSmall, true)
+	env.store.request("queued", FailBackReason, 0)
+	env.store.running("started", "twcc1", v1.ProjectSizeSmall, true)
+	env.store.request("started", FailBackReason, 0)
+	env.store.projects["started"].Eviction.State = v1.EvictionStateBackingUp
+	env.store.running("draining", "twcc1", v1.ProjectSizeSmall, true)
+	env.store.request("draining", DrainReason, 0)
+
+	env.reconcile(t)
+	assert.Nil(t, env.store.get("queued").Eviction, "it would have stopped the project outside the window")
+	assert.NotNil(t, env.store.get("started").Eviction, "a move under way finishes")
+	assert.NotNil(t, env.store.get("draining").Eviction, "another trigger's move is not fail-back's")
+	assert.Empty(t, env.store.requests)
+}

@@ -57,6 +57,22 @@ func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNod
 	})
 }
 
+// CancelQueuedEviction satisfies controller.FailbackStore. It calls off a
+// planned move of the Project off fromNode for reason, only while the move is
+// still Queued: nothing has been stopped yet. It reports whether it did.
+func (a *ProjectStoreAdapter) CancelQueuedEviction(ctx context.Context, name, fromNode, reason string) (bool, error) {
+	var cancelled bool
+	err := a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		e := status.Eviction
+		cancelled = e != nil && e.State == v1.EvictionStateQueued && e.Reason == reason && e.FromNode == fromNode
+		if cancelled {
+			status.Eviction = nil
+		}
+		return nil
+	})
+	return cancelled, err
+}
+
 // ListEvictions satisfies controller.EvictionStore. It returns every Project
 // with a move in progress, oldest request first.
 func (a *ProjectStoreAdapter) ListEvictions(ctx context.Context) ([]*controller.EvictionSnapshot, error) {

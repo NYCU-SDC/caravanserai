@@ -312,3 +312,34 @@ func TestEndEvictionKeepsAMoveWhoseStopIsReported(t *testing.T) {
 	require.NotNil(t, p.Status.Eviction.AgentStartedAt)
 	assert.True(t, p.Status.Eviction.AgentStartedAt.Equal(first))
 }
+
+// TestCancelQueuedEviction validates the call-off fail-back uses when its
+// window ends: only a Queued move of its own.
+func TestCancelQueuedEviction(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+	ctx := context.Background()
+	a := adapter.NewProjectStoreAdapter(s.Store)
+
+	createRunningProject(t, s, "queued", "node-a")
+	require.NoError(t, a.RequestEviction(ctx, "queued", "node-a", "FailBack", v1.NodeTierPrimary))
+
+	cancelled, err := a.CancelQueuedEviction(ctx, "queued", "node-a", "Drain")
+	require.NoError(t, err)
+	assert.False(t, cancelled, "another trigger's move")
+
+	cancelled, err = a.CancelQueuedEviction(ctx, "queued", "node-a", "FailBack")
+	require.NoError(t, err)
+	assert.True(t, cancelled)
+	p, err := s.Store.GetProject(ctx, "queued")
+	require.NoError(t, err)
+	assert.Nil(t, p.Status.Eviction)
+	assert.Equal(t, v1.ProjectPhaseRunning, p.Status.Phase, "nothing was stopped")
+
+	createRunningProject(t, s, "started", "node-a")
+	require.NoError(t, a.RequestEviction(ctx, "started", "node-a", "FailBack", v1.NodeTierPrimary))
+	require.NoError(t, a.StartEvictionBackup(ctx, "started", "node-a"))
+	cancelled, err = a.CancelQueuedEviction(ctx, "started", "node-a", "FailBack")
+	require.NoError(t, err)
+	assert.False(t, cancelled, "a move under way is left to finish")
+}

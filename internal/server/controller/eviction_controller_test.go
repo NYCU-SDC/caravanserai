@@ -106,9 +106,13 @@ func (f *fakeEvictionStore) ListProjectsByNodeRef(_ context.Context, node string
 	var out []*ProjectSnapshot
 	for n, p := range f.projects {
 		if p.NodeRef == node && slices.Contains(phases, p.Phase) {
+			conditions := make([]ConditionSnapshot, len(p.Conditions))
+			for i, c := range p.Conditions {
+				conditions[i] = ConditionSnapshot{Type: c.Type, Reason: c.Reason, LastTransitionTime: c.LastTransitionTime}
+			}
 			out = append(out, &ProjectSnapshot{
 				Name: n, Phase: p.Phase, NodeRef: p.NodeRef, Size: p.Size,
-				ExcludedNodes: slices.Clone(p.Excluded), Evicting: p.Eviction != nil,
+				ExcludedNodes: slices.Clone(p.Excluded), Evicting: p.Eviction != nil, Conditions: conditions,
 			})
 		}
 	}
@@ -164,6 +168,18 @@ func (f *fakeEvictionStore) MoveEvictedProject(_ context.Context, e *EvictionSna
 }
 
 // RequestEviction mirrors the adapter's guards.
+func (f *fakeEvictionStore) CancelQueuedEviction(_ context.Context, name, fromNode, reason string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.projects[name]
+	if p == nil || p.Eviction == nil || p.Eviction.State != v1.EvictionStateQueued ||
+		p.Eviction.Reason != reason || p.Eviction.FromNode != fromNode {
+		return false, nil
+	}
+	p.Eviction = nil
+	return true, nil
+}
+
 func (f *fakeEvictionStore) RequestEviction(_ context.Context, name, fromNode, reason string, tier v1.NodeTier) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
