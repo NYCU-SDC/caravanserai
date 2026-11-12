@@ -98,6 +98,11 @@
           "format": "date-time",
           "description": "Since is when Phase last changed."
         },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "StartedAt is when this drain began. A planned move that failed before\nit is not this drain's failure, and is asked for again once."
+        },
         "remaining": {
           "type": "integer",
           "description": "Remaining is how many Projects are still assigned to the Node or owed\ncleanup by it."

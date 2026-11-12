@@ -23,9 +23,11 @@ func TestSetNodeScheduling(t *testing.T) {
 		wantUnschedulable bool
 		wantDrain         bool
 	}{
-		{name: "cordon", want: nodeScheduling{unschedulable: true}, wantUnschedulable: true},
-		{name: "drain cordons too", want: nodeScheduling{unschedulable: true, drain: true}, wantUnschedulable: true, wantDrain: true},
-		{name: "uncordon clears both", start: v1.NodeSpec{Unschedulable: true, Drain: true}, want: nodeScheduling{}},
+		{name: "cordon", want: cordonScheduling, wantUnschedulable: true},
+		{name: "cordon leaves a drain in progress alone", start: v1.NodeSpec{Unschedulable: true, Drain: true},
+			want: cordonScheduling, wantUnschedulable: true, wantDrain: true},
+		{name: "drain cordons too", want: drainScheduling, wantUnschedulable: true, wantDrain: true},
+		{name: "uncordon clears both", start: v1.NodeSpec{Unschedulable: true, Drain: true}, want: uncordonScheduling},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

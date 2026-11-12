@@ -103,8 +103,15 @@ func (f *fakeDrainStore) CancelEviction(_ context.Context, name, fromNode, reaso
 
 var drainNow = time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
 
+// drainStarted is when the drain newDrainEnv sets up began, early enough that
+// every failure the tests set up is the drain's own.
+var drainStarted = drainNow.Add(-48 * time.Hour)
+
 func newDrainEnv(drain bool, projects ...DrainProjectSnapshot) (*fakeDrainStore, *DrainController, *fakeClock) {
 	st := &fakeDrainStore{node: NodeDrainSnapshot{Name: "pve1", Drain: drain}, projects: projects}
+	if drain {
+		st.node.Status = &v1.NodeDrainStatus{Phase: v1.NodeDrainDraining, Since: drainStarted, StartedAt: drainStarted}
+	}
 	clock := &fakeClock{Time: drainNow}
 	return st, NewDrainController(zap.NewNop(), st, nil, WithClock(clock)), clock
 }
@@ -215,6 +222,47 @@ func TestDrain_Retries(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDrain_AFailureFromBeforeTheDrainIsAskedForAgain(t *testing.T) {
+	// A fail-back move a week ago could not back the project up. Nothing has
+	// cleared that since, and it says nothing about whether this drain can
+	// move it.
+	st, ctrl, _ := newDrainEnv(true, failedMove("a", EvictionFailedBackupFailed, 7*24*time.Hour))
+	reconcileDrain(t, ctrl)
+	assert.Equal(t, []string{"a"}, st.requested)
+	assert.Equal(t, v1.NodeDrainDraining, st.node.Status.Phase)
+	assert.True(t, st.node.Status.StartedAt.Equal(drainStarted), "the start is kept")
+}
+
+func TestDrain_StartIsRecordedOnce(t *testing.T) {
+	// A new drain, or one recorded before StartedAt existed: it starts now.
+	st, ctrl, clock := newDrainEnv(false, running("a"))
+	st.node.Drain = true
+	reconcileDrain(t, ctrl)
+	require.Equal(t, []string{"a"}, st.requested)
+	started := st.node.Status.StartedAt
+	assert.True(t, started.Equal(drainNow))
+
+	// This drain's own move then fails for a reason retrying would not fix:
+	// it is not asked for again, however long it waits.
+	clock.Time = clock.Time.Add(time.Minute)
+	st.projects[0].Eviction = nil
+	st.projects[0].EvictionFailed = &v1.Condition{Type: v1.ConditionTypeEvictionFailed, Status: v1.ConditionTrue,
+		Reason: EvictionFailedBackupFailed, Message: "why", LastTransitionTime: clock.Time}
+	clock.Time = clock.Time.Add(24 * time.Hour)
+	reconcileDrain(t, ctrl)
+	assert.Equal(t, []string{"a"}, st.requested, "asked for once")
+	assert.Equal(t, v1.NodeDrainIncomplete, st.node.Status.Phase)
+	assert.True(t, st.node.Status.StartedAt.Equal(started))
+}
+
+func TestDrain_ALegacyRecordGetsAStart(t *testing.T) {
+	st, ctrl, _ := newDrainEnv(true, DrainProjectSnapshot{Name: "s", Phase: v1.ProjectPhaseScheduled})
+	st.node.Status = &v1.NodeDrainStatus{Phase: v1.NodeDrainDraining, Since: drainStarted, Remaining: 1}
+	reconcileDrain(t, ctrl)
+	require.Equal(t, 1, st.writes, "written although nothing else changed")
+	assert.True(t, st.node.Status.StartedAt.Equal(drainNow))
 }
 
 func TestDrain_RecordsOnlyChanges(t *testing.T) {
