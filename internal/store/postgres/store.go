@@ -409,6 +409,69 @@ func (s *Store) UpdateNodeStatus(ctx context.Context, name string, status v1.Nod
 	return nil
 }
 
+// UpdateNodeStatusWithRetry implements store.NodeStore.
+func (s *Store) UpdateNodeStatusWithRetry(ctx context.Context, name string, mutate func(*v1.NodeStatus) error) error {
+	var lastConflict error
+	for attempt := 0; attempt < maxStatusUpdateAttempts; attempt++ {
+		node, err := s.getNode(ctx, name)
+		if err != nil {
+			return err
+		}
+		current := node.Status
+		next, err := copyNodeStatus(current)
+		if err != nil {
+			return fmt.Errorf("postgres: copy node status %q: %w", name, err)
+		}
+		if err := mutate(&next); err != nil {
+			return err
+		}
+
+		rawCurrent, err := json.Marshal(current)
+		if err != nil {
+			return fmt.Errorf("postgres: marshal node status %q: %w", name, err)
+		}
+		rawNext, err := json.Marshal(next)
+		if err != nil {
+			return fmt.Errorf("postgres: marshal node status %q: %w", name, err)
+		}
+		if bytes.Equal(rawCurrent, rawNext) {
+			return nil
+		}
+
+		tag, err := s.pool.Exec(ctx, `
+			UPDATE resources
+			SET phase = $1, status = $2, updated_at = $3, resource_version = resource_version + 1
+			WHERE kind = $4 AND name = $5 AND resource_version = $6`,
+			string(next.State), rawNext, time.Now().UTC(), kindNode, name, node.ObjectMeta.ResourceVersion,
+		)
+		if err != nil {
+			return fmt.Errorf("postgres: update node status %q: %w", name, err)
+		}
+		if tag.RowsAffected() == 1 {
+			if current.State != next.State {
+				s.publish(event.TopicNodeUpdated, name)
+			}
+			return nil
+		}
+		// Written since the read, or deleted: the next read tells which.
+		lastConflict = fmt.Errorf("%w: node %q", store.ErrVersionConflict, name)
+	}
+	return lastConflict
+}
+
+// copyNodeStatus returns a copy of status that shares nothing mutable with it.
+func copyNodeStatus(status v1.NodeStatus) (v1.NodeStatus, error) {
+	raw, err := json.Marshal(status)
+	if err != nil {
+		return v1.NodeStatus{}, err
+	}
+	var out v1.NodeStatus
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return v1.NodeStatus{}, err
+	}
+	return out, nil
+}
+
 // ============================================================
 // ProjectStore
 // ============================================================

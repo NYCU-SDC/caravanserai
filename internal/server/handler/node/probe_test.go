@@ -52,6 +52,9 @@ func (fakeNodeStore) DeleteNode(context.Context, string) error { return nil }
 func (fakeNodeStore) UpdateNodeStatus(context.Context, string, v1.NodeStatus) error {
 	return nil
 }
+func (fakeNodeStore) UpdateNodeStatusWithRetry(context.Context, string, func(*v1.NodeStatus) error) error {
+	return nil
+}
 
 type fakeProjectLister struct{}
 

@@ -50,42 +50,39 @@ func (a *NodeStoreAdapter) GetNodeStatus(ctx context.Context, name string) (cont
 	}, nil
 }
 
-func (a *NodeStoreAdapter) SetNodeState(ctx context.Context, name string, state v1.NodeState, reason, message string) error {
-	node, err := a.s.GetNode(ctx, name)
-	if err != nil {
-		return err
-	}
-	node.Status.State = state
-	// Update or append the Ready condition.
-	condStatus := v1.ConditionTrue
-	if state != v1.NodeStateReady {
-		condStatus = v1.ConditionFalse
-	}
+// SetNodeState satisfies controller.NodeStore.
+//
+// It changes only the state and the Ready condition, and only if no heartbeat
+// has arrived since the one the decision was made on: a NotReady decided on a
+// stale read must not land on a Node that has just been heard from. The write
+// is versioned, so a heartbeat or drain status written meanwhile is kept.
+func (a *NodeStoreAdapter) SetNodeState(ctx context.Context, name string, state v1.NodeState, reason, message string, observedHeartbeat time.Time) error {
 	now := time.Now().UTC()
-	updated := false
-	for i, c := range node.Status.Conditions {
-		if c.Type == v1.ConditionTypeReady {
-			node.Status.Conditions[i] = v1.Condition{
-				Type:               v1.ConditionTypeReady,
-				Status:             condStatus,
-				Reason:             reason,
-				Message:            message,
-				LastTransitionTime: now,
-			}
-			updated = true
-			break
+	return a.s.UpdateNodeStatusWithRetry(ctx, name, func(status *v1.NodeStatus) error {
+		if status.LastHeartbeat.After(observedHeartbeat) {
+			return nil
 		}
-	}
-	if !updated {
-		node.Status.Conditions = append(node.Status.Conditions, v1.Condition{
+		status.State = state
+		condStatus := v1.ConditionTrue
+		if state != v1.NodeStateReady {
+			condStatus = v1.ConditionFalse
+		}
+		ready := v1.Condition{
 			Type:               v1.ConditionTypeReady,
 			Status:             condStatus,
 			Reason:             reason,
 			Message:            message,
 			LastTransitionTime: now,
-		})
-	}
-	return a.s.UpdateNodeStatus(ctx, name, node.Status)
+		}
+		for i, c := range status.Conditions {
+			if c.Type == v1.ConditionTypeReady {
+				status.Conditions[i] = ready
+				return nil
+			}
+		}
+		status.Conditions = append(status.Conditions, ready)
+		return nil
+	})
 }
 
 // ListNotReadyNodeNames satisfies controller.ReschedulerNodeStore.
@@ -120,7 +117,9 @@ func (a *NodeReadyAdapter) ListReadyNodes(ctx context.Context) ([]controller.Rea
 	}
 	var ready []controller.ReadyNode
 	for _, n := range nodes {
-		if n.Status.State == v1.NodeStateReady && !n.Spec.Unschedulable {
+		// A Node being drained takes no new Projects even if it was not
+		// cordoned as well.
+		if n.Status.State == v1.NodeStateReady && !n.Spec.Unschedulable && !n.Spec.Drain {
 			ready = append(ready, controller.ReadyNode{
 				Name:        n.Name,
 				Labels:      n.Labels,

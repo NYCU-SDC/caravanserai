@@ -125,7 +125,7 @@ func (f *fakeNodeStore) GetNodeStatus(_ context.Context, name string) (NodeStatu
 	return snap, nil
 }
 
-func (f *fakeNodeStore) SetNodeState(_ context.Context, name string, state v1.NodeState, reason, message string) error {
+func (f *fakeNodeStore) SetNodeState(_ context.Context, name string, state v1.NodeState, reason, message string, _ time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
