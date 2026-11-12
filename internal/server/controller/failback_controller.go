@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"time"
@@ -71,6 +72,17 @@ func DefaultFailbackPolicy() FailbackPolicy {
 		Cooldown:          6 * time.Hour,
 		MinFreePercent:    20,
 	}
+}
+
+// Validate rejects a policy whose backoff would run backwards: with
+// StableWindow above MaxStableWindow, a Node that flapped more would need
+// less time Ready (the cap) than one that flapped once.
+func (p FailbackPolicy) Validate() error {
+	if p.StableWindow > p.MaxStableWindow {
+		return fmt.Errorf("failback_stable_window (%s) must not exceed failback_max_stable_window (%s)",
+			p.StableWindow, p.MaxStableWindow)
+	}
+	return nil
 }
 
 // stableWindowFor returns how long a Node that went NotReady flaps times in

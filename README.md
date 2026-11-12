@@ -312,12 +312,14 @@ The file is the one named by `--config` or `CARA_CONFIG`, and a named file that 
 | `max_inflight_evictions` | `MAX_INFLIGHT_EVICTIONS` | `1` | Planned moves (drain, fail-back) allowed at once across the cluster. Each is downtime plus a backup and a restore |
 | `failback_window` | `FAILBACK_WINDOW` | _(disabled)_ | Daily window `HH:MM-HH:MM` (may cross midnight, e.g. `02:00-05:00`) in which Projects on the backup tier are moved back to primary, one at a time. Empty disables fail-back |
 | `failback_timezone` | `FAILBACK_TIMEZONE` | `Asia/Taipei` | IANA time zone `failback_window` is read in. The server logs the window in both this zone and UTC at startup |
-| `failback_stable_window` | `FAILBACK_STABLE_WINDOW` | `30m` | How long a primary node must have been Ready, without a break, before fail-back sends it a Project |
+| `failback_stable_window` | `FAILBACK_STABLE_WINDOW` | `30m` | How long a primary node must have been Ready, without a break, before fail-back sends it a Project. At most `failback_max_stable_window` |
 | `failback_flap_window` | `FAILBACK_FLAP_WINDOW` | `24h` | How far back a primary node's NotReady transitions are counted for backoff (at most `168h`) |
 | `failback_backoff_multiplier` | `FAILBACK_BACKOFF_MULTIPLIER` | `2` | The stable window is multiplied by this for each NotReady in the flap window beyond the first |
 | `failback_max_stable_window` | `FAILBACK_MAX_STABLE_WINDOW` | `8h` | Cap on the backed-off stable window |
 | `failback_cooldown` | `FAILBACK_COOLDOWN` | `6h` | How long a Project must have been running where it is before fail-back moves it |
 | `failback_min_free_percent` | `FAILBACK_MIN_FREE_PERCENT` | `20` | Percent of a primary node's CPU and of its memory that must still be free once the Project is placed there |
+
+For every `failback_*` setting above, `0` or unset means the default. The cooldown and the free-room threshold therefore cannot be turned off with `0`; set a tiny value instead (`1s`, `0.01`). `failback_stable_window` must not exceed `failback_max_stable_window`, after defaults are applied, or the server refuses to start with fail-back enabled.
 
 ### cara-agent
 

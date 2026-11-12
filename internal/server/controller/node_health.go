@@ -59,6 +59,16 @@ type NodeHealthController struct {
 	bus          *event.Bus
 	clock        Clock
 	seedInterval time.Duration
+
+	// startedAt and startupGrace: no Node is marked NotReady until
+	// startupGrace has passed since startedAt. While the server was down no
+	// heartbeat could arrive, so on startup every Node's last one is old,
+	// and marking them all NotReady would record a flap on each — the whole
+	// primary tier would look unstable to fail-back — and start failover
+	// for Nodes that never failed. A grace of one heartbeat timeout gives
+	// every live Agent time to be heard from.
+	startedAt    time.Time
+	startupGrace time.Duration
 }
 
 // NewNodeHealthController creates a NodeHealthController.
@@ -77,6 +87,8 @@ func NewNodeHealthController(logger *zap.Logger, store NodeStore, bus *event.Bus
 		bus:          bus,
 		clock:        o.clock,
 		seedInterval: interval,
+		startedAt:    o.clock.Now(),
+		startupGrace: o.startupGrace,
 	}
 }
 
@@ -105,6 +117,12 @@ func (c *NodeHealthController) Reconcile(ctx context.Context, name string) (Resu
 	age := c.clock.Since(snap.LastHeartbeat)
 
 	switch {
+	case age > NodeHeartbeatTimeout && snap.State != v1.NodeStateNotReady && c.clock.Since(c.startedAt) < c.startupGrace:
+		log.Debug("Node heartbeat is old, but the server has only just started; waiting for the agent",
+			zap.Duration("age", age), zap.Duration("startupGrace", c.startupGrace))
+		// The seed enqueues every Node again within seedInterval.
+		return Result{}, nil
+
 	case age > NodeHeartbeatTimeout && snap.State != v1.NodeStateNotReady:
 		log.Info("Node heartbeat timed out, marking NotReady",
 			zap.Duration("age", age),

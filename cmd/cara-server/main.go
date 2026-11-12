@@ -228,7 +228,8 @@ func main() {
 
 	ctrlManager := controller.NewManager(logger)
 
-	ctrlManager.Add(controller.NewNodeHealthController(logger, nodeAdapter, eventBus))
+	ctrlManager.Add(controller.NewNodeHealthController(logger, nodeAdapter, eventBus,
+		controller.WithStartupGrace(controller.NodeHeartbeatTimeout)))
 	ctrlManager.Add(controller.NewProjectSchedulerController(logger,
 		projectAdapter,
 		adapter.NewNodeReadyAdapter(pgStore),
@@ -272,6 +273,9 @@ func main() {
 		logger.Info("Fail-back disabled (failback_window is not set)")
 	} else {
 		policy := failbackPolicy(cfg)
+		if err := policy.Validate(); err != nil {
+			logger.Fatal("Invalid fail-back configuration", zap.Error(err))
+		}
 		logger.Info("Fail-back enabled",
 			zap.String("window", failbackWindow.Describe(time.Now())),
 			zap.Duration("stableWindow", policy.StableWindow),
@@ -332,7 +336,9 @@ func main() {
 }
 
 // failbackPolicy is the default fail-back policy with whatever the
-// configuration overrides; a zero setting keeps the default.
+// configuration overrides; a zero setting keeps the default. So the cooldown
+// and the free-room threshold cannot be switched off with 0; a tiny value
+// (1s, 0.01) has the same effect.
 func failbackPolicy(cfg config.Config) controller.FailbackPolicy {
 	p := controller.DefaultFailbackPolicy()
 	if cfg.FailbackStableWindow > 0 {

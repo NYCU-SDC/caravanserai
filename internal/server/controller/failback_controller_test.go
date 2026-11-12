@@ -462,3 +462,14 @@ func TestFailback_AQueuedMoveIsCalledOffWhenTheWindowEnds(t *testing.T) {
 	assert.NotNil(t, env.store.get("draining").Eviction, "another trigger's move is not fail-back's")
 	assert.Empty(t, env.store.requests)
 }
+
+func TestFailbackPolicy_Validate(t *testing.T) {
+	p := DefaultFailbackPolicy()
+	require.NoError(t, p.Validate())
+
+	p.StableWindow = p.MaxStableWindow
+	assert.NoError(t, p.Validate(), "equal is a backoff that never grows")
+
+	p.StableWindow = p.MaxStableWindow + time.Minute
+	assert.Error(t, p.Validate(), "more flaps would need less time Ready")
+}
