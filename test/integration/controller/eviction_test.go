@@ -219,7 +219,9 @@ func TestRequestEviction(t *testing.T) {
 	assert.Equal(t, "Drain", first.Status.Eviction.Reason)
 	assert.Equal(t, "node-a", first.Status.Eviction.FromNode)
 
-	require.NoError(t, evictor.RequestEviction(ctx, "req-app", "node-a", "FailBack", ""))
+	require.NoError(t, evictor.RequestEviction(ctx, "req-app", "node-a", "Drain", ""), "asking again for the same move")
+	assert.ErrorIs(t, evictor.RequestEviction(ctx, "req-app", "node-a", "FailBack", ""), store.ErrConflictState,
+		"another trigger is told its move was not queued")
 	again, err := s.Store.GetProject(ctx, "req-app")
 	require.NoError(t, err)
 	assert.Equal(t, "Drain", again.Status.Eviction.Reason, "asking again does not start a second move")

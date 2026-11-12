@@ -248,3 +248,28 @@ func TestNewAssignmentClearsLatchAndHealthyWindow(t *testing.T) {
 	require.Less(t, resp.StatusCode, 300)
 	assert.Nil(t, getProject(t, name).Status.Recovery.HealthySince)
 }
+
+// A RecoveryBlocked the Agent set while it could not confirm the stop is
+// cleared with the evidence, so it does not outlive a lost clear.
+func TestWorkloadStoppedEvidenceClearsRecoveryBlocked(t *testing.T) {
+	const name = "e2e-workload-stopped-unblocks"
+	uid, gen := createAssigned(t, name, "node-a", v1.ProjectPhaseFailed)
+	require.NoError(t, suite.store.UpdateProjectStatusWithRetry(context.Background(), name, func(status *v1.ProjectStatus) error {
+		status.Conditions = append(status.Conditions, v1.Condition{
+			Type: v1.ConditionTypeRecoveryBlocked, Status: v1.ConditionTrue, Reason: "StopUnconfirmed",
+			LastTransitionTime: time.Now().UTC(),
+		})
+		return nil
+	}))
+
+	require.Equal(t, http.StatusNoContent, putEvidence(t, name, "workload-stopped", evidenceBody(uid, "node-a", gen)))
+	p := getProject(t, name)
+	require.NotNil(t, p.Status.Recovery.WorkloadStopped)
+	for _, c := range p.Status.Conditions {
+		assert.NotEqual(t, v1.ConditionTypeRecoveryBlocked, c.Type, "the stop is confirmed")
+	}
+
+	require.Equal(t, http.StatusNoContent, putEvidence(t, name, "workload-stopped", evidenceBody(uid, "node-a", gen)))
+	assert.Equal(t, p.ObjectMeta.ResourceVersion, getProject(t, name).ObjectMeta.ResourceVersion,
+		"reasserting with nothing left to clear writes nothing")
+}

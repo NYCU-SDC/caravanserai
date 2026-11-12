@@ -130,7 +130,7 @@ func TestFailback_CandidateDetection(t *testing.T) {
 	t.Run("a project that only fits on a primary node it failed on is left alone", func(t *testing.T) {
 		env := newFailbackEnv(t, taipeiWindow(t), inWindow, tieredNode("pve1", "primary"), tieredNode("twcc1", "backup"))
 		env.store.running("app", "twcc1", v1.ProjectSizeSmall, true)
-		env.store.projects["app"].FailedNodes = []string{"pve1"}
+		env.store.projects["app"].Excluded = []string{"pve1"}
 		env.reconcile(t)
 		assert.Empty(t, env.store.requests)
 	})

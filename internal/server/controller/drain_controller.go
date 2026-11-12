@@ -150,6 +150,11 @@ func (c *DrainController) Reconcile(ctx context.Context, name string) (Result, e
 	var blocking []string
 	waiting := 0
 	now := c.clock.Now()
+	// A drain recorded before StartedAt existed starts counting now.
+	startedAt := now.UTC()
+	if node.Status != nil && !node.Status.StartedAt.IsZero() {
+		startedAt = node.Status.StartedAt
+	}
 	for _, p := range projects {
 		switch {
 		case p.Phase == v1.ProjectPhaseFailed:
@@ -157,7 +162,12 @@ func (c *DrainController) Reconcile(ctx context.Context, name string) (Result, e
 				"%s: Failed here; delete it, or take it over with `caractl takeover %s`, to move it", p.Name, p.Name))
 
 		case p.Phase == v1.ProjectPhaseRunning && p.Eviction == nil:
-			if f := p.EvictionFailed; f != nil {
+			// A move that failed before this drain began — asked for by
+			// fail-back, or by an earlier drain — says nothing about whether
+			// this one can move the Project, and nothing would ever clear it:
+			// it is asked for once more. Only this drain's own failures
+			// block it or wait for a retry.
+			if f := p.EvictionFailed; f != nil && !f.LastTransitionTime.Before(startedAt) {
 				retryIn := drainRetryAfter - now.Sub(f.LastTransitionTime)
 				if !drainRetryable[f.Reason] {
 					blocking = append(blocking, fmt.Sprintf("%s: cannot be moved (%s): %s", p.Name, f.Reason, f.Message))
@@ -186,7 +196,7 @@ func (c *DrainController) Reconcile(ctx context.Context, name string) (Result, e
 		return Result{}, err
 	}
 
-	status := &v1.NodeDrainStatus{Remaining: len(projects) + len(owedNotAssigned(owed, projects)), Blocking: blocking}
+	status := &v1.NodeDrainStatus{StartedAt: startedAt, Remaining: len(projects) + len(owedNotAssigned(owed, projects)), Blocking: blocking}
 	switch {
 	case len(blocking) > 0:
 		status.Phase = v1.NodeDrainIncomplete
@@ -223,7 +233,10 @@ func (c *DrainController) record(ctx context.Context, log *zap.Logger, node Node
 	if prev != nil && prev.Phase == status.Phase {
 		status.Since = prev.Since
 	}
-	if prev != nil && prev.Phase == status.Phase && prev.Remaining == status.Remaining && slices.Equal(prev.Blocking, status.Blocking) {
+	// StartedAt is compared too: until it is stored, every pass would take a
+	// new start and keep asking again for moves this drain saw fail.
+	if prev != nil && prev.Phase == status.Phase && prev.StartedAt.Equal(status.StartedAt) &&
+		prev.Remaining == status.Remaining && slices.Equal(prev.Blocking, status.Blocking) {
 		return nil
 	}
 

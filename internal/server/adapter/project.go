@@ -71,7 +71,7 @@ func (a *ProjectStoreAdapter) GetProjectPlacement(ctx context.Context, name stri
 		UID:           project.ObjectMeta.UID,
 		Phase:         project.Status.Phase,
 		Size:          project.Spec.Size,
-		ExcludedNodes: slices.Concat(project.Status.FailedNodes, project.Status.Recovery.NodesOwingCleanup()),
+		ExcludedNodes: project.Status.PlacementExcludedNodes(),
 	}
 	// A Project being moved off a Node on purpose must not land back on it,
 	// and must land in the tier the move asked for, if any.
@@ -477,6 +477,7 @@ func snapshotOf(p *v1.Project) *controller.ProjectSnapshot {
 		Size:                 p.Spec.Size,
 		FailedNodes:          slices.Clone(p.Status.FailedNodes),
 		Evicting:             p.Status.Eviction != nil,
+		ExcludedNodes:        p.Status.PlacementExcludedNodes(),
 		Conditions:           conditions,
 	}
 }

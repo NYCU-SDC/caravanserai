@@ -26,11 +26,12 @@ type fakeEvictionProject struct {
 	PgDiff  bool
 	// Stopped is the Agent's workload-stopped evidence for the current
 	// assignment, which the release needs.
-	Stopped     bool
-	Eviction    *v1.ProjectEviction
-	Conditions  []v1.Condition
-	Failure     *EvictionFailure
-	FailedNodes []string
+	Stopped bool
+	// Excluded are the Nodes the scheduler will not place it on.
+	Excluded   []string
+	Eviction   *v1.ProjectEviction
+	Conditions []v1.Condition
+	Failure    *EvictionFailure
 }
 
 // fakeEvictionStore mirrors the adapter's guards closely enough to drive the
@@ -107,7 +108,7 @@ func (f *fakeEvictionStore) ListProjectsByNodeRef(_ context.Context, node string
 		if p.NodeRef == node && slices.Contains(phases, p.Phase) {
 			out = append(out, &ProjectSnapshot{
 				Name: n, Phase: p.Phase, NodeRef: p.NodeRef, Size: p.Size,
-				FailedNodes: p.FailedNodes, Evicting: p.Eviction != nil,
+				ExcludedNodes: slices.Clone(p.Excluded), Evicting: p.Eviction != nil,
 			})
 		}
 	}
@@ -124,7 +125,7 @@ func (f *fakeEvictionStore) ListEvictions(context.Context) ([]*EvictionSnapshot,
 		}
 		out = append(out, &EvictionSnapshot{
 			Name: n, Phase: p.Phase, NodeRef: p.NodeRef, Size: p.Size, HasManagedVolumes: p.Managed,
-			HasPostgresDifferential: p.PgDiff, WorkloadStopped: p.Stopped,
+			HasPostgresDifferential: p.PgDiff, WorkloadStopped: p.Stopped, ExcludedNodes: slices.Clone(p.Excluded),
 			Eviction: *p.Eviction, Conditions: slices.Clone(p.Conditions),
 		})
 	}
@@ -385,6 +386,17 @@ func TestEvictionController_Failures(t *testing.T) {
 			name:  "no other node can take it",
 			nodes: []string{"node-a"},
 			setup: func(env *evictionEnv) {
+				env.reconcile(t)
+			},
+			wantReason: EvictionFailedNoCapacity, wantRunning: true,
+		},
+		{
+			// The scheduler would not place it there, so stopping it for a
+			// move it could not finish would be downtime for nothing.
+			name:  "the only other node still owes the project cleanup",
+			nodes: []string{"node-a", "node-b"},
+			setup: func(env *evictionEnv) {
+				env.store.projects["app"].Excluded = []string{"node-b"}
 				env.reconcile(t)
 			},
 			wantReason: EvictionFailedNoCapacity, wantRunning: true,

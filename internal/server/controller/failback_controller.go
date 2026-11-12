@@ -137,7 +137,9 @@ func (c *FailbackController) Reconcile(ctx context.Context, _ string) (Result, e
 	for _, p := range candidates {
 		fits, _, err := filterNodes(ctx, c.ledger, nodes, ProjectPlacement{
 			Size:          p.Size,
-			ExcludedNodes: p.FailedNodes,
+			// The Nodes the scheduler would not place it on: those it
+			// failed on and those still owing it cleanup.
+			ExcludedNodes: p.ExcludedNodes,
 			RequiredTier:  v1.NodeTierPrimary,
 		})
 		if err != nil {
