@@ -64,8 +64,8 @@ const (
 type EvictionRequester interface {
 	// RequestEviction queues a move of the named Project off fromNode, with
 	// reason saying who asked. It fails with store.ErrConflictState when the
-	// Project is not Running on fromNode, and does nothing when a move is
-	// already in progress.
+	// Project is not Running on fromNode or another move of it is in
+	// progress, and does nothing when this same move already is.
 	RequestEviction(ctx context.Context, name, fromNode, reason string) error
 }
 
@@ -77,7 +77,9 @@ type EvictionSnapshot struct {
 	NodeRef              string
 	AssignmentGeneration int64
 	Size                 v1.ProjectSize
-	FailedNodes          []string
+	// ExcludedNodes are the Nodes the scheduler will not place the Project
+	// on whatever the move: those it failed on and those owing it cleanup.
+	ExcludedNodes []string
 
 	// WorkloadStopped reports whether the Agent of the current assignment
 	// has confirmed the workload stopped, which is what lets the move release
@@ -294,7 +296,9 @@ func (c *EvictionController) start(ctx context.Context, log *zap.Logger, e *Evic
 	if err != nil {
 		return false, err
 	}
-	excluded := append([]string{e.Eviction.FromNode}, e.FailedNodes...)
+	// The same Nodes the scheduler leaves out, so the precheck does not pass
+	// on a Node the Project could then not be placed on after being stopped.
+	excluded := append([]string{e.Eviction.FromNode}, e.ExcludedNodes...)
 	candidates, rejected, err := filterNodes(ctx, c.ledger, nodes, e.Size, excluded)
 	if err != nil {
 		return false, err

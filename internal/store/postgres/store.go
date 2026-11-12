@@ -1218,6 +1218,13 @@ func (s *Store) RecordWorkloadStopped(ctx context.Context, name string, ref stor
 					store.ErrConflictState, name, ref.NodeRef, forMove.UTC().Format(time.RFC3339Nano))
 			}
 		}
+		// A RecoveryBlocked the Agent set while it could not confirm the stop
+		// is over once the stop is confirmed. The Agent clears it itself after
+		// reporting, but does not try again if that write is lost, and the
+		// Project would show the stop as unconfirmed until placed elsewhere.
+		if slices.ContainsFunc(status.Conditions, func(c v1.Condition) bool { return c.Type == v1.ConditionTypeRecoveryBlocked }) {
+			status.Conditions = v1.RemoveConditions(status.Conditions, v1.ConditionTypeRecoveryBlocked)
+		}
 		// First evidence for an assignment wins. A retry or a restarted Agent
 		// reporting the same stop again changes nothing, not even ObservedAt,
 		// so the reassertion is a no-op with no version or event.
