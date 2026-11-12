@@ -118,7 +118,7 @@ func TestNodeFailureTriggersRescheduling(t *testing.T) {
 	owner := store.AssignmentRef{UID: p.ObjectMeta.UID, NodeRef: assignedNode, Generation: p.Status.AssignmentGeneration}
 
 	// The Agent confirms the workload stopped; the next reconcile releases.
-	require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "resch-project-01", owner, time.Now()))
+	require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "resch-project-01", owner, nil, time.Now()))
 	controllerhelper.WaitForProjectPhase(t, s.Store, 15*time.Second, "resch-project-01", v1.ProjectPhasePending)
 	p, err = s.Store.GetProject(ctx, "resch-project-01")
 	require.NoError(t, err)

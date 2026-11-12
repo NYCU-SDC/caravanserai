@@ -292,6 +292,7 @@ The file is the one named by `--config` or `CARA_CONFIG`, and a named file that 
 | `default_backup_interval` | `DEFAULT_BACKUP_INTERVAL` | `24h` | Backup interval a Project with a Managed volume and no `spec.backup` gets when it is created or updated |
 | `headscale_user` | `HEADSCALE_USER` | `cara-node` | Headscale user new pre-auth keys are created under |
 | `postgres_differential_image` | `POSTGRES_DIFFERENTIAL_IMAGE` | `ghcr.io/nycu-sdc/cara-postgres:16` | Image a `PostgresDifferential` volume's service must use. Set it where the published image cannot be pulled, or to a `16-<run>.<attempt>` tag to keep every Node on one content; manifests then name the same reference |
+| `max_inflight_evictions` | `MAX_INFLIGHT_EVICTIONS` | `1` | Planned moves (drain, fail-back) allowed at once across the cluster. Each is downtime plus a backup and a restore |
 
 ### cara-agent
 

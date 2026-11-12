@@ -1137,12 +1137,30 @@ func assignmentIdentity(ref store.AssignmentRef) v1.AssignmentIdentity {
 // own WHERE and the phase check runs against the snapshot that swap is
 // versioned on — the check and the write cannot be separated by a
 // reassignment.
-func (s *Store) RecordWorkloadStopped(ctx context.Context, name string, ref store.AssignmentRef, observedAt time.Time) error {
+func (s *Store) RecordWorkloadStopped(ctx context.Context, name string, ref store.AssignmentRef, forMove *time.Time, observedAt time.Time) error {
 	evidence := assignmentIdentity(ref)
 	return s.ReportProjectStatusFenced(ctx, name, ref, func(status *v1.ProjectStatus) error {
 		if !workloadStoppedPhases[status.Phase] {
 			return fmt.Errorf("%w: project %q is %s; workload-stopped evidence is accepted only while Scheduled, Running, Failed or Terminating",
 				store.ErrConflictState, name, status.Phase)
+		}
+		// Evidence sent for a planned move counts only while that very move
+		// is taking its backup off this node. A move called off while its
+		// agent was still finishing must not be left with evidence on a
+		// Project that is about to start again where it is.
+		if forMove != nil {
+			if e := status.Eviction; e == nil || e.State != v1.EvictionStateBackingUp ||
+				e.FromNode != ref.NodeRef || !e.StateSince.Equal(*forMove) {
+				return fmt.Errorf("%w: project %q has no planned move off node %q taking its backup since %s",
+					store.ErrConflictState, name, ref.NodeRef, forMove.UTC().Format(time.RFC3339Nano))
+			}
+		}
+		// A RecoveryBlocked the Agent set while it could not confirm the stop
+		// is over once the stop is confirmed. The Agent clears it itself after
+		// reporting, but does not try again if that write is lost, and the
+		// Project would show the stop as unconfirmed until placed elsewhere.
+		if slices.ContainsFunc(status.Conditions, func(c v1.Condition) bool { return c.Type == v1.ConditionTypeRecoveryBlocked }) {
+			status.Conditions = v1.RemoveConditions(status.Conditions, v1.ConditionTypeRecoveryBlocked)
 		}
 		// First evidence for an assignment wins. A retry or a restarted Agent
 		// reporting the same stop again changes nothing, not even ObservedAt,
@@ -1445,6 +1463,10 @@ func copyProjectStatus(src v1.ProjectStatus) v1.ProjectStatus {
 	dst.Conditions = slices.Clone(src.Conditions)
 	dst.Recovery = src.Recovery.DeepCopy()
 	dst.FailedNodes = slices.Clone(src.FailedNodes)
+	if src.Eviction != nil {
+		e := *src.Eviction
+		dst.Eviction = &e
+	}
 	dst.Backup = src.Backup.DeepCopy()
 	return dst
 }

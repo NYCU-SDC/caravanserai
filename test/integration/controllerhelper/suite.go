@@ -103,6 +103,13 @@ func NewSuite(t *testing.T, pool *pgxpool.Pool, databaseURL string, logger *zap.
 		bus,
 		opts...,
 	))
+	mgr.Add(controller.NewEvictionController(logger,
+		projectAdapter,
+		adapter.NewNodeReadyAdapter(pgStore),
+		bus,
+		controller.DefaultMaxInFlightEvictions,
+		opts...,
+	))
 
 	return &Suite{
 		Store:   pgStore,

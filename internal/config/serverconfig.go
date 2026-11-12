@@ -2,7 +2,9 @@ package config
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	configutil "github.com/NYCU-SDC/summer/pkg/config"
@@ -77,6 +79,11 @@ type Config struct {
 	// another registry; Agents pull whatever the manifest names, so manifests
 	// in that environment name the same reference.
 	PostgresDifferentialImage string `yaml:"postgres_differential_image" envconfig:"POSTGRES_DIFFERENTIAL_IMAGE"`
+
+	// MaxInFlightEvictions caps how many planned moves (drain, fail-back) run
+	// at once across the cluster (CARA-119). Each move is downtime plus a
+	// backup and a restore, so the default is one. Zero means the default.
+	MaxInFlightEvictions int `yaml:"max_inflight_evictions" envconfig:"MAX_INFLIGHT_EVICTIONS"`
 
 	// DefaultBackupInterval is the backup interval a Project with a Managed
 	// volume and no spec.backup gets when it is created or updated (ADR-0029).
@@ -191,6 +198,13 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 			logger.Warn("Invalid TERMINATING_TIMEOUT, ignoring", err, map[string]string{"value": raw})
 		}
 	}
+	if v := os.Getenv("MAX_INFLIGHT_EVICTIONS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("MAX_INFLIGHT_EVICTIONS: %w", err)
+		}
+		envConfig.MaxInFlightEvictions = n
+	}
 
 	return configutil.Merge[Config](cfg, envConfig)
 }
@@ -215,6 +229,7 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.DurationVar(&flagConfig.DefaultBackupInterval, "default-backup-interval", 0, "backup interval of a Project with a Managed volume and no spec.backup (default: 24h)")
 	flag.StringVar(&flagConfig.BreakGlassTokenFile, "break-glass-token-file", "", "file holding the break-glass admin token")
 	flag.String(configFlag, "", configFlagUsage)
+	flag.IntVar(&flagConfig.MaxInFlightEvictions, "max-inflight-evictions", 0, "planned moves (drain, fail-back) allowed at once across the cluster (default: 1)")
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)
 }

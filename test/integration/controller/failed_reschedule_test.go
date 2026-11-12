@@ -71,7 +71,7 @@ func TestFailedProjectMovesToAnotherNode(t *testing.T) {
 	createLedgerNode(t, s, "move-node-b", "backup", controllerhelper.RoomyAllocatable(), false)
 	createFailedProject(t, s, "move-project", "LocalRestartExhausted", "move-node-a", 2*time.Minute)
 	ref := failedAssignment(t, s, "move-project", "move-node-a")
-	require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "move-project", ref, time.Now()))
+	require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "move-project", ref, nil, time.Now()))
 	s.Start(t)
 
 	controllerhelper.WaitForCondition(t, 20*time.Second, 200*time.Millisecond, "project released", func() bool {
@@ -196,7 +196,7 @@ func TestMoveFailedProjectGate(t *testing.T) {
 		moved, err := projects.MoveFailedProject(ctx, snapshot("gate-ok"), "move")
 		require.NoError(t, err)
 		require.False(t, moved)
-		require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "gate-ok", ref, time.Now()))
+		require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "gate-ok", ref, nil, time.Now()))
 
 		judged := snapshot("gate-ok")
 		moved, err = projects.MoveFailedProject(ctx, judged, "move 2 of 2")
@@ -231,7 +231,7 @@ func TestMoveFailedProjectGate(t *testing.T) {
 	t.Run("a newer assignment is not moved by an older decision", func(t *testing.T) {
 		createFailedProject(t, s, "gate-newer", "LocalRestartExhausted", "gate-node-a", time.Hour)
 		ref := failedAssignment(t, s, "gate-newer", "gate-node-a")
-		require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "gate-newer", ref, time.Now()))
+		require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "gate-newer", ref, nil, time.Now()))
 		judged := snapshot("gate-newer")
 		// Since the decision was read, the project was assigned again to the
 		// same node and failed there too. The stop it carries is still the one
@@ -255,7 +255,7 @@ func TestMoveFailedProjectGate(t *testing.T) {
 	t.Run("a project deleted since the decision is not moved", func(t *testing.T) {
 		createFailedProject(t, s, "gate-deleted", "LocalRestartExhausted", "gate-node-a", time.Hour)
 		ref := failedAssignment(t, s, "gate-deleted", "gate-node-a")
-		require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "gate-deleted", ref, time.Now()))
+		require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "gate-deleted", ref, nil, time.Now()))
 		judged := snapshot("gate-deleted")
 		require.NoError(t, s.Store.UpdateProjectStatusWithRetry(ctx, "gate-deleted", func(st *v1.ProjectStatus) error {
 			st.Phase = v1.ProjectPhaseTerminating
@@ -277,7 +277,7 @@ func TestMoveFailedProjectGate(t *testing.T) {
 		require.NoError(t, s.Store.DeleteProject(ctx, "gate-recreated"))
 		createFailedProject(t, s, "gate-recreated", "LocalRestartExhausted", "gate-node-a", time.Hour)
 		ref := failedAssignment(t, s, "gate-recreated", "gate-node-a")
-		require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "gate-recreated", ref, time.Now()))
+		require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "gate-recreated", ref, nil, time.Now()))
 
 		moved, err := projects.MoveFailedProject(ctx, judged, "move")
 		assert.False(t, moved)

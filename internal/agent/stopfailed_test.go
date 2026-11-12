@@ -356,7 +356,7 @@ func TestLatchedGenerationIsNeverStarted(t *testing.T) {
 			p.Status.Phase = phase
 			client, updates := newReconcileServer(t, []v1.Project{p})
 			rt, any := touched()
-			reconcileProjects(context.Background(), client, rt, nil, nil, nil, nil, newRecoveryTracker(), nil, zap.NewNop())
+			reconcileProjects(context.Background(), client, rt, nil, nil, nil, nil, nil, newRecoveryTracker(), nil, zap.NewNop())
 			assert.False(t, *any, "phase %s: Docker untouched", phase)
 			assert.Empty(t, *updates)
 		}
@@ -383,7 +383,7 @@ func TestLatchedGenerationIsNeverStarted(t *testing.T) {
 		p.Status.Recovery = nil
 		client, _ := newReconcileServer(t, []v1.Project{p})
 		rt, any := touched()
-		reconcileProjects(context.Background(), client, rt, nil, nil, nil, nil, newRecoveryTracker(), nil, zap.NewNop())
+		reconcileProjects(context.Background(), client, rt, nil, nil, nil, nil, nil, newRecoveryTracker(), nil, zap.NewNop())
 		assert.True(t, *any)
 	})
 }

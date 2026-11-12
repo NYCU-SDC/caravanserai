@@ -200,7 +200,7 @@ func TestOperatorTakeoverUnblocksWorkloadStoppedRelease(t *testing.T) {
 	ref := store.AssignmentRef{UID: p.ObjectMeta.UID, NodeRef: "node-a", Generation: p.Status.AssignmentGeneration}
 	stores := adapter.NewProjectStoreAdapter(suite.store)
 
-	require.NoError(t, suite.store.RecordWorkloadStopped(ctx, name, ref, time.Now()))
+	require.NoError(t, suite.store.RecordWorkloadStopped(ctx, name, ref, nil, time.Now()))
 	released, err := stores.ReleaseAssignment(ctx, &controller.ProjectSnapshot{
 		Name: name, UID: ref.UID, Phase: p.Status.Phase, NodeRef: ref.NodeRef, AssignmentGeneration: ref.Generation,
 	})
