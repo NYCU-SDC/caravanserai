@@ -26,11 +26,12 @@ type fakeEvictionProject struct {
 	PgDiff  bool
 	// Stopped is the Agent's workload-stopped evidence for the current
 	// assignment, which the release needs.
-	Stopped     bool
-	Eviction    *v1.ProjectEviction
-	Conditions  []v1.Condition
-	Failure     *EvictionFailure
-	FailedNodes []string
+	Stopped bool
+	// Excluded are the Nodes the scheduler will not place it on.
+	Excluded   []string
+	Eviction   *v1.ProjectEviction
+	Conditions []v1.Condition
+	Failure    *EvictionFailure
 }
 
 // fakeEvictionStore mirrors the adapter's guards closely enough to drive the
@@ -105,13 +106,13 @@ func (f *fakeEvictionStore) ListProjectsByNodeRef(_ context.Context, node string
 	var out []*ProjectSnapshot
 	for n, p := range f.projects {
 		if p.NodeRef == node && slices.Contains(phases, p.Phase) {
-			conds := make([]ConditionSnapshot, len(p.Conditions))
+			conditions := make([]ConditionSnapshot, len(p.Conditions))
 			for i, c := range p.Conditions {
-				conds[i] = ConditionSnapshot{Type: c.Type, Reason: c.Reason, LastTransitionTime: c.LastTransitionTime}
+				conditions[i] = ConditionSnapshot{Type: c.Type, Reason: c.Reason, LastTransitionTime: c.LastTransitionTime}
 			}
 			out = append(out, &ProjectSnapshot{
 				Name: n, Phase: p.Phase, NodeRef: p.NodeRef, Size: p.Size,
-				FailedNodes: p.FailedNodes, Evicting: p.Eviction != nil, Conditions: conds,
+				ExcludedNodes: slices.Clone(p.Excluded), Evicting: p.Eviction != nil, Conditions: conditions,
 			})
 		}
 	}
@@ -128,7 +129,7 @@ func (f *fakeEvictionStore) ListEvictions(context.Context) ([]*EvictionSnapshot,
 		}
 		out = append(out, &EvictionSnapshot{
 			Name: n, Phase: p.Phase, NodeRef: p.NodeRef, Size: p.Size, HasManagedVolumes: p.Managed,
-			HasPostgresDifferential: p.PgDiff, WorkloadStopped: p.Stopped,
+			HasPostgresDifferential: p.PgDiff, WorkloadStopped: p.Stopped, ExcludedNodes: slices.Clone(p.Excluded),
 			Eviction: *p.Eviction, Conditions: slices.Clone(p.Conditions),
 		})
 	}
@@ -167,6 +168,18 @@ func (f *fakeEvictionStore) MoveEvictedProject(_ context.Context, e *EvictionSna
 }
 
 // RequestEviction mirrors the adapter's guards.
+func (f *fakeEvictionStore) CancelQueuedEviction(_ context.Context, name, fromNode, reason string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.projects[name]
+	if p == nil || p.Eviction == nil || p.Eviction.State != v1.EvictionStateQueued ||
+		p.Eviction.Reason != reason || p.Eviction.FromNode != fromNode {
+		return false, nil
+	}
+	p.Eviction = nil
+	return true, nil
+}
+
 func (f *fakeEvictionStore) RequestEviction(_ context.Context, name, fromNode, reason string, tier v1.NodeTier, avoid []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -389,6 +402,17 @@ func TestEvictionController_Failures(t *testing.T) {
 			name:  "no other node can take it",
 			nodes: []string{"node-a"},
 			setup: func(env *evictionEnv) {
+				env.reconcile(t)
+			},
+			wantReason: EvictionFailedNoCapacity, wantRunning: true,
+		},
+		{
+			// The scheduler would not place it there, so stopping it for a
+			// move it could not finish would be downtime for nothing.
+			name:  "the only other node still owes the project cleanup",
+			nodes: []string{"node-a", "node-b"},
+			setup: func(env *evictionEnv) {
+				env.store.projects["app"].Excluded = []string{"node-b"}
 				env.reconcile(t)
 			},
 			wantReason: EvictionFailedNoCapacity, wantRunning: true,

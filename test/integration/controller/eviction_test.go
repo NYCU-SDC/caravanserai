@@ -224,7 +224,9 @@ func TestRequestEviction(t *testing.T) {
 	assert.Equal(t, "Drain", first.Status.Eviction.Reason)
 	assert.Equal(t, "node-a", first.Status.Eviction.FromNode)
 
-	require.NoError(t, evictor.RequestEviction(ctx, "req-app", "node-a", "FailBack", "", nil))
+	require.NoError(t, evictor.RequestEviction(ctx, "req-app", "node-a", "Drain", "", nil), "asking again for the same move")
+	assert.ErrorIs(t, evictor.RequestEviction(ctx, "req-app", "node-a", "FailBack", "", nil), store.ErrConflictState,
+		"another trigger is told its move was not queued")
 	again, err := s.Store.GetProject(ctx, "req-app")
 	require.NoError(t, err)
 	assert.Equal(t, "Drain", again.Status.Eviction.Reason, "asking again does not start a second move")
@@ -314,4 +316,35 @@ func TestEndEvictionKeepsAMoveWhoseStopIsReported(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, p.Status.Eviction.AgentStartedAt)
 	assert.True(t, p.Status.Eviction.AgentStartedAt.Equal(first))
+}
+
+// TestCancelQueuedEviction validates the call-off fail-back uses when its
+// window ends: only a Queued move of its own.
+func TestCancelQueuedEviction(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+	ctx := context.Background()
+	a := adapter.NewProjectStoreAdapter(s.Store)
+
+	createRunningProject(t, s, "queued", "node-a")
+	require.NoError(t, a.RequestEviction(ctx, "queued", "node-a", "FailBack", v1.NodeTierPrimary, nil))
+
+	cancelled, err := a.CancelQueuedEviction(ctx, "queued", "node-a", "Drain")
+	require.NoError(t, err)
+	assert.False(t, cancelled, "another trigger's move")
+
+	cancelled, err = a.CancelQueuedEviction(ctx, "queued", "node-a", "FailBack")
+	require.NoError(t, err)
+	assert.True(t, cancelled)
+	p, err := s.Store.GetProject(ctx, "queued")
+	require.NoError(t, err)
+	assert.Nil(t, p.Status.Eviction)
+	assert.Equal(t, v1.ProjectPhaseRunning, p.Status.Phase, "nothing was stopped")
+
+	createRunningProject(t, s, "started", "node-a")
+	require.NoError(t, a.RequestEviction(ctx, "started", "node-a", "FailBack", v1.NodeTierPrimary, nil))
+	require.NoError(t, a.StartEvictionBackup(ctx, "started", "node-a"))
+	cancelled, err = a.CancelQueuedEviction(ctx, "started", "node-a", "FailBack")
+	require.NoError(t, err)
+	assert.False(t, cancelled, "a move under way is left to finish")
 }

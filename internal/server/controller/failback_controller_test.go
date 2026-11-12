@@ -156,7 +156,7 @@ func TestFailback_CandidateDetection(t *testing.T) {
 	t.Run("a project that only fits on a primary node it failed on is left alone", func(t *testing.T) {
 		env := newFailbackEnv(t, taipeiWindow(t), inWindow, tieredNode("pve1", "primary"), tieredNode("twcc1", "backup"))
 		env.running("app", "twcc1", v1.ProjectSizeSmall)
-		env.store.projects["app"].FailedNodes = []string{"pve1"}
+		env.store.projects["app"].Excluded = []string{"pve1"}
 		env.reconcile(t)
 		assert.Empty(t, env.store.requests)
 	})
@@ -410,4 +410,55 @@ func TestFailback_TightPrimaryIsAvoided(t *testing.T) {
 	e := env.lastRequest("app")
 	require.NotNil(t, e)
 	assert.Equal(t, []string{"pve1"}, e.AvoidNodes)
+}
+
+func TestFailback_ARecentlyFailedMoveIsNotRetried(t *testing.T) {
+	failedAgo := func(env *failbackEnv, name string, ago time.Duration) {
+		env.store.projects[name].Conditions = append(env.store.projects[name].Conditions, v1.Condition{
+			Type: v1.ConditionTypeEvictionFailed, Status: v1.ConditionTrue, Reason: EvictionFailedBackupFailed,
+			LastTransitionTime: env.clock.Now().Add(-ago),
+		})
+	}
+
+	t.Run("failed a minute ago: left alone, and the next project gets its turn", func(t *testing.T) {
+		env := newFailbackEnv(t, taipeiWindow(t), inWindow)
+		env.running("a-failed", "twcc1", v1.ProjectSizeSmall)
+		env.running("b-next", "twcc1", v1.ProjectSizeSmall)
+		failedAgo(env, "a-failed", time.Minute)
+		env.reconcile(t)
+		assert.Equal(t, []string{"b-next"}, env.store.requests)
+	})
+
+	t.Run("failed 23h59m ago: still left alone", func(t *testing.T) {
+		env := newFailbackEnv(t, taipeiWindow(t), inWindow)
+		env.running("app", "twcc1", v1.ProjectSizeSmall)
+		failedAgo(env, "app", failbackRetryAfter-time.Minute)
+		env.reconcile(t)
+		assert.Empty(t, env.store.requests)
+	})
+
+	t.Run("failed a day ago: tried again", func(t *testing.T) {
+		env := newFailbackEnv(t, taipeiWindow(t), inWindow)
+		env.running("app", "twcc1", v1.ProjectSizeSmall)
+		failedAgo(env, "app", failbackRetryAfter)
+		env.reconcile(t)
+		assert.Equal(t, []string{"app"}, env.store.requests)
+	})
+}
+
+func TestFailback_AQueuedMoveIsCalledOffWhenTheWindowEnds(t *testing.T) {
+	env := newFailbackEnv(t, taipeiWindow(t), outWindow)
+	env.running("queued", "twcc1", v1.ProjectSizeSmall)
+	env.store.request("queued", FailBackReason, 0)
+	env.running("started", "twcc1", v1.ProjectSizeSmall)
+	env.store.request("started", FailBackReason, 0)
+	env.store.projects["started"].Eviction.State = v1.EvictionStateBackingUp
+	env.running("draining", "twcc1", v1.ProjectSizeSmall)
+	env.store.request("draining", DrainReason, 0)
+
+	env.reconcile(t)
+	assert.Nil(t, env.store.get("queued").Eviction, "it would have stopped the project outside the window")
+	assert.NotNil(t, env.store.get("started").Eviction, "a move under way finishes")
+	assert.NotNil(t, env.store.get("draining").Eviction, "another trigger's move is not fail-back's")
+	assert.Empty(t, env.store.requests)
 }

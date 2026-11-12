@@ -1050,6 +1050,15 @@ func (r *ProjectRecoveryStatus) OweManagedData(assignment AssignmentIdentity) {
 	}
 }
 
+// PlacementExcludedNodes returns the Nodes the Project is never placed on,
+// whatever asks for the placement: those it has been moved off after Failed,
+// and those still owing cleanup for it (SetProjectScheduled refuses them).
+// Every check of where the Project could go uses it, so a precheck never
+// passes on a Node the scheduler would then refuse.
+func (s *ProjectStatus) PlacementExcludedNodes() []string {
+	return slices.Concat(s.FailedNodes, s.Recovery.NodesOwingCleanup())
+}
+
 // NodesOwingCleanup returns the Nodes that still owe runtime cleanup or local
 // Managed data for this Project. None of them may be given a new assignment of
 // it (ADR-0024 C3).

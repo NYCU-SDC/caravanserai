@@ -21,17 +21,23 @@ var (
 // move of a Project off fromNode.
 //
 // It returns store.ErrConflictState when the Project is not Running on
-// fromNode — only a running Project can be backed up and moved — and does
-// nothing when a move is already in progress, so a trigger may ask again
-// without starting a second one.
+// fromNode — only a running Project can be backed up and moved. Asking again
+// for the move already in progress (same reason, same node) does nothing, so
+// a trigger may repeat itself; a move asked for by another trigger, or off
+// another node, is store.ErrConflictState, so the caller is not told its own
+// move was queued when it was not.
 func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNode, reason string, targetTier v1.NodeTier, avoid []string) error {
 	if targetTier != "" && !targetTier.IsValid() {
 		return fmt.Errorf("request eviction of %q: invalid target tier %q", name, targetTier)
 	}
 	now := time.Now().UTC()
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
-		if status.Eviction != nil {
-			return nil
+		if e := status.Eviction; e != nil {
+			if e.Reason == reason && e.FromNode == fromNode {
+				return nil
+			}
+			return fmt.Errorf("%w: project %q is already being moved off %q (%s)",
+				store.ErrConflictState, name, e.FromNode, e.Reason)
 		}
 		if status.Phase != v1.ProjectPhaseRunning || status.NodeRef != fromNode {
 			return fmt.Errorf("%w: project %q is %s on %q, not Running on %q",
@@ -50,6 +56,22 @@ func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNod
 			v1.ConditionTypeEvictionFailed, v1.ConditionTypeEvictionBackup)
 		return nil
 	})
+}
+
+// CancelQueuedEviction satisfies controller.FailbackStore. It calls off a
+// planned move of the Project off fromNode for reason, only while the move is
+// still Queued: nothing has been stopped yet. It reports whether it did.
+func (a *ProjectStoreAdapter) CancelQueuedEviction(ctx context.Context, name, fromNode, reason string) (bool, error) {
+	var cancelled bool
+	err := a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		e := status.Eviction
+		cancelled = e != nil && e.State == v1.EvictionStateQueued && e.Reason == reason && e.FromNode == fromNode
+		if cancelled {
+			status.Eviction = nil
+		}
+		return nil
+	})
+	return cancelled, err
 }
 
 // ListEvictions satisfies controller.EvictionStore. It returns every Project
@@ -73,7 +95,7 @@ func (a *ProjectStoreAdapter) ListEvictions(ctx context.Context) ([]*controller.
 			AssignmentGeneration:    p.Status.AssignmentGeneration,
 			WorkloadStopped:         p.Status.Recovery.WorkloadStoppedFor(assignment),
 			Size:                    p.Spec.Size,
-			FailedNodes:             slices.Clone(p.Status.FailedNodes),
+			ExcludedNodes:           p.Status.PlacementExcludedNodes(),
 			HasManagedVolumes:       p.Spec.HasManagedVolume(),
 			HasPostgresDifferential: p.Spec.HasPostgresDifferential(),
 			Eviction:                *p.Status.Eviction,

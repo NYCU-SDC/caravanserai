@@ -13,13 +13,24 @@ import (
 type nodeScheduling struct {
 	unschedulable bool
 	drain         bool
+	// keepDrain leaves Spec.Drain as it is: cordoning a Node being drained
+	// must not call the drain off.
+	keepDrain bool
 }
+
+// What each command sets.
+var (
+	cordonScheduling   = nodeScheduling{unschedulable: true, keepDrain: true}
+	drainScheduling    = nodeScheduling{unschedulable: true, drain: true}
+	uncordonScheduling = nodeScheduling{}
+)
 
 func newNodeCordonCmd() *cobra.Command {
 	return newNodeSchedulingCmd("cordon", "Stop new projects from being placed on a node",
 		`cordon marks a node unschedulable: no new project is placed on it, and the
-projects already there keep running. Undo it with uncordon.`,
-		nodeScheduling{unschedulable: true}, "cordoned")
+projects already there keep running. A drain in progress goes on; only
+uncordon calls it off. Undo it with uncordon.`,
+		cordonScheduling, "cordoned")
 }
 
 func newNodeDrainCmd() *cobra.Command {
@@ -34,7 +45,7 @@ node can then be powered off. Incomplete lists any project that cannot leave
 without help, and why.
 
 Undo it with uncordon.`,
-		nodeScheduling{unschedulable: true, drain: true}, "draining")
+		drainScheduling, "draining")
 }
 
 func newNodeUncordonCmd() *cobra.Command {
@@ -42,7 +53,7 @@ func newNodeUncordonCmd() *cobra.Command {
 		`uncordon lets a node take new projects again. If it is being drained, the
 drain is called off: moves that have not yet stopped their project are
 cancelled and those projects keep running here; moves past that point finish.`,
-		nodeScheduling{}, "uncordoned")
+		uncordonScheduling, "uncordoned")
 }
 
 func newNodeSchedulingCmd(use, short, long string, want nodeScheduling, done string) *cobra.Command {
@@ -73,7 +84,9 @@ func setNodeScheduling(ctx context.Context, client *Client, name string, want no
 		return err
 	}
 	node.Spec.Unschedulable = want.unschedulable
-	node.Spec.Drain = want.drain
+	if !want.keepDrain {
+		node.Spec.Drain = want.drain
+	}
 	_, err = client.UpdateNode(ctx, node)
 	return err
 }

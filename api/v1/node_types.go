@@ -181,6 +181,10 @@ type NodeDrainStatus struct {
 	// Since is when Phase last changed.
 	Since time.Time `json:"since" yaml:"since"`
 
+	// StartedAt is when this drain began. A planned move that failed before
+	// it is not this drain's failure, and is asked for again once.
+	StartedAt time.Time `json:"startedAt,omitempty" yaml:"startedAt,omitempty"`
+
 	// Remaining is how many Projects are still assigned to the Node or owed
 	// cleanup by it.
 	Remaining int `json:"remaining,omitempty" yaml:"remaining,omitempty"`

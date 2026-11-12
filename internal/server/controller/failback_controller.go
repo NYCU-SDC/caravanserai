@@ -25,6 +25,13 @@ const (
 	// failbackQueueKey is the only key this controller reconciles; each pass
 	// considers the whole cluster.
 	failbackQueueKey = "failback"
+
+	// failbackRetryAfter is how long fail-back leaves a Project alone after
+	// a planned move of it failed. Each try may stop the Project and take a
+	// backup, and a move that failed once in the window — a backup that
+	// failed, a strategy a move cannot back up — would most likely fail
+	// again a minute later. A day is the next window.
+	failbackRetryAfter = 24 * time.Hour
 )
 
 // FailbackPolicy is how cautious fail-back is (CARA-122,
@@ -92,6 +99,11 @@ type FailbackStore interface {
 
 	// EvictionRequester asks for the move.
 	EvictionRequester
+
+	// CancelQueuedEviction calls off a planned move of the Project off
+	// fromNode for reason while it is still Queued, before anything was
+	// stopped, and reports whether it did.
+	CancelQueuedEviction(ctx context.Context, name, fromNode, reason string) (bool, error)
 }
 
 // FailbackController returns Projects from the backup tier to the primary
@@ -117,6 +129,11 @@ type FailbackStore interface {
 //     keeps failing) and that keeps comfortable room after the move may take
 //     the Project, and a Project that has only just started where it is is
 //     left there.
+//
+// A Project a planned move failed for is left alone for failbackRetryAfter,
+// so it is neither stopped again every minute nor in the way of the next
+// one, and a move still waiting in the queue when the window ends is called
+// off.
 //
 // It does not move anything itself: it asks the eviction controller for a
 // planned move (fresh backup, then Pending), and the scheduler places the
@@ -168,13 +185,16 @@ func (c *FailbackController) Name() string { return "failback" }
 func (c *FailbackController) Reconcile(ctx context.Context, _ string) (Result, error) {
 	log := c.logger.With(zap.String("controller", c.Name()))
 
-	if c.window == nil || !c.window.Contains(c.clock.Now()) {
+	if c.window == nil {
 		return Result{}, nil
 	}
 
 	evictions, err := c.projects.ListEvictions(ctx)
 	if err != nil {
 		return Result{}, err
+	}
+	if !c.window.Contains(c.clock.Now()) {
+		return Result{}, c.callOffQueued(ctx, log, evictions)
 	}
 	for _, e := range evictions {
 		if e.Eviction.Reason == FailBackReason {
@@ -204,10 +224,20 @@ func (c *FailbackController) Reconcile(ctx context.Context, _ string) (Result, e
 		if !c.cooledDown(log, p) {
 			continue
 		}
+		// Skipped, not retried: the next candidate gets its turn instead of
+		// waiting behind a Project that cannot be moved.
+		if failed, ok := evictionFailedCondition(p); ok && c.clock.Since(failed.LastTransitionTime) < failbackRetryAfter {
+			log.Debug("A planned move of the project failed recently; not trying again yet",
+				zap.String("project", p.Name), zap.String("failure", failed.Reason),
+				zap.Duration("retryIn", failbackRetryAfter-c.clock.Since(failed.LastTransitionTime)))
+			continue
+		}
 
 		fits, _, err := filterNodes(ctx, c.ledger, stable, ProjectPlacement{
-			Size:          p.Size,
-			ExcludedNodes: p.FailedNodes,
+			Size: p.Size,
+			// The Nodes the scheduler would not place it on: those it
+			// failed on and those still owing it cleanup.
+			ExcludedNodes: p.ExcludedNodes,
 			RequiredTier:  v1.NodeTierPrimary,
 		})
 		if err != nil {
@@ -302,6 +332,38 @@ func (c *FailbackController) comfortable(n candidate, size v1.ProjectSize) bool 
 	cpu := freePercent(n.Allocatable.CPUMilli, n.Used.CPUMilli+req.CPUMilli)
 	mem := freePercent(n.Allocatable.MemoryBytes, n.Used.MemoryBytes+req.MemoryBytes)
 	return cpu >= c.policy.MinFreePercent && mem >= c.policy.MinFreePercent
+}
+
+// callOffQueued cancels the fail-back moves still Queued once the window is
+// over. A move waits in the queue while others hold every slot, and starting
+// it after the window would stop the Project at the time of day fail-back
+// promises not to. A move already under way is left to finish.
+func (c *FailbackController) callOffQueued(ctx context.Context, log *zap.Logger, evictions []*EvictionSnapshot) error {
+	for _, e := range evictions {
+		if e.Eviction.Reason != FailBackReason || e.Eviction.State != v1.EvictionStateQueued {
+			continue
+		}
+		cancelled, err := c.projects.CancelQueuedEviction(ctx, e.Name, e.Eviction.FromNode, FailBackReason)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if cancelled {
+			log.Info("Fail-back window is over; cancelled a move that had not started",
+				zap.String("project", e.Name), zap.String("fromNode", e.Eviction.FromNode))
+		}
+	}
+	return nil
+}
+
+// evictionFailedCondition returns the Project's EvictionFailed condition, the
+// last planned move of it that was abandoned, if any.
+func evictionFailedCondition(p *ProjectSnapshot) (ConditionSnapshot, bool) {
+	for _, c := range p.Conditions {
+		if c.Type == v1.ConditionTypeEvictionFailed {
+			return c, true
+		}
+	}
+	return ConditionSnapshot{}, false
 }
 
 // misplaced returns the Running Projects on backup-tier Nodes that are not
