@@ -258,6 +258,81 @@ func (r *DockerRuntime) StaleContainers(ctx context.Context, project *v1.Project
 	return stale, nil
 }
 
+// ProjectContainers implements Runtime.
+func (r *DockerRuntime) ProjectContainers(ctx context.Context, project *v1.Project) ([]ProjectContainer, error) {
+	// Filtered without the UID, as StaleContainers is: a container of a
+	// previous lifetime is listed and classified, not hidden.
+	f := containerOwnershipFilters(ProjectIdentity{Namespace: project.Namespace, Name: project.Name})
+	containers, err := r.client.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
+	if err != nil {
+		return nil, fmt.Errorf("list project containers: %w", err)
+	}
+
+	owner := ownerOf(project)
+	out := make([]ProjectContainer, 0, len(containers))
+	for _, c := range containers {
+		name := strings.TrimPrefix(firstName(c.Names), "/")
+		service := c.Labels[labelService]
+		out = append(out, ProjectContainer{
+			Name:     name,
+			Service:  service,
+			ID:       c.ID,
+			State:    string(c.State),
+			NotOwned: r.checkOwnershipLabels(name, c.Labels, owner, service),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// StopAssignment implements Runtime.
+func (r *DockerRuntime) StopAssignment(ctx context.Context, project *v1.Project) error {
+	log := r.logger.With(zap.String("project", project.Name))
+	timeout := stopTimeoutSeconds
+
+	listed, err := r.ProjectContainers(ctx, project)
+	if err != nil {
+		return err
+	}
+	for _, c := range stopOrder(project, listed) {
+		if err := r.client.ContainerStop(ctx, c.ID, container.StopOptions{Timeout: &timeout}); err != nil {
+			if isNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("stop container %q: %w", c.Name, err)
+		}
+		log.Debug("Container stopped", zap.String("container", c.Name))
+	}
+	return nil
+}
+
+// stopOrder returns the containers of the current assignment in the order
+// StopAssignment stops them: the services the spec declares in reverse spec
+// order, so a service stops before what it depends on, then any the spec no
+// longer declares, by name.
+func stopOrder(project *v1.Project, listed []ProjectContainer) []ProjectContainer {
+	rank := make(map[string]int, len(project.Spec.Services))
+	for i, svc := range project.Spec.Services {
+		// Later in the spec ranks higher and stops earlier; a service the
+		// spec no longer declares ranks 0 and stops last.
+		rank[svc.Name] = i + 1
+	}
+	var owned []ProjectContainer
+	for _, c := range listed {
+		if c.NotOwned == nil {
+			owned = append(owned, c)
+		}
+	}
+	sort.SliceStable(owned, func(i, j int) bool {
+		ri, rj := rank[owned[i].Service], rank[owned[j].Service]
+		if ri != rj {
+			return ri > rj
+		}
+		return owned[i].Name < owned[j].Name
+	})
+	return owned
+}
+
 // checkExistingOwnership reports, before any mutation, whether every service
 // container that already exists belongs to the project's current assignment.
 // A missing container is fine — it is what reconcile is about to create.
