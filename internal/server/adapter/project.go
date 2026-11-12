@@ -67,17 +67,19 @@ func (a *ProjectStoreAdapter) GetProjectPlacement(ctx context.Context, name stri
 	}
 	// A Node still owing cleanup is left out: SetProjectScheduled would refuse
 	// it, and choosing it would stall a Project another Node could host.
-	excluded := project.Status.PlacementExcludedNodes()
-	// A Project being moved off a Node on purpose must not land back on it.
-	if e := project.Status.Eviction; e != nil && e.State == v1.EvictionStateMoving {
-		excluded = append(excluded, e.FromNode)
-	}
-	return controller.ProjectPlacement{
+	placement := controller.ProjectPlacement{
 		UID:           project.ObjectMeta.UID,
 		Phase:         project.Status.Phase,
 		Size:          project.Spec.Size,
-		ExcludedNodes: excluded,
-	}, nil
+		ExcludedNodes: project.Status.PlacementExcludedNodes(),
+	}
+	// A Project being moved off a Node on purpose must not land back on it,
+	// and must land in the tier the move asked for, if any.
+	if e := project.Status.Eviction; e != nil && e.State == v1.EvictionStateMoving {
+		placement.ExcludedNodes = append(placement.ExcludedNodes, e.FromNode)
+		placement.RequiredTier = e.TargetTier
+	}
+	return placement, nil
 }
 
 // SetProjectScheduled satisfies controller.SchedulerProjectStore.
@@ -474,6 +476,7 @@ func snapshotOf(p *v1.Project) *controller.ProjectSnapshot {
 		AssignmentGeneration: p.Status.AssignmentGeneration,
 		Size:                 p.Spec.Size,
 		FailedNodes:          slices.Clone(p.Status.FailedNodes),
+		Evicting:             p.Status.Eviction != nil,
 		ExcludedNodes:        p.Status.PlacementExcludedNodes(),
 		Conditions:           conditions,
 	}

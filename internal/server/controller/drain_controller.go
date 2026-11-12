@@ -210,7 +210,8 @@ func (c *DrainController) Reconcile(ctx context.Context, name string) (Result, e
 
 // requestMove asks for a planned move of the Project off node.
 func (c *DrainController) requestMove(ctx context.Context, log *zap.Logger, project, node string) error {
-	err := c.store.RequestEviction(ctx, project, node, DrainReason)
+	// Any tier: a drain empties the Node, wherever the Project can go.
+	err := c.store.RequestEviction(ctx, project, node, DrainReason, "")
 	switch {
 	case err == nil:
 		log.Info("Asked to move project off draining node", zap.String("project", project))

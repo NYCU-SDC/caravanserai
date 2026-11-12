@@ -26,7 +26,10 @@ var (
 // a trigger may repeat itself; a move asked for by another trigger, or off
 // another node, is store.ErrConflictState, so the caller is not told its own
 // move was queued when it was not.
-func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNode, reason string) error {
+func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNode, reason string, targetTier v1.NodeTier) error {
+	if targetTier != "" && !targetTier.IsValid() {
+		return fmt.Errorf("request eviction of %q: invalid target tier %q", name, targetTier)
+	}
 	now := time.Now().UTC()
 	return a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
 		if e := status.Eviction; e != nil {
@@ -44,6 +47,7 @@ func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNod
 			Reason:      reason,
 			FromNode:    fromNode,
 			State:       v1.EvictionStateQueued,
+			TargetTier:  targetTier,
 			RequestedAt: now,
 			StateSince:  now,
 		}
@@ -51,6 +55,22 @@ func (a *ProjectStoreAdapter) RequestEviction(ctx context.Context, name, fromNod
 			v1.ConditionTypeEvictionFailed, v1.ConditionTypeEvictionBackup)
 		return nil
 	})
+}
+
+// CancelQueuedEviction satisfies controller.FailbackStore. It calls off a
+// planned move of the Project off fromNode for reason, only while the move is
+// still Queued: nothing has been stopped yet. It reports whether it did.
+func (a *ProjectStoreAdapter) CancelQueuedEviction(ctx context.Context, name, fromNode, reason string) (bool, error) {
+	var cancelled bool
+	err := a.s.UpdateProjectStatusWithRetry(ctx, name, func(status *v1.ProjectStatus) error {
+		e := status.Eviction
+		cancelled = e != nil && e.State == v1.EvictionStateQueued && e.Reason == reason && e.FromNode == fromNode
+		if cancelled {
+			status.Eviction = nil
+		}
+		return nil
+	})
+	return cancelled, err
 }
 
 // ListEvictions satisfies controller.EvictionStore. It returns every Project

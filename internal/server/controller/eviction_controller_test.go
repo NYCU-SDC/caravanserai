@@ -44,6 +44,7 @@ type fakeEvictionStore struct {
 	projects        map[string]*fakeEvictionProject
 
 	backupsAsked []string
+	requests     []string
 	released     []string
 }
 
@@ -105,7 +106,14 @@ func (f *fakeEvictionStore) ListProjectsByNodeRef(_ context.Context, node string
 	var out []*ProjectSnapshot
 	for n, p := range f.projects {
 		if p.NodeRef == node && slices.Contains(phases, p.Phase) {
-			out = append(out, &ProjectSnapshot{Name: n, Phase: p.Phase, NodeRef: p.NodeRef, Size: p.Size})
+			conditions := make([]ConditionSnapshot, len(p.Conditions))
+			for i, c := range p.Conditions {
+				conditions[i] = ConditionSnapshot{Type: c.Type, Reason: c.Reason, LastTransitionTime: c.LastTransitionTime}
+			}
+			out = append(out, &ProjectSnapshot{
+				Name: n, Phase: p.Phase, NodeRef: p.NodeRef, Size: p.Size,
+				ExcludedNodes: slices.Clone(p.Excluded), Evicting: p.Eviction != nil, Conditions: conditions,
+			})
 		}
 	}
 	return out, nil
@@ -159,6 +167,38 @@ func (f *fakeEvictionStore) MoveEvictedProject(_ context.Context, e *EvictionSna
 	return true, nil
 }
 
+// RequestEviction mirrors the adapter's guards.
+func (f *fakeEvictionStore) CancelQueuedEviction(_ context.Context, name, fromNode, reason string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.projects[name]
+	if p == nil || p.Eviction == nil || p.Eviction.State != v1.EvictionStateQueued ||
+		p.Eviction.Reason != reason || p.Eviction.FromNode != fromNode {
+		return false, nil
+	}
+	p.Eviction = nil
+	return true, nil
+}
+
+func (f *fakeEvictionStore) RequestEviction(_ context.Context, name, fromNode, reason string, tier v1.NodeTier) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.projects[name]
+	if !ok {
+		return store.ErrNotFound
+	}
+	if p.Eviction != nil {
+		return nil
+	}
+	if p.Phase != v1.ProjectPhaseRunning || p.NodeRef != fromNode {
+		return store.ErrConflictState
+	}
+	now := f.clock.Now()
+	p.Eviction = &v1.ProjectEviction{Reason: reason, FromNode: fromNode, State: v1.EvictionStateQueued, TargetTier: tier, RequestedAt: now, StateSince: now}
+	f.requests = append(f.requests, name)
+	return nil
+}
+
 // EndEviction mirrors the adapter: a move whose stop evidence is in is not
 // abandoned.
 func (f *fakeEvictionStore) EndEviction(_ context.Context, e *EvictionSnapshot, failure *EvictionFailure) error {
@@ -203,6 +243,27 @@ func newEvictionEnv(t *testing.T, maxInFlight int, nodes ...string) *evictionEnv
 		ready[i] = ReadyNode{Name: n, Allocatable: v1.ResourceList{"cpu": "4", "memory": "8Gi"}}
 	}
 	ctrl := NewEvictionController(zap.NewNop(), st, newFakeSchedulerNodeStoreOf(ready...), nil, maxInFlight, WithClock(clock))
+	return &evictionEnv{clock: clock, store: st, ctrl: ctrl}
+}
+
+// newTieredEvictionEnv is newEvictionEnv with each node labelled with the
+// tier given in tiers, by name.
+func newTieredEvictionEnv(t *testing.T, tiers map[string]string) *evictionEnv {
+	t.Helper()
+	clock := &fakeClock{Time: time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)}
+	st := newFakeEvictionStore(clock)
+	var ready []ReadyNode
+	for _, n := range []string{"node-a", "node-b", "node-c"} {
+		tier, ok := tiers[n]
+		if !ok {
+			continue
+		}
+		ready = append(ready, ReadyNode{
+			Name: n, Labels: map[string]string{v1.LabelNodeTier: tier},
+			Allocatable: v1.ResourceList{"cpu": "4", "memory": "8Gi"},
+		})
+	}
+	ctrl := NewEvictionController(zap.NewNop(), st, newFakeSchedulerNodeStoreOf(ready...), nil, 1, WithClock(clock))
 	return &evictionEnv{clock: clock, store: st, ctrl: ctrl}
 }
 
@@ -510,6 +571,42 @@ func TestEvictionController_Defaults(t *testing.T) {
 	res, err := ctrl.Reconcile(context.Background(), evictionQueueKey)
 	require.NoError(t, err)
 	assert.False(t, res.Requeue, "nothing to do, nothing to come back for")
+}
+
+func TestEvictionController_TargetTier(t *testing.T) {
+	t.Run("a move bound for primary is refused when only backup has room", func(t *testing.T) {
+		env := newTieredEvictionEnv(t, map[string]string{"node-a": "backup", "node-b": "backup"})
+		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+		env.store.request("app", "FailBack", 0)
+		env.store.projects["app"].Eviction.TargetTier = v1.NodeTierPrimary
+
+		env.reconcile(t)
+		p := env.store.get("app")
+		assert.Nil(t, p.Eviction)
+		require.NotNil(t, p.Failure)
+		assert.Equal(t, EvictionFailedNoCapacity, p.Failure.Reason)
+		assert.Contains(t, p.Failure.Message, "No other primary node")
+		assert.Empty(t, env.store.backupsAsked, "nothing is stopped for a move with nowhere to go")
+	})
+
+	t.Run("a move bound for primary starts when primary has room", func(t *testing.T) {
+		env := newTieredEvictionEnv(t, map[string]string{"node-a": "backup", "node-b": "primary"})
+		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+		env.store.request("app", "FailBack", 0)
+		env.store.projects["app"].Eviction.TargetTier = v1.NodeTierPrimary
+
+		env.reconcile(t)
+		assert.Equal(t, v1.EvictionStateBackingUp, stateOf(env.store.get("app")))
+	})
+
+	t.Run("a move with no target tier may land in either tier", func(t *testing.T) {
+		env := newTieredEvictionEnv(t, map[string]string{"node-a": "primary", "node-b": "backup"})
+		env.store.running("app", "node-a", v1.ProjectSizeSmall, true)
+		env.store.request("app", "Drain", 0)
+
+		env.reconcile(t)
+		assert.Equal(t, v1.EvictionStateBackingUp, stateOf(env.store.get("app")))
+	})
 }
 
 func TestEvictionController_ReleaseNeedsStopEvidence(t *testing.T) {

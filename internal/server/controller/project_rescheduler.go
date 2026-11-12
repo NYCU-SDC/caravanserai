@@ -43,6 +43,8 @@ type ProjectSnapshot struct {
 	Size                 v1.ProjectSize
 	// FailedNodes are the Nodes the Project has been moved off after Failed.
 	FailedNodes []string
+	// Evicting reports whether a planned move of the Project is in progress.
+	Evicting bool
 	// ExcludedNodes are the Nodes the scheduler will not place the Project
 	// on: FailedNodes and the Nodes still owing it cleanup.
 	ExcludedNodes []string

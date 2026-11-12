@@ -190,7 +190,7 @@ func TestAgentClientReportsAStopForAMoveThatWasCalledOff(t *testing.T) {
 	ctx := context.Background()
 	uid, gen := createAssigned(t, name, "node-a", v1.ProjectPhaseRunning)
 	a := adapter.NewProjectStoreAdapter(suite.store)
-	require.NoError(t, a.RequestEviction(ctx, name, "node-a", "Drain"))
+	require.NoError(t, a.RequestEviction(ctx, name, "node-a", "Drain", ""))
 	require.NoError(t, a.StartEvictionBackup(ctx, name, "node-a"))
 	since := getProject(t, name).Status.Eviction.StateSince
 

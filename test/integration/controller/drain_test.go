@@ -190,7 +190,7 @@ func TestCancelEvictionStopsAtTheStopEvidence(t *testing.T) {
 	drains := adapter.NewDrainStoreAdapter(s.Store)
 
 	createRunningProject(t, s, "cancel-app", "node-a")
-	require.NoError(t, drains.RequestEviction(ctx, "cancel-app", "node-a", "Drain"))
+	require.NoError(t, drains.RequestEviction(ctx, "cancel-app", "node-a", "Drain", ""))
 	require.NoError(t, drains.StartEvictionBackup(ctx, "cancel-app", "node-a"))
 	agentReportsBackup(t, s, "cancel-app", v1.ConditionTrue, "b1")
 

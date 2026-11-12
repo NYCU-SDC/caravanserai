@@ -77,7 +77,7 @@ func TestFilterNodes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ledger, _ := newTestLedger(nil)
-			got, rejected, err := filterNodes(context.Background(), ledger, tt.nodes, v1.ProjectSizeMedium, nil)
+			got, rejected, err := filterNodes(context.Background(), ledger, tt.nodes, ProjectPlacement{Size: v1.ProjectSizeMedium})
 			require.NoError(t, err)
 
 			var names []string
@@ -100,12 +100,12 @@ func TestFilterNodes(t *testing.T) {
 		ledger, _ := newTestLedger(map[string][]*ProjectSnapshot{"n1": snapshots(v1.ProjectSizeLarge)})
 		n := ReadyNode{Name: "n1", Allocatable: v1.ResourceList{"cpu": "4", "memory": "8Gi"}}
 
-		got, _, err := filterNodes(context.Background(), ledger, []ReadyNode{n}, v1.ProjectSizeLarge, nil)
+		got, _, err := filterNodes(context.Background(), ledger, []ReadyNode{n}, ProjectPlacement{Size: v1.ProjectSizeLarge})
 		require.NoError(t, err)
 		assert.Len(t, got, 1, "a second Large fits exactly")
 
 		ledger, _ = newTestLedger(map[string][]*ProjectSnapshot{"n1": snapshots(v1.ProjectSizeLarge, v1.ProjectSizeLarge)})
-		got, rejected, err := filterNodes(context.Background(), ledger, []ReadyNode{n}, v1.ProjectSizeSmall, nil)
+		got, rejected, err := filterNodes(context.Background(), ledger, []ReadyNode{n}, ProjectPlacement{Size: v1.ProjectSizeSmall})
 		require.NoError(t, err)
 		assert.Empty(t, got, "a full node has no room even for Small")
 		require.Len(t, rejected, 1)
@@ -114,7 +114,7 @@ func TestFilterNodes(t *testing.T) {
 	t.Run("ledger error is returned, not treated as full", func(t *testing.T) {
 		ledger := NewCapacityLedger(zap.NewNop(), &fakeCapacityProjectStore{err: assert.AnError})
 		got, _, err := filterNodes(context.Background(), ledger,
-			[]ReadyNode{{Name: "n1", Allocatable: alloc}}, v1.ProjectSizeSmall, nil)
+			[]ReadyNode{{Name: "n1", Allocatable: alloc}}, ProjectPlacement{Size: v1.ProjectSizeSmall})
 		assert.ErrorIs(t, err, assert.AnError)
 		assert.Empty(t, got)
 	})
@@ -125,14 +125,49 @@ func TestFilterNodes_ExcludesNodesTheProjectFailedOn(t *testing.T) {
 	nodes := []ReadyNode{{Name: "failed-1", Allocatable: alloc}, {Name: "fresh", Allocatable: alloc}, {Name: "failed-2", Allocatable: alloc}}
 	ledger, _ := newTestLedger(nil)
 
-	got, rejected, err := filterNodes(context.Background(), ledger, nodes, v1.ProjectSizeSmall, []string{"failed-1", "failed-2"})
+	got, rejected, err := filterNodes(context.Background(), ledger, nodes, ProjectPlacement{Size: v1.ProjectSizeSmall, ExcludedNodes: []string{"failed-1", "failed-2"}})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "fresh", got[0].Name)
 	require.Len(t, rejected, 2)
-	assert.Contains(t, rejected[0], "already failed this project")
+	assert.Contains(t, rejected[0], "excluded for this project")
 
-	got, _, err = filterNodes(context.Background(), ledger, nodes[:1], v1.ProjectSizeSmall, []string{"failed-1"})
+	got, _, err = filterNodes(context.Background(), ledger, nodes[:1], ProjectPlacement{Size: v1.ProjectSizeSmall, ExcludedNodes: []string{"failed-1"}})
 	require.NoError(t, err)
 	assert.Empty(t, got, "a node excluded for this project is not a candidate even when it is the only one")
+}
+
+func TestFilterNodes_RequiredTier(t *testing.T) {
+	alloc := v1.ResourceList{"cpu": "4", "memory": "8Gi"}
+	tiered := func(name, tier string) ReadyNode {
+		n := ReadyNode{Name: name, Allocatable: alloc}
+		if tier != "" {
+			n.Labels = map[string]string{v1.LabelNodeTier: tier}
+		}
+		return n
+	}
+	nodes := []ReadyNode{tiered("pve1", "primary"), tiered("twcc1", "backup"), tiered("plain", "")}
+	ledger, _ := newTestLedger(nil)
+
+	names := func(cs []candidate) []string {
+		var out []string
+		for _, c := range cs {
+			out = append(out, c.Name)
+		}
+		return out
+	}
+
+	got, rejected, err := filterNodes(context.Background(), ledger, nodes, ProjectPlacement{Size: v1.ProjectSizeSmall, RequiredTier: v1.NodeTierPrimary})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"pve1"}, names(got))
+	require.Len(t, rejected, 2)
+	assert.Contains(t, rejected[0], "is backup tier, not primary")
+
+	got, _, err = filterNodes(context.Background(), ledger, nodes, ProjectPlacement{Size: v1.ProjectSizeSmall, RequiredTier: v1.NodeTierBackup})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"twcc1", "plain"}, names(got), "an unlabeled node counts as backup")
+
+	got, _, err = filterNodes(context.Background(), ledger, nodes, ProjectPlacement{Size: v1.ProjectSizeSmall})
+	require.NoError(t, err)
+	assert.Len(t, got, 3, "no required tier, no restriction")
 }
