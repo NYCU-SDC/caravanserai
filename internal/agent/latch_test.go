@@ -73,9 +73,36 @@ func TestStopLatchesFailClosedOnAnUnreadableRecord(t *testing.T) {
 	assert.True(t, held)
 	assert.ErrorIs(t, latches.refuseStart(latchedAssignment("blog", "uid-1", 4)), ErrWorkloadLatched)
 
-	// Sync leaves it for an operator instead of deleting it.
-	latches.Sync(nil, time.Now(), zap.NewNop())
+	// While the Project is assigned here, Sync leaves it for an operator
+	// instead of deleting it.
+	latches.Sync([]*v1.Project{latchedAssignment("blog", "uid-1", 4)}, time.Now(), zap.NewNop())
 	assert.FileExists(t, path)
+
+	// Once it is not, the record guards nothing, readable or not.
+	latches.Sync(nil, time.Now(), zap.NewNop())
+	assert.NoFileExists(t, path)
+}
+
+// A Project with no namespace is kept under "default", as cleanup treats it,
+// rather than refused — which would have read as latched on every start.
+func TestStopLatchesTakeAnEmptyNamespaceAsDefault(t *testing.T) {
+	latches := NewStopLatches(t.TempDir())
+	p := latchedAssignment("blog", "uid-1", 4)
+	p.Namespace = ""
+
+	held, err := latches.Holds(p)
+	require.NoError(t, err)
+	assert.False(t, held, "nothing recorded, nothing held")
+
+	require.NoError(t, latches.Record(p, time.Now()))
+	held, err = latches.Holds(latchedAssignment("blog", "uid-1", 4))
+	require.NoError(t, err)
+	assert.True(t, held, "the same record as for default")
+
+	latches.Sync([]*v1.Project{p}, time.Now(), zap.NewNop())
+	held, err = latches.Holds(p)
+	require.NoError(t, err)
+	assert.True(t, held, "Sync sees it as still assigned here")
 }
 
 func TestStopLatchesRefuseUnusableKeys(t *testing.T) {
