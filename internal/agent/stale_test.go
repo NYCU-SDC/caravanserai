@@ -189,7 +189,7 @@ func (h *staleHarness) reconcile(t *testing.T, p *v1.Project) (reconciled int) {
 		reconciled++
 		return nil
 	}
-	reconcileOne(t.Context(), h.client, h.runtime, h.routes, nil, p, zap.NewNop())
+	reconcileOne(t.Context(), h.client, h.runtime, h.routes, nil, nil, p, zap.NewNop())
 	return reconciled
 }
 
@@ -384,7 +384,7 @@ func TestReconcileRefusalIsBlockedNotFailed(t *testing.T) {
 		})
 	}
 
-	reconcileOne(t.Context(), h.client, h.runtime, h.routes, nil, p, zap.NewNop())
+	reconcileOne(t.Context(), h.client, h.runtime, h.routes, nil, nil, p, zap.NewNop())
 
 	assert.Empty(t, h.server.updates, "no Failed/ReconcileError — the Project must stay reconcilable")
 	patches := h.server.writes("patch", v1.ConditionTypeRecoveryBlocked)
@@ -401,7 +401,7 @@ func TestReconcileErrorIsStillFailed(t *testing.T) {
 		return errors.New("pull image: manifest unknown")
 	}
 
-	reconcileOne(t.Context(), h.client, h.runtime, h.routes, nil, p, zap.NewNop())
+	reconcileOne(t.Context(), h.client, h.runtime, h.routes, nil, nil, p, zap.NewNop())
 
 	require.Len(t, h.server.updates, 1)
 	assert.Equal(t, v1.ProjectPhaseFailed, h.server.updates[0].Phase)
