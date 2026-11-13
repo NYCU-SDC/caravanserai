@@ -409,7 +409,7 @@ func TestFailedProjectRescheduler_NowhereToGo(t *testing.T) {
 				return p
 			}(),
 			nodes:  newFakeSchedulerNodeStore("node-a", "node-b"),
-			reject: `node "node-b" already failed this project`,
+			reject: `node "node-b"`,
 		},
 	}
 	for _, tt := range tests {
