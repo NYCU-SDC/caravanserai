@@ -453,6 +453,9 @@ func (a *ProjectStoreAdapter) SetTerminationBlocked(ctx context.Context, p *cont
 
 // snapshotOf converts an api/v1 Project into the view the controllers read.
 func snapshotOf(p *v1.Project) *controller.ProjectSnapshot {
+	assignment := v1.AssignmentIdentity{
+		ProjectUID: p.ObjectMeta.UID, NodeName: p.Status.NodeRef, AssignmentGeneration: p.Status.AssignmentGeneration,
+	}
 	conditions := make([]controller.ConditionSnapshot, len(p.Status.Conditions))
 	for i, c := range p.Status.Conditions {
 		conditions[i] = controller.ConditionSnapshot{
@@ -469,6 +472,9 @@ func snapshotOf(p *v1.Project) *controller.ProjectSnapshot {
 		AssignmentGeneration: p.Status.AssignmentGeneration,
 		Size:                 p.Spec.Size,
 		FailedNodes:          slices.Clone(p.Status.FailedNodes),
+		ExcludedNodes:        slices.Concat(p.Status.FailedNodes, p.Status.Recovery.NodesOwingCleanup()),
+		StopRequested:        p.Status.Recovery.StopRequestedFor(assignment),
+		WorkloadStopped:      p.Status.Recovery.WorkloadStoppedFor(assignment),
 		Conditions:           conditions,
 	}
 }
@@ -544,8 +550,11 @@ func (a *ProjectStoreAdapter) MoveFailedProject(ctx context.Context, p *controll
 		if project.Spec.HasManagedVolume() {
 			status.Recovery.OweManagedData(assignment)
 		}
+		// The request was for the assignment just released; it is answered.
+		status.Recovery.StopRequest = nil
 		status.Conditions = v1.RemoveConditions(status.Conditions,
-			v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt, v1.ConditionTypeTakeoverRequired)
+			v1.ConditionTypeNotReadyAt, v1.ConditionTypeTerminatingAt, v1.ConditionTypeTakeoverRequired,
+			v1.ConditionTypeRescheduleBlocked)
 		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
 			Type:               v1.ConditionTypePhase,
 			Status:             v1.ConditionTrue,
@@ -559,6 +568,52 @@ func (a *ProjectStoreAdapter) MoveFailedProject(ctx context.Context, p *controll
 		return false, err
 	}
 	return moved, nil
+}
+
+// RequestFailedProjectStop satisfies controller.FailedProjectStore. It asks
+// the Agent holding p's assignment to stop the Project, for a Project still
+// Failed on exactly that assignment. The request names the assignment, so an
+// Agent that holds a later one is not asked anything by it.
+func (a *ProjectStoreAdapter) RequestFailedProjectStop(ctx context.Context, p *controller.ProjectSnapshot, message string) error {
+	now := time.Now().UTC()
+	assignment := v1.AssignmentIdentity{ProjectUID: p.UID, NodeName: p.NodeRef, AssignmentGeneration: p.AssignmentGeneration}
+	return a.s.UpdateProjectStatusForUID(ctx, p.Name, p.UID, func(status *v1.ProjectStatus) error {
+		if status.Phase != v1.ProjectPhaseFailed ||
+			status.NodeRef != p.NodeRef || status.AssignmentGeneration != p.AssignmentGeneration {
+			return nil
+		}
+		status.Conditions = v1.RemoveConditions(status.Conditions, v1.ConditionTypeRescheduleBlocked)
+		if status.Recovery.StopRequestedFor(assignment) {
+			return nil
+		}
+		status.EnsureRecovery().StopRequest = &v1.StopRequest{
+			Assignment:  assignment,
+			RequestedAt: now,
+			Reason:      message,
+		}
+		return nil
+	})
+}
+
+// SetRescheduleBlocked satisfies controller.FailedProjectStore. It writes only
+// for a Project still Failed on p's assignment, and nothing when the message
+// is the same as before.
+func (a *ProjectStoreAdapter) SetRescheduleBlocked(ctx context.Context, p *controller.ProjectSnapshot, message string) error {
+	now := time.Now().UTC()
+	return a.s.UpdateProjectStatusForUID(ctx, p.Name, p.UID, func(status *v1.ProjectStatus) error {
+		if status.Phase != v1.ProjectPhaseFailed ||
+			status.NodeRef != p.NodeRef || status.AssignmentGeneration != p.AssignmentGeneration {
+			return nil
+		}
+		status.Conditions = v1.UpsertCondition(status.Conditions, v1.Condition{
+			Type:               v1.ConditionTypeRescheduleBlocked,
+			Status:             v1.ConditionTrue,
+			Reason:             "NoCapacity",
+			Message:            message,
+			LastTransitionTime: now,
+		}, false)
+		return nil
+	})
 }
 
 // ClearFailedNodes satisfies controller.FailedProjectStore.

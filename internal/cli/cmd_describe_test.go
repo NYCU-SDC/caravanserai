@@ -159,6 +159,10 @@ var describeProjectCoveredFields = newStringSet(
 	"Status.Recovery.CommittedBackup.Assignment.ProjectUID",
 	"Status.Recovery.CommittedBackup.BackupID",
 	"Status.Recovery.WorkloadStopped.Assignment.ProjectUID",
+	"Status.Recovery.StopRequest.Assignment.AssignmentGeneration",
+	"Status.Recovery.StopRequest.Assignment.NodeName",
+	"Status.Recovery.StopRequest.Assignment.ProjectUID",
+	"Status.Recovery.StopRequest.Reason",
 	"Status.Backup.Stanzas",
 	"Status.Backup.Completions",
 	"Status.Conditions",
@@ -285,6 +289,7 @@ func TestDescribeProjectRecoverySection(t *testing.T) {
 			RescheduleAttempts:     2,
 			HealthySince:           &healthy,
 			HealthySinceGeneration: 6,
+			StopRequest:            &v1.StopRequest{Assignment: prev, RequestedAt: healthy, Reason: "moving it to another node"},
 			CleanupObligations: []v1.CleanupObligation{
 				{Assignment: prev, ReleasedAt: healthy, ReleaseAuthorization: v1.ReleaseByWorkloadStopped},
 				{Assignment: v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-z", AssignmentGeneration: 5},
@@ -298,6 +303,8 @@ func TestDescribeProjectRecoverySection(t *testing.T) {
 	assert.Contains(t, text, "(stale: generation 6)")
 	assert.Contains(t, text, "node-a generation 6 (uid uid-1)")
 	assert.Contains(t, text, "by WorkloadStopped")
+	assert.Contains(t, text, "Stop Requested")
+	assert.Contains(t, text, ": moving it to another node")
 	assert.Contains(t, text, "Resources:  pending")
 	assert.Contains(t, text, "Resources:  removed at")
 }

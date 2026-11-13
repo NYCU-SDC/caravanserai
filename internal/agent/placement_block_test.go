@@ -64,7 +64,7 @@ func TestBlockedPlacementReportsAConditionNotFailure(t *testing.T) {
 	}
 
 	logs, logger := recordedLogger()
-	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, p, logger)
+	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, nil, p, logger)
 
 	// The defect this replaces spent a week invisible because the branch that
 	// took it logged at Debug. A refusal nobody can see is the same defect
@@ -126,7 +126,7 @@ func TestBlockedPlacementConvergesOnceTheCauseIsCleared(t *testing.T) {
 	}
 
 	// Tick 1: unproven bytes on disk.
-	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, p, zap.NewNop())
+	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, nil, p, zap.NewNop())
 	require.Len(t, gs.writes("patch", v1.ConditionTypeRecoveryBlocked), 1)
 	require.Zero(t, reconciles)
 
@@ -145,7 +145,7 @@ func TestBlockedPlacementConvergesOnceTheCauseIsCleared(t *testing.T) {
 	// The Project has never been assigned anywhere else, so with the stale
 	// bytes gone an empty start is now the correct answer.
 	fresh.Status.AssignmentGeneration = 1 // as if this were its first placement
-	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, fresh, zap.NewNop())
+	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, nil, fresh, zap.NewNop())
 
 	assert.Equal(t, 1, reconciles, "the next tick must place the Project without intervention")
 	assert.NotEmpty(t, gs.writes("delete", v1.ConditionTypeRecoveryBlocked),

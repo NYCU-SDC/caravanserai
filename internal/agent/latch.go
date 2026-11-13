@@ -58,7 +58,18 @@ func NewStopLatches(dataRoot string) *StopLatches {
 	return &StopLatches{dir: filepath.Join(dataRoot, "stop-latches")}
 }
 
+// latchNamespace is the namespace a record is kept under. A Project with none
+// is in "default", as CleanupTasksFor treats it; refusing it instead would
+// make Holds report every start of it latched.
+func latchNamespace(namespace string) string {
+	if namespace == "" {
+		return "default"
+	}
+	return namespace
+}
+
 func (l *StopLatches) path(namespace, name string) (string, error) {
+	namespace = latchNamespace(namespace)
 	for _, part := range []string{namespace, name} {
 		if part == "" || part == "." || part == ".." || strings.ContainsAny(part, `/\`) {
 			return "", fmt.Errorf("stop latch: unusable project key %q/%q", namespace, name)
@@ -159,7 +170,7 @@ func (l *StopLatches) Sync(assigned []*v1.Project, now time.Time, log *zap.Logge
 	}
 	byKey := make(map[string]*v1.Project, len(assigned))
 	for _, p := range assigned {
-		byKey[p.Namespace+"/"+p.Name] = p
+		byKey[latchNamespace(p.Namespace)+"/"+p.Name] = p
 		if workloadLatched(p) {
 			if held, _ := l.Holds(p); !held {
 				if err := l.Record(p, now); err != nil {
@@ -190,14 +201,23 @@ func (l *StopLatches) Sync(assigned []*v1.Project, now time.Time, log *zap.Logge
 			if !ok || f.IsDir() {
 				continue
 			}
+			p := byKey[ns.Name()+"/"+name]
 			rec, err := l.read(ns.Name(), name)
 			if err != nil {
-				// Left in place: an unreadable record keeps refusing starts
-				// until an operator removes it.
+				if p == nil {
+					// The Project is not assigned here, so the record guards
+					// nothing whatever it says, and the listing is complete.
+					if fErr := l.Forget(ns.Name(), name); fErr != nil {
+						log.Warn("Could not drop an unreadable stop latch record", zap.String("project", name), zap.Error(fErr))
+					}
+					continue
+				}
+				// Left in place: an unreadable record of a Project still
+				// assigned here keeps refusing starts until an operator
+				// removes it.
 				log.Warn("Unreadable stop latch record", zap.String("namespace", ns.Name()), zap.String("project", name), zap.Error(err))
 				continue
 			}
-			p := byKey[ns.Name()+"/"+name]
 			if p != nil && p.UID == rec.ProjectUID && p.Status.AssignmentGeneration == rec.AssignmentGeneration {
 				continue
 			}

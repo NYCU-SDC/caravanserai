@@ -97,10 +97,11 @@ func TestFailedProjectMovesToAnotherNode(t *testing.T) {
 	assert.Equal(t, []string{"move-node-a"}, p.Status.FailedNodes, "the node it left is recorded")
 }
 
-// TestFailedProjectWithoutStopEvidenceStays validates that Failed is not taken
-// as stopped: with no confirmation from its node, the project stays where it
-// is, is marked TakeoverRequired, and spends none of its moves.
-func TestFailedProjectWithoutStopEvidenceStays(t *testing.T) {
+// TestFailedProjectIsAskedToStopFirst validates that Failed is not taken as
+// stopped, and that the server, not the Agent, decides the stop: with another
+// node free, the Agent is asked to stop the project, nothing is released or
+// counted until it reports the project stopped, and then it is moved.
+func TestFailedProjectIsAskedToStopFirst(t *testing.T) {
 	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
 	s.TruncateAll(t)
 	ctx := context.Background()
@@ -108,11 +109,13 @@ func TestFailedProjectWithoutStopEvidenceStays(t *testing.T) {
 	createLedgerNode(t, s, "unconf-node-a", "", controllerhelper.RoomyAllocatable(), false)
 	createLedgerNode(t, s, "unconf-node-b", "", controllerhelper.RoomyAllocatable(), false)
 	createFailedProject(t, s, "unconf-project", "LocalRestartExhausted", "unconf-node-a", time.Hour)
+	ref := failedAssignment(t, s, "unconf-project", "unconf-node-a")
+	asked := v1.AssignmentIdentity{ProjectUID: ref.UID, NodeName: ref.NodeRef, AssignmentGeneration: ref.Generation}
 	s.Start(t)
 
-	controllerhelper.WaitForCondition(t, 20*time.Second, 200*time.Millisecond, "TakeoverRequired", func() bool {
+	controllerhelper.WaitForCondition(t, 20*time.Second, 200*time.Millisecond, "stop requested", func() bool {
 		p, err := s.Store.GetProject(ctx, "unconf-project")
-		return err == nil && hasProjectCondition(p, v1.ConditionTypeTakeoverRequired)
+		return err == nil && p.Status.Recovery.StopRequestedFor(asked)
 	})
 
 	p, err := s.Store.GetProject(ctx, "unconf-project")
@@ -120,8 +123,54 @@ func TestFailedProjectWithoutStopEvidenceStays(t *testing.T) {
 	assert.Equal(t, v1.ProjectPhaseFailed, p.Status.Phase)
 	assert.Equal(t, "unconf-node-a", p.Status.NodeRef)
 	assert.Empty(t, p.Status.FailedNodes, "a move that did not happen must not be counted")
+	assert.False(t, hasProjectCondition(p, v1.ConditionTypeTakeoverRequired), "asked, not given up on")
 	assert.False(t, hasProjectCondition(p, v1.ConditionTypeRescheduleExhausted))
 	assert.Empty(t, obligationsOf(p), "nothing was released, so nothing is owed")
+
+	require.NoError(t, s.Store.RecordWorkloadStopped(ctx, "unconf-project", ref, time.Now()))
+	controllerhelper.WaitForCondition(t, 20*time.Second, 200*time.Millisecond, "project released once stopped", func() bool {
+		p, err := s.Store.GetProject(ctx, "unconf-project")
+		return err == nil && p.Status.Phase == v1.ProjectPhasePending
+	})
+	p, err = s.Store.GetProject(ctx, "unconf-project")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"unconf-node-a"}, p.Status.FailedNodes)
+	assert.Nil(t, p.Status.Recovery.StopRequest, "the request is answered by the move")
+}
+
+// TestFailedProjectWithNowhereToGoIsNotStopped validates the case the review
+// of CARA-92 raised: with no other node able to take the project, it is not
+// stopped — what still runs of it keeps running — and says why.
+func TestFailedProjectWithNowhereToGoIsNotStopped(t *testing.T) {
+	s := controllerhelper.NewSuite(t, shared.pool, shared.databaseURL, shared.logger)
+	s.TruncateAll(t)
+	ctx := context.Background()
+
+	createLedgerNode(t, s, "alone-node-a", "", controllerhelper.RoomyAllocatable(), false)
+	// Too small for a Small project.
+	createLedgerNode(t, s, "alone-node-b", "", v1.ResourceList{"cpu": "100m", "memory": "64Mi"}, false)
+	createFailedProject(t, s, "alone-project", "LocalRestartExhausted", "alone-node-a", time.Hour)
+	s.Start(t)
+
+	controllerhelper.WaitForCondition(t, 20*time.Second, 200*time.Millisecond, "RescheduleBlocked", func() bool {
+		p, err := s.Store.GetProject(ctx, "alone-project")
+		return err == nil && hasProjectCondition(p, v1.ConditionTypeRescheduleBlocked)
+	})
+
+	p, err := s.Store.GetProject(ctx, "alone-project")
+	require.NoError(t, err)
+	if p.Status.Recovery != nil {
+		assert.Nil(t, p.Status.Recovery.StopRequest, "nothing is stopped for a move that cannot happen")
+	}
+	assert.Equal(t, v1.ProjectPhaseFailed, p.Status.Phase)
+	assert.Equal(t, "alone-node-a", p.Status.NodeRef)
+	assert.Empty(t, p.Status.FailedNodes)
+
+	// Applying it again clears the mark with the rest of the retry state.
+	require.NoError(t, s.Store.UpdateProjectSpec(ctx, p))
+	p, err = s.Store.GetProject(ctx, "alone-project")
+	require.NoError(t, err)
+	assert.False(t, hasProjectCondition(p, v1.ConditionTypeRescheduleBlocked))
 }
 
 func obligationsOf(p *v1.Project) []v1.CleanupObligation {

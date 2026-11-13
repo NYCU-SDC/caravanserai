@@ -387,6 +387,14 @@ func describeProject(w io.Writer, project *v1.Project) {
 			workloadStopped = formatEvidence(e.Assignment, e.ObservedAt)
 		}
 		printField(w, "  Workload Stopped", workloadStopped)
+		stopRequested := "<none>"
+		if q := r.StopRequest; q != nil {
+			stopRequested = formatEvidence(q.Assignment, q.RequestedAt)
+			if q.Reason != "" {
+				stopRequested += ": " + q.Reason
+			}
+		}
+		printField(w, "  Stop Requested", stopRequested)
 		if len(r.CleanupObligations) == 0 {
 			printField(w, "  Cleanup Obligations", "<none>")
 		} else {

@@ -21,8 +21,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// failedProject is a Project Failed with reason on node-a, generation 4,
+// that the server has asked this node to stop.
 func failedProject(reason string) *v1.Project {
-	return &v1.Project{
+	p := &v1.Project{
 		ObjectMeta: v1.ObjectMeta{Name: "blog", Namespace: "default", UID: "uid-1"},
 		Spec: v1.ProjectSpec{Services: []v1.ServiceDef{
 			{Name: "web", Image: "nginx"}, {Name: "db", Image: "postgres:17"},
@@ -31,6 +33,17 @@ func failedProject(reason string) *v1.Project {
 			Phase: v1.ProjectPhaseFailed, NodeRef: "node-a", AssignmentGeneration: 4,
 			Conditions: []v1.Condition{{Type: v1.ConditionTypePhase, Status: v1.ConditionTrue, Reason: reason}},
 		},
+	}
+	askStop(p, 4)
+	return p
+}
+
+// askStop records the server's request to stop generation of p on node-a.
+func askStop(p *v1.Project, generation int64) {
+	p.Status.EnsureRecovery().StopRequest = &v1.StopRequest{
+		Assignment:  v1.AssignmentIdentity{ProjectUID: p.UID, NodeName: "node-a", AssignmentGeneration: generation},
+		RequestedAt: time.Now().UTC(),
+		Reason:      "moving it",
 	}
 }
 
@@ -121,28 +134,28 @@ func runStopFailed(client *fakeStopClient, rt *fakeStopRuntime, busy busyChecker
 	stopFailedProjects(context.Background(), client, rt, busy, nil, []*v1.Project{p}, zap.NewNop())
 }
 
-func TestStopFailedProjects_Reasons(t *testing.T) {
-	for reason, want := range map[string]bool{
-		"LocalRestartExhausted": true,
-		"ContainerRestartStuck": true,
-		"InspectError":          true,
-		"ReconcileError":        true,
-		"ContainerExited":       true,
-		"ContainerCrashed":      true,
-		"SecretNotFound":        false,
-		"SecretKeyNotFound":     false,
-		"RestoreError":          false,
-		"RemoveError":           false,
-		"ContainerUnhealthy":    false,
-		"":                      false,
-	} {
-		t.Run(reason, func(t *testing.T) {
-			p := failedProject(reason)
-			client := &fakeStopClient{current: failedProject(reason)}
+// Only the server's request stops a Failed Project, whatever it failed of:
+// the server asks only once it knows the Project will be moved.
+func TestStopFailedProjects_OnlyWhenAsked(t *testing.T) {
+	tests := map[string]struct {
+		ask  func(p *v1.Project)
+		want bool
+	}{
+		"asked for this generation":       {ask: func(*v1.Project) {}, want: true},
+		"not asked":                       {ask: func(p *v1.Project) { p.Status.Recovery.StopRequest = nil }},
+		"asked for an earlier generation": {ask: func(p *v1.Project) { askStop(p, 3) }},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			p := failedProject("LocalRestartExhausted")
+			tt.ask(p)
+			current := failedProject("LocalRestartExhausted")
+			tt.ask(current)
+			client := &fakeStopClient{current: current}
 			rt := &fakeStopRuntime{after: stoppedStates()}
 			runStopFailed(client, rt, nil, p)
-			assert.Equal(t, want, rt.stops == 1, "stopped")
-			assert.Equal(t, want, len(client.stopped) == 1, "reported")
+			assert.Equal(t, tt.want, rt.stops == 1, "stopped")
+			assert.Equal(t, tt.want, len(client.stopped) == 1, "reported")
 		})
 	}
 }
@@ -278,11 +291,11 @@ func TestStopFailedProjects_LeavesAlone(t *testing.T) {
 	})
 
 	changed := map[string]func(p *v1.Project){
-		"reassigned":                func(p *v1.Project) { p.Status.AssignmentGeneration = 5 },
-		"moved to another node":     func(p *v1.Project) { p.Status.NodeRef = "node-b" },
-		"recreated":                 func(p *v1.Project) { p.UID = "uid-2" },
-		"no longer Failed":          func(p *v1.Project) { p.Status.Phase = v1.ProjectPhaseTerminating },
-		"failed for another reason": func(p *v1.Project) { p.Status.Conditions[0].Reason = "SecretNotFound" },
+		"reassigned":              func(p *v1.Project) { p.Status.AssignmentGeneration = 5 },
+		"moved to another node":   func(p *v1.Project) { p.Status.NodeRef = "node-b" },
+		"recreated":               func(p *v1.Project) { p.UID = "uid-2" },
+		"no longer Failed":        func(p *v1.Project) { p.Status.Phase = v1.ProjectPhaseTerminating },
+		"no longer asked to stop": func(p *v1.Project) { p.Status.Recovery.StopRequest = nil },
 	}
 	for name, mutate := range changed {
 		t.Run(name+" since the poll", func(t *testing.T) {
@@ -367,7 +380,7 @@ func TestLatchedGenerationIsNeverStarted(t *testing.T) {
 		p.Status.Phase = v1.ProjectPhaseScheduled
 		client, _ := newReconcileServer(t, nil)
 		rt, any := touched()
-		reconcileOne(context.Background(), client, rt, nil, nil, &p, zap.NewNop())
+		reconcileOne(context.Background(), client, rt, nil, nil, nil, &p, zap.NewNop())
 		assert.False(t, *any)
 	})
 

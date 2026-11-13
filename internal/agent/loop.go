@@ -486,7 +486,7 @@ func reconcileProjects(ctx context.Context, client *Client, runtime docker.Runti
 		case v1.ProjectPhaseRunning:
 			healthCheckOne(ctx, client, runtime, routes, busy, recovery, p, logger)
 		default:
-			reconcileOne(ctx, client, runtime, routes, backups, p, logger)
+			reconcileOne(ctx, client, runtime, routes, backups, recovery, p, logger)
 		}
 	}
 }
@@ -510,7 +510,7 @@ func projectsForReconcile(projects []*v1.Project) []*v1.Project {
 //     report Running on success or Failed on error.
 //
 // After a successful transition to Running, proxy routes are updated.
-func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, p *v1.Project, logger *zap.Logger) {
+func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, routes RouteUpdater, backups *BackupSupport, recovery *recoveryTracker, p *v1.Project, logger *zap.Logger) {
 	log := logger.With(zap.String("project", p.Name))
 
 	// Never start a generation this node has reported stopped (CARA-92).
@@ -566,6 +566,20 @@ func reconcileOne(ctx context.Context, client *Client, runtime docker.Runtime, r
 		}
 	}
 	if len(failedSvcs) > 0 {
+		// A service that exits on its first start is most often one that
+		// started before what it needs was ready — an app before its
+		// database. That is what tier-1 recovery is for, so it gets the same
+		// restarts a Running Project would, and Failed only once they are
+		// used up. Reporting Failed at once would hand a start-up race to
+		// Tier-2, which stops the whole Project and moves it.
+		if recovery != nil {
+			if bad := exitedWithError(classifyProject(p, states)); recoverable(bad) {
+				log.Info("A container exited on its first start; restarting it in place",
+					zap.Strings("services", failedSvcs))
+				recoverLocally(ctx, client, runtime, coordinatorOf(backups), recovery, p, bad, log)
+				return
+			}
+		}
 		msg := "Containers exited with errors: " + strings.Join(failedSvcs, ", ")
 		log.Warn("Project has failed containers", zap.String("detail", msg))
 		_ = client.UpdateProjectStatus(ctx, p.Name, fenceForProject(p), v1.ProjectPhaseFailed, "ContainerExited", msg)
@@ -1329,6 +1343,19 @@ func recoverLocally(
 		zap.Strings("services", names), zap.Int("attempt", attempt))
 }
 
+// exitedWithError keeps the services whose container exited with a non-zero
+// code. On a first start only those are restarted: a service whose container
+// is not there yet is still being placed, which is ReconcileProject's work.
+func exitedWithError(states []serviceState) []serviceState {
+	var out []serviceState
+	for _, s := range states {
+		if s.Crashed() {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // checkRecoveryFence reports why current is no longer the assignment that was
 // observed unhealthy, or nil if it still is.
 //
@@ -1352,8 +1379,10 @@ func checkRecoveryFence(observed, current *v1.Project, nodeName string) error {
 	case current.Status.NodeRef != nodeName:
 		return fmt.Errorf("project is assigned to node %q, not this node %q",
 			current.Status.NodeRef, nodeName)
-	case current.Status.Phase != v1.ProjectPhaseRunning:
-		return fmt.Errorf("project phase is %s, not Running", current.Status.Phase)
+	case current.Status.Phase != observed.Status.Phase:
+		return fmt.Errorf("project phase changed from %s to %s", observed.Status.Phase, current.Status.Phase)
+	case current.Status.Phase != v1.ProjectPhaseRunning && current.Status.Phase != v1.ProjectPhaseScheduled:
+		return fmt.Errorf("project phase is %s, not Running or Scheduled", current.Status.Phase)
 	}
 	return nil
 }

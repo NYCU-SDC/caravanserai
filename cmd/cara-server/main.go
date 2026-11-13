@@ -244,6 +244,7 @@ func main() {
 	))
 	ctrlManager.Add(controller.NewFailedProjectReschedulerController(logger,
 		projectAdapter,
+		adapter.NewNodeReadyAdapter(pgStore),
 		eventBus,
 	))
 	// TODO: ProjectGCController — handle spec.expireAt (post-MVP)

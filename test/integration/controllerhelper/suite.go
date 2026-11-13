@@ -100,6 +100,7 @@ func NewSuite(t *testing.T, pool *pgxpool.Pool, databaseURL string, logger *zap.
 	))
 	mgr.Add(controller.NewFailedProjectReschedulerController(logger,
 		projectAdapter,
+		adapter.NewNodeReadyAdapter(pgStore),
 		bus,
 		opts...,
 	))

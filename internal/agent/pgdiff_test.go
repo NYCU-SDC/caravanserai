@@ -210,7 +210,7 @@ func TestPostgresPlacementArchivesBeforeRunning(t *testing.T) {
 	rt := newPgFakeRuntime()
 	repo := &fakeRepo{version: pgVersion}
 
-	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, repo), p, zap.NewNop())
+	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, repo), nil, p, zap.NewNop())
 
 	stanza := v1.StanzaName(p.UID, "pgdata")
 	assert.Equal(t, []string{"identity uid-1", "config uid-1", "authorize uid-1"}, repo.calls)
@@ -242,7 +242,7 @@ func TestPostgresPlacementKeepsArchivingThatIsAlreadyOn(t *testing.T) {
 	rt.archiveMode, rt.archiveCmd = "on", archiveCommand(v1.StanzaName(p.UID, "pgdata"))
 	rt.archiveTimeout = pgArchiveTimeout
 
-	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, &fakeRepo{version: pgVersion}), p, zap.NewNop())
+	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, &fakeRepo{version: pgVersion}), nil, p, zap.NewNop())
 
 	assert.Equal(t, -1, indexOf(rt.seen(), "restart"))
 	assert.Equal(t, -1, indexOf(rt.seen(), "psql ALTER"))
@@ -257,7 +257,7 @@ func TestPostgresPlacementSetsArchiveTimeoutWithoutARestart(t *testing.T) {
 	rt := newPgFakeRuntime()
 	rt.archiveMode, rt.archiveCmd = "on", archiveCommand(v1.StanzaName(p.UID, "pgdata"))
 
-	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, &fakeRepo{version: pgVersion}), p, zap.NewNop())
+	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, &fakeRepo{version: pgVersion}), nil, p, zap.NewNop())
 
 	assert.Equal(t, -1, indexOf(rt.seen(), "restart"))
 	assert.NotEqual(t, -1, indexOf(rt.seen(), "psql ALTER SYSTEM SET archive_timeout"))
@@ -297,7 +297,7 @@ func TestPostgresPlacementBlocksWithAReason(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(rt)
 			}
-			reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, tc.repo()), p, zap.NewNop())
+			reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, tc.repo()), nil, p, zap.NewNop())
 
 			blocks := gs.writes("patch", v1.ConditionTypeRecoveryBlocked)
 			require.Len(t, blocks, 1)
@@ -317,7 +317,7 @@ func TestPostgresPlacementFinishesOnALaterTick(t *testing.T) {
 	rt.checkFails = true
 	backups := pgBackups(t, &fakeRepo{version: pgVersion})
 
-	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, p, zap.NewNop())
+	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, nil, p, zap.NewNop())
 	require.Len(t, gs.writes("patch", v1.ConditionTypeRecoveryBlocked), 1)
 	require.Empty(t, gs.updates)
 
@@ -327,7 +327,7 @@ func TestPostgresPlacementFinishesOnALaterTick(t *testing.T) {
 	}
 	fresh, err := client.GetProject(t.Context(), p.Name)
 	require.NoError(t, err)
-	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, fresh, zap.NewNop())
+	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, nil, fresh, zap.NewNop())
 
 	assert.Len(t, gs.writes("delete", v1.ConditionTypeRecoveryBlocked), 1)
 	require.Len(t, gs.updates, 1)
@@ -350,7 +350,7 @@ func TestPostgresPlacementWaitsForTheClaim(t *testing.T) {
 	require.True(t, ok)
 	defer release()
 
-	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, p, zap.NewNop())
+	reconcileOne(t.Context(), client, rt, &recordingRoutes{}, backups, nil, p, zap.NewNop())
 
 	assert.Empty(t, rt.seen())
 	assert.Empty(t, gs.updates)
@@ -369,7 +369,7 @@ func TestPostgresPlacementGivesUpOnAStuckCommand(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, &fakeRepo{version: pgVersion}), p, zap.NewNop())
+		reconcileOne(t.Context(), client, rt, &recordingRoutes{}, pgBackups(t, &fakeRepo{version: pgVersion}), nil, p, zap.NewNop())
 		close(done)
 	}()
 	select {

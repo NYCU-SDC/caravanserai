@@ -126,7 +126,7 @@ func TestPostgresPlacementArchivesThroughTheRepoHost(t *testing.T) {
 		RepoHost:    repo,
 	}
 
-	reconcileOne(ctx, client, runtime, &recordingRoutes{}, backups, p, zap.NewNop())
+	reconcileOne(ctx, client, runtime, &recordingRoutes{}, backups, nil, p, zap.NewNop())
 
 	if blocks := gs.writes("patch", v1.ConditionTypeRecoveryBlocked); len(blocks) > 0 {
 		t.Fatalf("placement blocked: %s: %s", blocks[0].Reason, blocks[0].Message)

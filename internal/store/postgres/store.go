@@ -1716,7 +1716,8 @@ func (s *Store) changeSpec(ctx context.Context, name string, change func(current
 	// still read as one that cannot.
 	status := copyProjectStatus(current.Status)
 	status.FailedNodes = nil
-	status.Conditions = v1.RemoveConditions(status.Conditions, v1.ConditionTypeRescheduleExhausted)
+	status.Conditions = v1.RemoveConditions(status.Conditions,
+		v1.ConditionTypeRescheduleExhausted, v1.ConditionTypeRescheduleBlocked)
 
 	revision := current.ObjectMeta.SpecRevision
 	if specChanged {
