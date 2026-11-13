@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -88,8 +89,23 @@ type FailedProjectStore interface {
 	// Failed on that assignment.
 	MoveFailedProject(ctx context.Context, p *ProjectSnapshot, message string) (bool, error)
 
+	// RequestFailedProjectStop asks the Agent holding p's assignment to stop
+	// the Project, with message saying why, and clears RescheduleBlocked. It
+	// does nothing unless the Project is still Failed on that assignment, and
+	// nothing more when the request is already there.
+	RequestFailedProjectStop(ctx context.Context, p *ProjectSnapshot, message string) error
+
+	// SetRescheduleBlocked marks a Failed Project, still Failed on p's
+	// assignment, as one Tier-2 recovery cannot move for now, with message
+	// saying why. It writes nothing when the message has not changed.
+	SetRescheduleBlocked(ctx context.Context, p *ProjectSnapshot, message string) error
+
 	// ClearFailedNodes empties the Project's FailedNodes.
 	ClearFailedNodes(ctx context.Context, name string) error
+
+	// CapacityProjectStore lets the move's precheck see what is already
+	// placed on each Node.
+	CapacityProjectStore
 
 	// SetRescheduleExhausted marks a Failed Project as out of moves, with
 	// message saying where it failed.
@@ -101,6 +117,19 @@ type FailedProjectStore interface {
 // that is used up the agent reports Failed, and nothing else would ever act.
 // This controller then moves the Project to a different Node, a bounded number
 // of times, and leaves it Failed with an alert when the moves run out.
+//
+// A move takes three steps, and the server decides each one:
+//
+//  1. Once the backoff is over and a move is left, a precheck asks whether
+//     some other Node could take the Project. If none can, the Project is
+//     marked RescheduleBlocked and left as it is — Failed, but with whatever
+//     of it still runs still running — and asked about again on the next
+//     resync.
+//  2. If one can, the Agent holding the assignment is asked to stop it
+//     (Recovery.StopRequest). The Agent stops a Failed Project only when
+//     asked, so a Project out of moves, or with nowhere to go, is never
+//     stopped for a move that will not happen.
+//  3. Once the Agent reports it stopped (WorkloadStopped), it is released.
 //
 // A move returns the Project to Pending and records the Node in FailedNodes;
 // the scheduler places it again, never on a Node in that list. A Project that
@@ -114,17 +143,21 @@ type FailedProjectStore interface {
 type FailedProjectReschedulerController struct {
 	logger       *zap.Logger
 	projects     FailedProjectStore
+	nodes        SchedulerNodeStore
+	ledger       *CapacityLedger
 	bus          *event.Bus
 	clock        Clock
 	seedInterval time.Duration
 }
 
 // NewFailedProjectReschedulerController creates a
-// FailedProjectReschedulerController. bus may be nil; if so the controller
-// relies solely on the periodic resync.
+// FailedProjectReschedulerController. nodes is what the move's precheck
+// places against. bus may be nil; if so the controller relies solely on the
+// periodic resync.
 func NewFailedProjectReschedulerController(
 	logger *zap.Logger,
 	projects FailedProjectStore,
+	nodes SchedulerNodeStore,
 	bus *event.Bus,
 	opts ...Option,
 ) *FailedProjectReschedulerController {
@@ -136,6 +169,8 @@ func NewFailedProjectReschedulerController(
 	return &FailedProjectReschedulerController{
 		logger:       logger,
 		projects:     projects,
+		nodes:        nodes,
+		ledger:       NewCapacityLedger(logger, projects),
 		bus:          bus,
 		clock:        o.clock,
 		seedInterval: interval,
@@ -171,8 +206,9 @@ func (c *FailedProjectReschedulerController) Reconcile(ctx context.Context, name
 	}
 }
 
-// reconcileFailed moves a Failed Project once it has waited out its backoff,
-// or raises the alert when it has no moves left.
+// reconcileFailed takes a Failed Project one step further towards a move once
+// it has waited out its backoff — see the type comment for the steps — or
+// raises the alert when it has no moves left.
 func (c *FailedProjectReschedulerController) reconcileFailed(ctx context.Context, log *zap.Logger, p *ProjectSnapshot) (Result, error) {
 	phase, ok := phaseCondition(p)
 	if !ok || !rescheduleReasons[phase.Reason] {
@@ -199,11 +235,73 @@ func (c *FailedProjectReschedulerController) reconcileFailed(ctx context.Context
 		return Result{Requeue: true}, nil
 	}
 
-	message := fmt.Sprintf("Failed on node %q (%s); moved to a different node (move %d of %d)",
-		p.NodeRef, phase.Reason, spent+1, maxReschedules)
-	log.Warn("Moving failed project to a different node if its workload is confirmed stopped",
+	// The Agent stops a Failed Project only when asked, and it is asked only
+	// once there is somewhere else to put it. Stopping first and deciding
+	// afterwards would take down what still runs of a Project — the services
+	// that were not failing — for a move that may never happen.
+	switch {
+	case p.WorkloadStopped:
+		return c.move(ctx, log, p, phase.Reason, spent)
+	case p.StopRequested:
+		log.Debug("Waiting for the agent to stop the failed project", zap.String("node", p.NodeRef))
+		return Result{}, nil
+	}
+
+	nodes, err := c.nodes.ListReadyNodes(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	// The same Nodes the scheduler would leave out, and the Node it is
+	// failing on, so the precheck does not pass on a Node the Project could
+	// then not be placed on once stopped.
+	candidates, rejected, err := filterNodes(ctx, c.ledger, nodes, p.Size, append(slices.Clone(p.ExcludedNodes), p.NodeRef))
+	if err != nil {
+		return Result{}, err
+	}
+	if len(candidates) == 0 {
+		message := fmt.Sprintf("Failed on node %q (%s), and no other node can take it; it is left as it is there and tried again later",
+			p.NodeRef, phase.Reason)
+		if len(rejected) > 0 {
+			message += ": " + strings.Join(rejected, "; ")
+		}
+		log.Info("Not moving failed project: no other node can take it",
+			zap.String("node", p.NodeRef), zap.Strings("rejected", rejected))
+		if err := c.projects.SetRescheduleBlocked(ctx, p, message); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return Result{}, err
+		}
+		return Result{}, nil
+	}
+
+	names := make([]string, len(candidates))
+	for i, n := range candidates {
+		names[i] = n.Name
+	}
+	log.Warn("Asking the agent to stop the failed project so it can be moved",
 		zap.String("fromNode", p.NodeRef),
 		zap.String("reason", phase.Reason),
+		zap.Int("move", spent+1),
+		zap.Int("maxMoves", maxReschedules),
+		zap.Strings("fits", names))
+	message := fmt.Sprintf("Failed on node %q (%s); stopping it there to move it to a different node (move %d of %d)",
+		p.NodeRef, phase.Reason, spent+1, maxReschedules)
+	if err := c.projects.RequestFailedProjectStop(ctx, p, message); err != nil &&
+		!errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrStaleAssignment) {
+		return Result{}, err
+	}
+	return Result{}, nil
+}
+
+// move releases a Failed Project whose Agent has reported it stopped.
+//
+// Nothing is checked about capacity here: the stop was asked for only after a
+// precheck found room. Room taken since then leaves the Project Pending, where
+// the scheduler keeps trying and reports why.
+func (c *FailedProjectReschedulerController) move(ctx context.Context, log *zap.Logger, p *ProjectSnapshot, reason string, spent int) (Result, error) {
+	message := fmt.Sprintf("Failed on node %q (%s); moved to a different node (move %d of %d)",
+		p.NodeRef, reason, spent+1, maxReschedules)
+	log.Warn("Moving failed project to a different node",
+		zap.String("fromNode", p.NodeRef),
+		zap.String("reason", reason),
 		zap.Int("move", spent+1),
 		zap.Int("maxMoves", maxReschedules))
 
@@ -216,8 +314,6 @@ func (c *FailedProjectReschedulerController) reconcileFailed(ctx context.Context
 		return Result{}, err
 	}
 	if !moved {
-		// Failed is not stopped. Until the Agent confirms this generation's
-		// containers are stopped, the move waits; the resync looks again.
 		log.Info("Not moving failed project: its node has not confirmed the workload stopped",
 			zap.String("node", p.NodeRef), zap.Int64("generation", p.AssignmentGeneration))
 	}

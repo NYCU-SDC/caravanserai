@@ -19,21 +19,6 @@ import (
 // evidence was not reported and its assignment cannot be released.
 const recoveryBlockedStopUnconfirmed = "StopUnconfirmed"
 
-// stopOnFailureReasons are the Failed reasons after which this node stops the
-// Project and reports it stopped (CARA-92). They are the reasons the server's
-// Tier-2 recovery moves a Failed Project to another Node for (CARA-118), and
-// a move needs the old workload stopped first. Any other Failed reason — a
-// missing Secret, a failed delete — is not moved, so the Project is left as
-// it is for an operator.
-var stopOnFailureReasons = map[string]bool{
-	"LocalRestartExhausted": true,
-	"ContainerRestartStuck": true,
-	"InspectError":          true,
-	"ReconcileError":        true,
-	"ContainerExited":       true,
-	"ContainerCrashed":      true,
-}
-
 // stopFailedClient is the part of the server API stopping a Failed Project
 // needs.
 type stopFailedClient interface {
@@ -66,19 +51,26 @@ func workloadLatched(p *v1.Project) bool {
 	return p.Status.Recovery.WorkloadStoppedFor(current)
 }
 
-// failureReason returns the reason the Project was reported Failed with.
-func failedReason(p *v1.Project) string {
-	for _, c := range p.Status.Conditions {
-		if c.Type == v1.ConditionTypePhase {
-			return c.Reason
-		}
+// stopRequested reports whether the server has asked this node to stop p's
+// current assignment. Tier-2 recovery asks only once it has found another
+// Node for the Project and has a move left for it (Recovery.StopRequest).
+func stopRequested(p *v1.Project) bool {
+	current := v1.AssignmentIdentity{
+		ProjectUID: p.UID, NodeName: p.Status.NodeRef, AssignmentGeneration: p.Status.AssignmentGeneration,
 	}
-	return ""
+	return p.Status.Recovery.StopRequestedFor(current)
 }
 
-// stopFailedProjects stops every Failed Project assigned here whose failure a
-// different Node may fix, and reports it stopped (CARA-92). Only then can the
+// stopFailedProjects stops every Failed Project assigned here that the server
+// has asked to stop, and reports it stopped (CARA-92). Only then can the
 // server release the assignment and Tier-2 recovery move the Project.
+//
+// Being Failed is not enough. A Failed Project may still be partly serving —
+// one service crash-looping beside others that are fine — and stopping it
+// takes all of it down. The server asks only when the move will happen: the
+// Project has a move left and another Node can take it. Stopping on Failed
+// alone stopped Projects that were then never moved, and left them with
+// nothing running.
 //
 // It runs from the poll loop on the Projects the server just returned, so a
 // Failed phase it acts on is already durable on the server. A Project whose
@@ -87,7 +79,7 @@ func failedReason(p *v1.Project) string {
 // entered again.
 func stopFailedProjects(ctx context.Context, client stopFailedClient, runtime stopFailedRuntime, busy busyChecker, latches *StopLatches, projects []*v1.Project, logger *zap.Logger) {
 	for _, p := range projects {
-		if p.Status.Phase != v1.ProjectPhaseFailed || !stopOnFailureReasons[failedReason(p)] || workloadLatched(p) {
+		if p.Status.Phase != v1.ProjectPhaseFailed || !stopRequested(p) || workloadLatched(p) {
 			continue
 		}
 		stopFailedProject(ctx, client, runtime, busy, latches, p, logger.With(zap.String("project", p.Name)))
@@ -172,8 +164,8 @@ func stopFailedProject(ctx context.Context, client stopFailedClient, runtime sto
 		log.Warn("Failed Project stopped but the evidence was not accepted, will retry", zap.Error(err))
 		return
 	}
-	log.Info("Failed Project stopped; reported so it can be moved to another node",
-		zap.String("reason", failedReason(current)))
+	log.Info("Failed Project stopped as asked; reported so it can be moved to another node",
+		zap.String("request", current.Status.Recovery.StopRequest.Reason))
 	clearRecoveryBlocked(ctx, client, current, log)
 }
 
@@ -210,8 +202,8 @@ func checkStopFence(observed, current *v1.Project, nodeName string) error {
 		return fmt.Errorf("project is assigned to node %q, not this node %q", current.Status.NodeRef, nodeName)
 	case current.Status.Phase != v1.ProjectPhaseFailed:
 		return fmt.Errorf("project phase is %s, not Failed", current.Status.Phase)
-	case !stopOnFailureReasons[failedReason(current)]:
-		return fmt.Errorf("failed for %q, which is not moved to another node", failedReason(current))
+	case !stopRequested(current):
+		return errors.New("the server has not asked for this assignment to be stopped")
 	}
 	return nil
 }

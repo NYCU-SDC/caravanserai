@@ -187,6 +187,14 @@ const (
 	// server logs. It is cleared when the Project is applied again.
 	ConditionTypeRescheduleExhausted ConditionType = "RescheduleExhausted"
 
+	// ConditionTypeRescheduleBlocked is True on a Failed Project that Tier-2
+	// recovery would move to a different Node but cannot, because no other
+	// Node can take it right now. The Project is not stopped and keeps
+	// whatever of it still runs; the move is tried again on each resync, and
+	// the condition goes once the Project is asked to stop or is applied
+	// again. Server-owned.
+	ConditionTypeRescheduleBlocked ConditionType = "RescheduleBlocked"
+
 	// ConditionTypeBackupActive says whether the Project's backup is enabled
 	// and has had at least one successful backup accepted. Status=False with
 	// Reason=ReasonNoAcceptedBackup means no backup of the strategy the Project

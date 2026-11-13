@@ -512,6 +512,10 @@
           "$ref": "#/$defs/WorkloadStoppedEvidence",
           "description": "WorkloadStopped is the durable no-start latch for one assignment\ngeneration: the assigned Agent confirmed that every Project container is\nstopped. It is not proof that runtime resources were removed, and it\nalone never authorizes final deletion. Only a committed newer assignment\nclears it; time alone does not."
         },
+        "stopRequest": {
+          "$ref": "#/$defs/StopRequest",
+          "description": "StopRequest is Tier-2 recovery asking the Agent holding one assignment\nof a Failed Project to stop it, so the Project can be moved. The server\nwrites it only after it has found another Node the Project fits on and\nwhile the Project still has a move left; the Agent stops a Failed\nProject only when this names its current assignment. A request for an\nearlier assignment means nothing."
+        },
         "cleanupObligations": {
           "items": {
             "$ref": "#/$defs/CleanupObligation"
@@ -733,6 +737,28 @@
         "recordedAt"
       ],
       "description": "StanzaRecord is one pgBackRest stanza a Project lifetime created."
+    },
+    "StopRequest": {
+      "properties": {
+        "assignment": {
+          "$ref": "#/$defs/AssignmentIdentity"
+        },
+        "requestedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason says why, for people; nothing parses it."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "assignment",
+        "requestedAt"
+      ],
+      "description": "StopRequest asks the Agent holding Assignment to stop the Project."
     },
     "VolumeDef": {
       "properties": {

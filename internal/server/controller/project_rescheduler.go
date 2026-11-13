@@ -43,7 +43,16 @@ type ProjectSnapshot struct {
 	Size                 v1.ProjectSize
 	// FailedNodes are the Nodes the Project has been moved off after Failed.
 	FailedNodes []string
-	Conditions  []ConditionSnapshot
+	// ExcludedNodes are the Nodes the scheduler will not place the Project
+	// on: FailedNodes and the Nodes still owing it cleanup.
+	ExcludedNodes []string
+	// StopRequested reports whether Tier-2 recovery has asked the Agent of
+	// the current assignment to stop the Project.
+	StopRequested bool
+	// WorkloadStopped reports whether the Agent of the current assignment
+	// has confirmed the Project stopped.
+	WorkloadStopped bool
+	Conditions      []ConditionSnapshot
 }
 
 // ConditionSnapshot is the minimal view of a Condition needed by this

@@ -817,6 +817,14 @@ type ProjectRecoveryStatus struct {
 	// clears it; time alone does not.
 	WorkloadStopped *WorkloadStoppedEvidence `json:"workloadStopped,omitempty" yaml:"workloadStopped,omitempty"`
 
+	// StopRequest is Tier-2 recovery asking the Agent holding one assignment
+	// of a Failed Project to stop it, so the Project can be moved. The server
+	// writes it only after it has found another Node the Project fits on and
+	// while the Project still has a move left; the Agent stops a Failed
+	// Project only when this names its current assignment. A request for an
+	// earlier assignment means nothing.
+	StopRequest *StopRequest `json:"stopRequest,omitempty" yaml:"stopRequest,omitempty"`
+
 	// CleanupObligations lists every assignment this Project has given up
 	// whose Node may still hold its runtime resources. An entry is appended in
 	// the same write that releases an assignment or moves the Project to
@@ -1096,6 +1104,12 @@ func (r *ProjectRecoveryStatus) WorkloadStoppedFor(assignment AssignmentIdentity
 	return r != nil && r.WorkloadStopped != nil && r.WorkloadStopped.Assignment == assignment
 }
 
+// StopRequestedFor reports whether Tier-2 recovery has asked the Agent holding
+// assignment to stop the Project.
+func (r *ProjectRecoveryStatus) StopRequestedFor(assignment AssignmentIdentity) bool {
+	return r != nil && r.StopRequest != nil && r.StopRequest.Assignment == assignment
+}
+
 // EnsureRecovery returns s.Recovery, allocating it first if needed.
 func (s *ProjectStatus) EnsureRecovery() *ProjectRecoveryStatus {
 	if s.Recovery == nil {
@@ -1111,6 +1125,14 @@ type AssignmentIdentity struct {
 	ProjectUID           string `json:"projectUID" yaml:"projectUID"`
 	NodeName             string `json:"nodeName" yaml:"nodeName"`
 	AssignmentGeneration int64  `json:"assignmentGeneration" yaml:"assignmentGeneration"`
+}
+
+// StopRequest asks the Agent holding Assignment to stop the Project.
+type StopRequest struct {
+	Assignment  AssignmentIdentity `json:"assignment" yaml:"assignment"`
+	RequestedAt time.Time          `json:"requestedAt" yaml:"requestedAt"`
+	// Reason says why, for people; nothing parses it.
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 }
 
 // WorkloadStoppedEvidence records that the Agent of Assignment confirmed every
@@ -1166,6 +1188,10 @@ func (r *ProjectRecoveryStatus) DeepCopy() *ProjectRecoveryStatus {
 	if r.WorkloadStopped != nil {
 		ws := *r.WorkloadStopped
 		out.WorkloadStopped = &ws
+	}
+	if r.StopRequest != nil {
+		sr := *r.StopRequest
+		out.StopRequest = &sr
 	}
 	if r.CommittedBackup != nil {
 		cb := *r.CommittedBackup
