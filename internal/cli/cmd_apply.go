@@ -80,12 +80,12 @@ Examples:
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 			defer cancel()
-			return waitForProject(ctx, client, project.Name, cmd.ErrOrStderr(), waitInterval)
+			return waitForProject(ctx, client, project.Name, project.SpecRevision, cmd.ErrOrStderr(), waitInterval)
 		},
 	}
 
 	applyCmd.Flags().StringVarP(&filename, "filename", "f", "", "manifest file to apply (\"-\" for stdin)")
-	applyCmd.Flags().BoolVar(&wait, "wait", false, "wait until the Project is Running")
+	applyCmd.Flags().BoolVar(&wait, "wait", false, "wait until the Project is Running its applied spec")
 	applyCmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "how long --wait waits")
 	_ = applyCmd.MarkFlagRequired("filename")
 

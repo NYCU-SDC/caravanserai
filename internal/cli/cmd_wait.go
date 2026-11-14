@@ -93,13 +93,22 @@ func waitKind(arg string) (string, error) {
 type waitCondition struct {
 	what  string // phase, condition, delete, heartbeat
 	value string
+	// specRevision, when set on a Project phase condition, also requires the
+	// Agent to have reported this metadata.specRevision running. Without it,
+	// an update to a Project that is already Running would count as done
+	// before its new spec runs (CARA-134).
+	specRevision int64
 }
 
 func (c waitCondition) String() string {
-	if c.value == "" {
-		return c.what
+	s := c.what
+	if c.value != "" {
+		s += "=" + c.value
 	}
-	return c.what + "=" + c.value
+	if c.specRevision > 0 {
+		s += fmt.Sprintf(" at spec revision %d", c.specRevision)
+	}
+	return s
 }
 
 var nodeStates = []v1.NodeState{v1.NodeStateReady, v1.NodeStateNotReady, v1.NodeStateDraining}
@@ -149,9 +158,11 @@ func waitFor(ctx context.Context, client *Client, kind, name string, cond waitCo
 	return poll(ctx, label, cond, c, progress, interval)
 }
 
-// waitForProject is apply --wait: wait until the Project is Running.
-func waitForProject(ctx context.Context, client *Client, name string, progress io.Writer, interval time.Duration) error {
-	return waitFor(ctx, client, "project", name, waitCondition{what: "phase", value: string(v1.ProjectPhaseRunning)}, progress, interval)
+// waitForProject is apply --wait: wait until the Project is Running and runs
+// specRevision, the revision the apply returned. Zero waits for Running only.
+func waitForProject(ctx context.Context, client *Client, name string, specRevision int64, progress io.Writer, interval time.Duration) error {
+	cond := waitCondition{what: "phase", value: string(v1.ProjectPhaseRunning), specRevision: specRevision}
+	return waitFor(ctx, client, "project", name, cond, progress, interval)
 }
 
 func poll(ctx context.Context, label string, cond waitCondition, c check, progress io.Writer, interval time.Duration) error {
@@ -255,6 +266,11 @@ func projectCheck(client *Client, name string, cond waitCondition) check {
 		switch cond.what {
 		case "phase":
 			if string(p.Status.Phase) == cond.value {
+				if p.Status.ObservedSpecRevision < cond.specRevision {
+					// Running the previous revision. The SpecApplied reason,
+					// when the Agent gave one, says why the new one is not.
+					return false, state + "; " + specBehind(p, cond.specRevision), nil
+				}
 				return true, state, nil
 			}
 			if p.Status.Phase == v1.ProjectPhaseFailed {
@@ -273,6 +289,18 @@ func projectCheck(client *Client, name string, cond waitCondition) check {
 		}
 		return false, state, nil
 	}
+}
+
+// specBehind describes a Project that does not run revision yet.
+func specBehind(p v1.Project, revision int64) string {
+	s := fmt.Sprintf("spec revision %d not running yet (running %d)", revision, p.Status.ObservedSpecRevision)
+	for _, c := range p.Status.Conditions {
+		if c.Type == v1.ConditionTypeSpecApplied && c.Status == v1.ConditionFalse &&
+			c.Reason != "" && c.Reason != v1.ReasonSpecUpdatePending {
+			s += ": " + strings.TrimSuffix(c.Reason+": "+c.Message, ": ")
+		}
+	}
+	return s
 }
 
 func nodeCheck(client *Client, name string, cond waitCondition) check {

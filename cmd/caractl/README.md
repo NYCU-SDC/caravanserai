@@ -63,6 +63,8 @@ caractl apply -f web.yaml --wait --timeout 3m
 
 `--wait` returns 0 once the Project is Running and 1 if it reaches Failed. While it waits, stderr shows each phase and any blocking reason, such as `SchedulingBlocked: node-b lacks cpu`.
 
+Applying a changed manifest to a Project that already runs updates it in place. `--wait` then waits until the agent runs the new spec, not only until the phase is Running. If the update cannot run, stderr says why, for example `spec revision 2 not running yet (running 1): ImagePullFailed: ...`. The old containers keep running, and the wait ends with exit 2 at the timeout. `caractl rollout restart web` recreates every service without changing the spec.
+
 To wait without applying, or for something other than Running:
 
 ```bash
