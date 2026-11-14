@@ -23,6 +23,9 @@ set -Eeuo pipefail
 #                               once it is gone, the update runs
 #   E. a service removed from the spec → its container is removed
 #   F. caractl rollout restart → every service is recreated
+#   G. caractl apply --wait on an update → returns only once the agent runs
+#                               the new revision; an update that cannot run
+#                               times out with the SpecApplied reason
 
 log() { printf '[spec-update-e2e] %s\n' "$*"; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -366,5 +369,43 @@ wait_applied 7 F
 [[ "$(container_id "$web")" != "$web_before" ]] || fail "F: web was not recreated"
 [[ "$(dind exec "$web" cat /usr/share/nginx/html/marker.txt)" == managed-data-must-survive ]] || fail "F: Managed data lost"
 log "F: passed"
+
+log "G: caractl apply --wait waits for the applied revision"
+# manifest <web image> writes the spec put_spec sends without side, as YAML.
+manifest() {
+	cat >"$test_root/g.yaml" <<YAML
+apiVersion: caravanserai/v1
+kind: Project
+metadata:
+  name: $project
+spec:
+  services:
+    - name: web
+      image: $1
+      volumeMounts:
+        - {name: managed, mountPath: /usr/share/nginx/html}
+        - {name: scratch, mountPath: /scratch}
+  volumes:
+    - {name: managed, type: Managed}
+    - {name: scratch, type: Ephemeral}
+YAML
+}
+manifest nginx:1.27-alpine
+ctl apply -f "$test_root/g.yaml" --wait --timeout 2m 2>"$test_root/g-wait.err" || {
+	cat "$test_root/g-wait.err"
+	fail "G: apply --wait failed"
+}
+# The phase was Running the whole time, so a wait on the phase alone would
+# have returned before the agent ran revision 8.
+[[ "$(observed)" == 8 ]] || fail "G: apply --wait returned with revision $(observed) running, not 8"
+[[ "$(image_of "$web")" == nginx:1.27-alpine ]] || fail "G: web runs $(image_of "$web") after the wait"
+manifest nginx:cara-no-such-tag
+set +e
+ctl apply -f "$test_root/g.yaml" --wait --timeout 30s 2>"$test_root/g-fail.err"
+code=$?
+set -e
+[[ $code == 2 ]] || { cat "$test_root/g-fail.err"; fail "G: an update that cannot run exited $code, want 2"; }
+grep -q 'ImagePullFailed' "$test_root/g-fail.err" || { cat "$test_root/g-fail.err"; fail "G: the timeout does not name ImagePullFailed"; }
+log "G: passed"
 
 log "all scenarios passed"
