@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
 
@@ -13,6 +14,133 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
+
+func TestPrintProjectTable_ConditionSummary(t *testing.T) {
+	now := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	phase := v1.Condition{Type: v1.ConditionTypePhase, Reason: "ContainersRunning", LastTransitionTime: now}
+	incident := v1.Condition{Type: v1.ConditionTypeNotReadyAt, Reason: "NodeNotReady", LastTransitionTime: now.Add(-time.Hour)}
+	maintenance := v1.Condition{Type: v1.ConditionTypeMaintenance, Reason: "BackingUp", LastTransitionTime: now.Add(time.Hour)}
+
+	tests := []struct {
+		name       string
+		conditions []v1.Condition
+		want       string
+	}{
+		{
+			name:       "phase wins over stale incident appended last and newer maintenance",
+			conditions: []v1.Condition{phase, maintenance, incident},
+			want:       "ContainersRunning",
+		},
+		{
+			name: "fallback uses transition time rather than heartbeat or position",
+			conditions: []v1.Condition{
+				maintenance,
+				{Type: v1.ConditionTypeRecoveryBlocked, Reason: "VolumeUnavailable", LastTransitionTime: now, LastHeartbeatTime: now.Add(2 * time.Hour)},
+				incident,
+			},
+			want: "BackingUp",
+		},
+		{
+			name: "equal transition times use smallest type name",
+			conditions: []v1.Condition{
+				{Type: v1.ConditionTypeRecoveryBlocked, Reason: "VolumeUnavailable", LastTransitionTime: now},
+				{Type: v1.ConditionTypeMaintenance, Reason: "BackingUp", LastTransitionTime: now},
+				incident,
+			},
+			want: "BackingUp",
+		},
+		{
+			name: "zero transition times also use smallest type name",
+			conditions: []v1.Condition{
+				{Type: v1.ConditionTypeNotReadyAt, Reason: "NodeNotReady"},
+				{Type: v1.ConditionTypeMaintenance, Reason: "BackingUp"},
+			},
+			want: "BackingUp",
+		},
+		{
+			name:       "empty phase reason does not fall back",
+			conditions: []v1.Condition{{Type: v1.ConditionTypePhase, LastTransitionTime: now}, maintenance, incident},
+			want:       "-",
+		},
+		{
+			name:       "empty fallback reason",
+			conditions: []v1.Condition{{Type: v1.ConditionTypeMaintenance, LastTransitionTime: now}, incident},
+			want:       "-",
+		},
+		{name: "nil conditions", want: "-"},
+		{name: "empty conditions", conditions: []v1.Condition{}, want: "-"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reversed := make([]v1.Condition, len(tt.conditions))
+			for i, condition := range tt.conditions {
+				reversed[len(tt.conditions)-1-i] = condition
+			}
+			rotated := append([]v1.Condition(nil), tt.conditions...)
+			if len(rotated) > 0 {
+				rotated = append(rotated[1:], rotated[0])
+			}
+			orders := []struct {
+				name       string
+				conditions []v1.Condition
+			}{
+				{"original", tt.conditions},
+				{"reversed", reversed},
+				{"rotated", rotated},
+			}
+			for _, order := range orders {
+				t.Run(order.name, func(t *testing.T) {
+					project := v1.Project{
+						ObjectMeta: v1.ObjectMeta{Name: "guestbook"},
+						Status: v1.ProjectStatus{
+							Phase: v1.ProjectPhaseRunning, NodeRef: "pve2-agent", Conditions: order.conditions,
+						},
+					}
+					var buf bytes.Buffer
+					p := &Printer{Format: "table", Out: &buf}
+					require.NoError(t, p.PrintProjectList(v1.ProjectList{Items: []v1.Project{project}}))
+					lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+					require.Len(t, lines, 2)
+					assert.Equal(t, []string{"NAME", "PHASE", "NODE", "CONDITIONS", "AGE"}, strings.Fields(lines[0]))
+					assert.Equal(t, []string{"guestbook", "Running", "pve2-agent", tt.want, "<unknown>"}, strings.Fields(lines[1]))
+				})
+			}
+		})
+	}
+}
+
+func TestPrintProject_StructuredFormatsPreserveConditions(t *testing.T) {
+	now := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	project := v1.Project{
+		ObjectMeta: v1.ObjectMeta{Name: "guestbook"},
+		Status: v1.ProjectStatus{
+			Phase: v1.ProjectPhaseRunning, NodeRef: "pve2-agent",
+			Conditions: []v1.Condition{
+				{Type: v1.ConditionTypePhase, Status: v1.ConditionTrue, Reason: "ContainersRunning", LastTransitionTime: now},
+				{Type: v1.ConditionTypeMaintenance, Status: v1.ConditionFalse, Message: "Backup completed", LastTransitionTime: now.Add(-time.Minute)},
+				{Type: v1.ConditionTypeNotReadyAt, Status: v1.ConditionTrue, Reason: "NodeNotReady", LastTransitionTime: now.Add(-time.Hour)},
+			},
+		},
+	}
+	list := v1.ProjectList{Items: []v1.Project{project}}
+	for _, format := range []string{"json", "yaml"} {
+		t.Run(format, func(t *testing.T) {
+			var buf bytes.Buffer
+			p := &Printer{Format: format, Out: &buf}
+			require.NoError(t, p.PrintProject(project))
+			var decoded v1.Project
+			require.NoError(t, decodeAny(format, buf.Bytes(), &decoded))
+			assert.Equal(t, project, decoded)
+
+			buf.Reset()
+			require.NoError(t, p.PrintProjectList(list))
+			var decodedList v1.ProjectList
+			require.NoError(t, decodeAny(format, buf.Bytes(), &decodedList))
+			assert.Equal(t, list, decodedList)
+		})
+	}
+}
 
 // decodeAny unmarshals data as JSON or YAML into v depending on format.
 func decodeAny(format string, data []byte, v any) error {
