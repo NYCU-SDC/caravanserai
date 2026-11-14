@@ -36,7 +36,7 @@ func TestWaitForProject(t *testing.T) {
 	t.Run("returns once Running and explains the wait", func(t *testing.T) {
 		client := projectSequence(t, blocked, blocked, v1.ProjectStatus{Phase: v1.ProjectPhaseRunning})
 		var progress bytes.Buffer
-		require.NoError(t, waitForProject(context.Background(), client, "web", &progress, time.Millisecond))
+		require.NoError(t, waitForProject(context.Background(), client, "web", 0, &progress, time.Millisecond))
 		assert.Contains(t, progress.String(), "node-b lacks cpu")
 		assert.Contains(t, progress.String(), "project/web Running")
 		assert.Equal(t, 1, bytes.Count(progress.Bytes(), []byte("lacks cpu")), "an unchanged state is printed once")
@@ -45,7 +45,7 @@ func TestWaitForProject(t *testing.T) {
 	t.Run("Failed is an error", func(t *testing.T) {
 		client := projectSequence(t, v1.ProjectStatus{Phase: v1.ProjectPhaseFailed})
 		var progress bytes.Buffer
-		assert.ErrorContains(t, waitForProject(context.Background(), client, "web", &progress, time.Millisecond), "Failed")
+		assert.ErrorContains(t, waitForProject(context.Background(), client, "web", 0, &progress, time.Millisecond), "Failed")
 	})
 
 	t.Run("a timeout reports the last reason", func(t *testing.T) {
@@ -53,8 +53,32 @@ func TestWaitForProject(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 		defer cancel()
 		var progress bytes.Buffer
-		err := waitForProject(ctx, client, "web", &progress, time.Millisecond)
+		err := waitForProject(ctx, client, "web", 0, &progress, time.Millisecond)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "node-b lacks cpu")
+	})
+
+	t.Run("an update waits until the Agent runs the applied revision", func(t *testing.T) {
+		old := v1.ProjectStatus{Phase: v1.ProjectPhaseRunning, ObservedSpecRevision: 1}
+		failed := v1.ProjectStatus{Phase: v1.ProjectPhaseRunning, ObservedSpecRevision: 1, Conditions: []v1.Condition{{
+			Type: v1.ConditionTypeSpecApplied, Status: v1.ConditionFalse, Reason: "ImagePullFailed", Message: "no such image",
+		}}}
+		client := projectSequence(t, old, failed, v1.ProjectStatus{Phase: v1.ProjectPhaseRunning, ObservedSpecRevision: 2})
+		var progress bytes.Buffer
+		require.NoError(t, waitForProject(context.Background(), client, "web", 2, &progress, time.Millisecond))
+		assert.Contains(t, progress.String(), "spec revision 2 not running yet (running 1)")
+		assert.Contains(t, progress.String(), "ImagePullFailed: no such image")
+		assert.Contains(t, progress.String(), "project/web Running\n", "done once revision 2 runs")
+	})
+
+	t.Run("a timeout on an update names the revision", func(t *testing.T) {
+		client := projectSequence(t, v1.ProjectStatus{Phase: v1.ProjectPhaseRunning, ObservedSpecRevision: 1})
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		var progress bytes.Buffer
+		err := waitForProject(ctx, client, "web", 2, &progress, time.Millisecond)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "phase=Running at spec revision 2")
+		assert.Contains(t, err.Error(), "running 1")
 	})
 }

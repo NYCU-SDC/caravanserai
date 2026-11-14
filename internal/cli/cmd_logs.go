@@ -18,7 +18,7 @@ import (
 //
 // Usage:
 //
-//	caractrl logs <project>/<service> [--follow] [--tail N] [--timestamps] [--node <agentAddr>]
+//	caractl logs <project>/<service> [--follow] [--tail N] [--timestamps] [--node <agentAddr>]
 func NewLogsCmd() *cobra.Command {
 	var (
 		nodeAddr   string
@@ -35,22 +35,22 @@ log streaming endpoint.  This works similarly to kubectl logs.
 
 Examples:
   # Print all logs from the "web" service in project "my-app"
-  caractrl logs my-app/web
+  caractl logs my-app/web
 
   # Stream logs in real-time (like tail -f)
-  caractrl logs my-app/web --follow
+  caractl logs my-app/web --follow
 
   # Show only the last 100 lines
-  caractrl logs my-app/web --tail 100
+  caractl logs my-app/web --tail 100
 
   # Show timestamps with each log line
   caractl logs my-app/web --timestamps
 
   # Specify Agent by node name (resolved via server API)
-  caractrl logs my-app/web --node main
+  caractl logs my-app/web --node main
 
   # Specify Agent address explicitly
-  caractrl logs my-app/web --node 192.168.1.100:9090`,
+  caractl logs my-app/web --node 192.168.1.100:9090`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
