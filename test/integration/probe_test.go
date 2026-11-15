@@ -13,12 +13,14 @@ import (
 	"testing"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/agentauth"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
-// probeAgent stands in for cara-agent's HTTP server. It serves /healthz with
+// probeAgent stands in for cara-agent's HTTP server. It serves /api/v1/probe with
 // the configured response and lets the test control the response so we can
 // exercise both the happy path and error propagation.
 type probeAgent struct {
@@ -26,16 +28,18 @@ type probeAgent struct {
 	respStatus int
 }
 
-func startProbeAgent(t *testing.T, status int) *probeAgent {
+func startProbeAgent(t *testing.T, node string, status int) *probeAgent {
 	t.Helper()
 	p := &probeAgent{respStatus: status}
-	p.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/healthz" {
+	// The real agent's check, so these tests also show the server signs
+	// its probe for the Node it dials (CARA-139).
+	p.server = httptest.NewServer(agentauth.Middleware(suite.agentVerifier(node), zap.NewNop(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/probe" {
 			t.Errorf("probeAgent got unexpected path %q", r.URL.Path)
 		}
 		w.WriteHeader(p.respStatus)
 		_, _ = w.Write([]byte("stub-agent"))
-	}))
+	})))
 	return p
 }
 
@@ -72,7 +76,7 @@ func hostPort(t *testing.T, url string) (string, int) {
 func TestProbeNode_HappyPath(t *testing.T) {
 	const nodeName = "e2e-probe-happy"
 
-	agent := startProbeAgent(t, http.StatusOK)
+	agent := startProbeAgent(t, nodeName, http.StatusOK)
 	defer agent.server.Close()
 	agentHost, agentPort := hostPort(t, agent.server.URL)
 
@@ -151,7 +155,7 @@ func TestProbeNode_NodeNotFound(t *testing.T) {
 func TestProbeNode_AgentReturnsError(t *testing.T) {
 	const nodeName = "e2e-probe-agent-error"
 
-	agent := startProbeAgent(t, http.StatusInternalServerError)
+	agent := startProbeAgent(t, nodeName, http.StatusInternalServerError)
 	defer agent.server.Close()
 	agentHost, agentPort := hostPort(t, agent.server.URL)
 

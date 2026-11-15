@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/agentauth"
 )
 
 // DefaultAgentPort is used when a Node's Status.Network.AgentPort is 0.
@@ -44,6 +46,15 @@ type Dialer interface {
 	Client(ctx context.Context, nodeName string) (*http.Client, string, error)
 }
 
+// EndpointResolver is what a proxy to an Agent needs: the transport and base
+// URL without the client timeout, which would cut a log stream or a
+// port-forward tunnel short.
+type EndpointResolver interface {
+	// Endpoint returns a RoundTripper that reaches the named node's agent
+	// and signs every request for it, and the agent's base URL.
+	Endpoint(ctx context.Context, nodeName string) (http.RoundTripper, *url.URL, error)
+}
+
 // httpDialer is the concrete Dialer used in production and in tests. It reads
 // the node's network address from the store on every call and constructs a
 // base URL using its Transport. Today the default transport dials the stored
@@ -52,6 +63,7 @@ type Dialer interface {
 type httpDialer struct {
 	nodes     NodeAddressLookup
 	transport http.RoundTripper
+	signer    *agentauth.Signer
 	timeout   time.Duration
 }
 
@@ -65,11 +77,22 @@ type Config struct {
 	// stored in Node.Status.Network.OverlayIP.
 	Transport http.RoundTripper
 
+	// Signer signs every request to an agent (CARA-139); agents refuse
+	// requests without a signature for them. Nil sends requests unsigned,
+	// which only tests do.
+	Signer *agentauth.Signer
+
 	Timeout time.Duration
 }
 
-// New returns a Dialer configured with cfg.
-func New(cfg Config) Dialer {
+// HTTPDialer is a Dialer and an EndpointResolver.
+type HTTPDialer interface {
+	Dialer
+	EndpointResolver
+}
+
+// New returns a dialer configured with cfg.
+func New(cfg Config) HTTPDialer {
 	if cfg.Nodes == nil {
 		panic("agentdialer.New: Nodes is required")
 	}
@@ -87,20 +110,33 @@ func New(cfg Config) Dialer {
 	return &httpDialer{
 		nodes:     cfg.Nodes,
 		transport: transport,
+		signer:    cfg.Signer,
 		timeout:   timeout,
 	}
 }
 
 // Client implements Dialer.
 func (d *httpDialer) Client(ctx context.Context, nodeName string) (*http.Client, string, error) {
+	transport, base, err := d.Endpoint(ctx, nodeName)
+	if err != nil {
+		return nil, "", err
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   d.timeout,
+	}, base.String(), nil
+}
+
+// Endpoint implements EndpointResolver.
+func (d *httpDialer) Endpoint(ctx context.Context, nodeName string) (http.RoundTripper, *url.URL, error) {
 	node, err := d.nodes.GetNode(ctx, nodeName)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: %w", ErrNodeLookup, err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrNodeLookup, err)
 	}
 
 	ip := node.Status.Network.OverlayIP
 	if ip == "" {
-		return nil, "", fmt.Errorf("%w: node %q has no Status.Network.OverlayIP", ErrNodeUnreachable, nodeName)
+		return nil, nil, fmt.Errorf("%w: node %q has no Status.Network.OverlayIP", ErrNodeUnreachable, nodeName)
 	}
 
 	port := node.Status.Network.AgentPort
@@ -108,10 +144,11 @@ func (d *httpDialer) Client(ctx context.Context, nodeName string) (*http.Client,
 		port = DefaultAgentPort
 	}
 
-	baseURL := "http://" + net.JoinHostPort(ip, strconv.Itoa(port))
+	base := &url.URL{Scheme: "http", Host: net.JoinHostPort(ip, strconv.Itoa(port))}
 
-	return &http.Client{
-		Transport: d.transport,
-		Timeout:   d.timeout,
-	}, baseURL, nil
+	transport := d.transport
+	if d.signer != nil {
+		transport = &agentauth.Transport{Signer: d.signer, Node: nodeName, Base: transport}
+	}
+	return transport, base, nil
 }

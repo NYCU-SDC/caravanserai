@@ -110,6 +110,9 @@ var nodeRoutes = map[string]rule{
 	"PUT /api/v1/projects/{name}/backup/completions/{backupID}":     allowRoute,
 
 	"GET /api/v1/secrets/{name}": usedSecret,
+
+	// The key the Agent checks cara-server's requests with (CARA-139).
+	"GET /api/v1/agent-signing-key": allowRoute,
 }
 
 // NodeRoutes returns the patterns of the routes a Node may call, so a test can

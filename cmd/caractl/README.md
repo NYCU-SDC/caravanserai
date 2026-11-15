@@ -99,7 +99,9 @@ Error: project "broken" is Failed: ReconcileError: ensure container "web": pull 
 caractl logs web/web --tail 20
 ```
 
-The argument is `<project>/<service>`. Until CARA-139, caractl reads logs straight from the agent, so the machine running caractl must be able to reach the agent's port.
+The argument is `<project>/<service>`. cara-server relays the logs from the agent running the Project, so caractl needs only a token for cara-server, not a route to the Node. `--follow` streams; `--node <name>` reads from another Node, such as the one a Project just moved away from. `--node` takes a Node name, not an agent address: agents answer only cara-server (CARA-139).
+
+`caractl port-forward web/db 15432:5432` works the same way: each connection to the local port opens a tunnel through cara-server to the agent.
 
 ## Delete
 

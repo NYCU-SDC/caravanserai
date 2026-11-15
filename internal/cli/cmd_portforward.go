@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
@@ -21,15 +24,21 @@ import (
 //
 // Usage:
 //
-//	caractl port-forward <project>/<service> [LOCAL_PORT:]REMOTE_PORT [--node <agentAddr>]
+//	caractl port-forward <project>/<service> [LOCAL_PORT:]REMOTE_PORT [--node <name>]
 func NewPortForwardCmd() *cobra.Command {
-	var nodeAddr string
+	var node string
 
 	cmd := &cobra.Command{
 		Use:   "port-forward <project>/<service> [LOCAL_PORT:]REMOTE_PORT",
 		Short: "Forward a local port to a container port on a remote Node",
-		Long: `Forward a local port to a container port on a remote Node via the Agent's
-WebSocket tunnel. This works similarly to kubectl port-forward.
+		Long: `Forward a local port to a container port. Each connection to the local port
+opens a WebSocket to cara-server, which relays it to the Agent on the Node
+running the Project; the Agent accepts requests from cara-server alone. This
+needs only a token for cara-server, and no route to the Node or its overlay.
+It works similarly to kubectl port-forward.
+
+The Node is looked up for each new connection, so connections opened after
+the Project moves reach the new Node.
 
 Examples:
   # Forward local port 5432 to the "db" service's port 5432 in project "my-app"
@@ -38,73 +47,64 @@ Examples:
   # Forward local port 15432 to remote port 5432
   caractl port-forward my-app/db 15432:5432
 
-  # Specify Agent by node name (resolved via server API)
-  caractl port-forward my-app/db 5432 --node main
-
-  # Specify Agent address explicitly
-  caractl port-forward my-app/db 5432 --node 192.168.1.100:9090`,
+  # Reach a Node other than the one the Project is assigned to
+  caractl port-forward my-app/db 5432 --node main`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			project, service, err := parseServiceTarget(args[0])
+			if err != nil {
+				return err
+			}
+			localPort, remotePort, err := parsePorts(args[1])
+			if err != nil {
+				return err
+			}
+			if err := checkNodeName(node); err != nil {
+				return err
+			}
 			cmd.SilenceUsage = true
-			return runPortForward(cmd, args, nodeAddr)
+			serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return runPortForward(ctx, NewClient(serverURL), os.Getenv(TokenEnv), project, service, node, localPort, remotePort, cmd.ErrOrStderr())
 		},
 	}
 
-	cmd.Flags().StringVar(&nodeAddr, "node", "", "Node name or agent address (host:port); auto-resolved from server if omitted")
+	cmd.Flags().StringVar(&node, "node", "", "Node to reach; the Project's assigned Node if omitted")
 	return cmd
 }
 
-func runPortForward(cmd *cobra.Command, args []string, nodeAddr string) error {
-	// Parse <project>/<service>
-	parts := strings.SplitN(args[0], "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return fmt.Errorf("invalid target %q: expected <project>/<service>", args[0])
+func runPortForward(ctx context.Context, client *Client, token, project, service, node string, localPort, remotePort int, stderr io.Writer) error {
+	// Fail now, not on the first connection, when the Project cannot be
+	// reached: it does not exist, or nothing runs it.
+	if node == "" {
+		p, err := client.GetProject(ctx, project)
+		if err != nil {
+			return fmt.Errorf("get project %q: %w", project, err)
+		}
+		if p.Status.NodeRef == "" {
+			return fmt.Errorf("project %q is not assigned to a node yet; use --node to reach one", project)
+		}
 	}
-	project, service := parts[0], parts[1]
 
-	// Parse [LOCAL_PORT:]REMOTE_PORT
-	localPort, remotePort, err := parsePorts(args[1])
+	target, err := forwardURL(client, project, service, node, remotePort)
 	if err != nil {
 		return err
 	}
-
-	// Resolve agent address.
-	if nodeAddr == "" {
-		// Auto-resolve from project's nodeRef.
-		serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
-		resolved, resolveErr := resolveAgentAddr(serverURL, project)
-		if resolveErr != nil {
-			return resolveErr
-		}
-		nodeAddr = resolved
-	} else if !strings.Contains(nodeAddr, ":") {
-		// Treat as a node name — resolve via the server API.
-		serverURL, _ := cmd.Root().PersistentFlags().GetString("server")
-		resolved, resolveErr := resolveNodeAddr(serverURL, nodeAddr)
-		if resolveErr != nil {
-			return resolveErr
-		}
-		nodeAddr = resolved
+	header := http.Header{}
+	if token != "" {
+		header.Set("Authorization", "Bearer "+token)
 	}
-	// else: treat as raw host:port
 
-	// Set up signal handling.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	// Open local TCP listener.
 	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(localPort)))
 	if err != nil {
 		return fmt.Errorf("listen on port %d: %w", localPort, err)
 	}
 	defer func() { _ = listener.Close() }()
 
-	fmt.Fprintf(os.Stderr, "Forwarding 127.0.0.1:%d -> %s/%s:%d\n", localPort, project, service, remotePort)
+	fmt.Fprintf(stderr, "Forwarding %s -> %s/%s:%d\n", listener.Addr(), project, service, remotePort)
 
-	// Track active connections for graceful shutdown.
 	var wg sync.WaitGroup
-
-	// Accept loop in a goroutine so we can select on ctx.Done().
 	go func() {
 		for {
 			conn, acceptErr := listener.Accept()
@@ -115,16 +115,37 @@ func runPortForward(cmd *cobra.Command, args []string, nodeAddr string) error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleConnection(ctx, conn, nodeAddr, project, service, remotePort)
+				handleConnection(ctx, conn, target, header, stderr)
 			}()
 		}
 	}()
 
 	<-ctx.Done()
-	fmt.Fprintln(os.Stderr, "\nShutting down...")
+	fmt.Fprintln(stderr, "\nShutting down...")
 	_ = listener.Close()
 	wg.Wait()
 	return nil
+}
+
+// forwardURL is the WebSocket URL of the server's forward route.
+func forwardURL(client *Client, project, service, node string, remotePort int) (string, error) {
+	query := url.Values{}
+	if node != "" {
+		query.Set("node", node)
+	}
+	u, err := url.Parse(client.serviceURL(project, service, "forward/"+strconv.Itoa(remotePort), query))
+	if err != nil {
+		return "", fmt.Errorf("server address: %w", err)
+	}
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "ws"
+	case "https":
+		u.Scheme = "wss"
+	default:
+		return "", fmt.Errorf("server address %q: scheme must be http or https", client.BaseURL)
+	}
+	return u.String(), nil
 }
 
 // parsePorts parses a port spec of the form "[LOCAL:]REMOTE" and returns
@@ -151,75 +172,29 @@ func parsePorts(spec string) (int, int, error) {
 	return local, remote, nil
 }
 
-// resolveNodeAddr queries the cara-server to find the agent address for the
-// given node name.  It returns "host:port" suitable for dialling the agent.
-func resolveNodeAddr(serverURL, nodeName string) (string, error) {
-	client := NewClient(serverURL)
-	ctx := context.Background()
-
-	node, err := client.GetNode(ctx, nodeName)
-	if err != nil {
-		return "", fmt.Errorf("get node %q: %w", nodeName, err)
-	}
-
-	ip := node.Status.Network.OverlayIP
-	if ip == "" {
-		return "", fmt.Errorf("node %q has no overlay IP address; use --node host:port to specify the agent address directly", nodeName)
-	}
-
-	agentPort := node.Status.Network.AgentPort
-	if agentPort == 0 {
-		agentPort = 9090 // default
-		fmt.Fprintf(os.Stderr, "Warning: node %q has no agentPort set, defaulting to %d\n", nodeName, agentPort)
-	}
-
-	return net.JoinHostPort(ip, strconv.Itoa(agentPort)), nil
-}
-
-// resolveAgentAddr queries the cara-server to find the agent address for the
-// project's node.
-func resolveAgentAddr(serverURL, project string) (string, error) {
-	client := NewClient(serverURL)
-	ctx := context.Background()
-
-	// 1. Get the project to find nodeRef.
-	p, err := client.GetProject(ctx, project)
-	if err != nil {
-		return "", fmt.Errorf("get project %q: %w", project, err)
-	}
-	if p.Status.NodeRef == "" {
-		return "", fmt.Errorf("project %q has no nodeRef (not scheduled); use --node to specify the agent address", project)
-	}
-
-	// 2. Resolve the node's agent address.
-	return resolveNodeAddr(serverURL, p.Status.NodeRef)
-}
+// dialTimeout bounds opening one tunnel. cara-server gives up on an Agent
+// that does not answer sooner than this, and says why.
+const dialTimeout = 30 * time.Second
 
 // handleConnection tunnels a single local TCP connection through a WebSocket
-// to the Agent's forward endpoint.
-func handleConnection(ctx context.Context, conn net.Conn, agentAddr, project, service string, remotePort int) {
+// to cara-server's forward route.
+func handleConnection(ctx context.Context, conn net.Conn, target string, header http.Header, stderr io.Writer) {
 	defer func() { _ = conn.Close() }()
 
-	wsURL := url.URL{
-		Scheme: "ws",
-		Host:   agentAddr,
-		Path:   fmt.Sprintf("/api/v1/forward/%s/%s/%d", project, service, remotePort),
-	}
-
-	dialer := websocket.Dialer{}
-	wsConn, resp, err := dialer.DialContext(ctx, wsURL.String(), nil)
+	dialer := websocket.Dialer{HandshakeTimeout: dialTimeout, Proxy: http.ProxyFromEnvironment}
+	wsConn, resp, err := dialer.DialContext(ctx, target, header)
 	if err != nil {
 		if resp != nil {
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			fmt.Fprintf(os.Stderr, "Error: %s\n", ParseAPIError(body, resp.Status, resp.StatusCode))
+			fmt.Fprintf(stderr, "Error: %s\n", ParseAPIError(bytes.TrimSpace(body), resp.Status, resp.StatusCode))
 		} else {
-			fmt.Fprintf(os.Stderr, "WebSocket dial failed: %v\n", err)
+			fmt.Fprintf(stderr, "Cannot open the tunnel through cara-server: %v\n", err)
 		}
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "Handling connection for %s\n", conn.RemoteAddr())
+	fmt.Fprintf(stderr, "Handling connection for %s\n", conn.RemoteAddr())
 
 	done := make(chan struct{}, 2)
 
@@ -263,5 +238,5 @@ func handleConnection(ctx context.Context, conn net.Conn, agentAddr, project, se
 	// Wait for the other goroutine.
 	<-done
 
-	fmt.Fprintf(os.Stderr, "Connection from %s closed\n", conn.RemoteAddr())
+	fmt.Fprintf(stderr, "Connection from %s closed\n", conn.RemoteAddr())
 }
