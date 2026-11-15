@@ -82,6 +82,12 @@ func (r *ownershipResolver) Resolve(ctx context.Context, key backup.ResourceKey,
 		if project.Status.AssignmentGeneration != generation {
 			return backup.OwnershipReassigned
 		}
+		// This node has reported the generation stopped (CARA-92). The
+		// assignment may already be on its way to another node, so its
+		// containers must not come back here, a backup's restart included.
+		if workloadLatched(project) {
+			return backup.OwnershipLost
+		}
 		return backup.OwnershipRetained
 	case "":
 		// Unassigned: the Project was reset to Pending by a drain or

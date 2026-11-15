@@ -68,3 +68,35 @@ func TestResolveSeparatesAGoneProjectFromAnUnreachableServer(t *testing.T) {
 	assert.Equal(t, backup.OwnershipUnknown,
 		NewOwnershipResolver(NewClient(zap.NewNop(), failing.URL, "node-a"), "node-a", zap.NewNop()).Resolve(context.Background(), key, "uid-1", 7))
 }
+
+// A generation this node reported stopped (CARA-92) is never restarted after a
+// backup: its assignment may already be on its way to another node.
+func TestResolveTreatsAReportedStopAsLost(t *testing.T) {
+	for name, tc := range map[string]struct {
+		evidenceGeneration int64
+		want               backup.Ownership
+	}{
+		"this generation reported stopped":     {7, backup.OwnershipLost},
+		"an older generation reported stopped": {6, backup.OwnershipRetained},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				require.NoError(t, json.NewEncoder(w).Encode(v1.Project{
+					ObjectMeta: v1.ObjectMeta{Name: "blog", Namespace: "default", UID: "uid-1"},
+					Status: v1.ProjectStatus{
+						Phase: v1.ProjectPhaseRunning, NodeRef: "node-a", AssignmentGeneration: 7,
+						Recovery: &v1.ProjectRecoveryStatus{WorkloadStopped: &v1.WorkloadStoppedEvidence{
+							Assignment: v1.AssignmentIdentity{ProjectUID: "uid-1", NodeName: "node-a", AssignmentGeneration: tc.evidenceGeneration},
+						}},
+					},
+				}))
+			}))
+			defer server.Close()
+
+			got := NewOwnershipResolver(NewClient(zap.NewNop(), server.URL, "node-a"), "node-a", zap.NewNop()).
+				Resolve(context.Background(), backup.ResourceKey{Namespace: "default", Name: "blog"}, "uid-1", 7)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

@@ -34,6 +34,26 @@ type mockRuntime struct {
 	removeOrphanFn  func(ctx context.Context, project docker.ProjectIdentity) error
 	driftFn         func(ctx context.Context, project *v1.Project) (docker.SpecDrift, error)
 	updateFn        func(ctx context.Context, project *v1.Project, drift docker.SpecDrift) error
+	listedFn        func(ctx context.Context, project *v1.Project) ([]docker.ProjectContainer, error)
+	stopAssignFn    func(ctx context.Context, project *v1.Project) error
+}
+
+func (m *mockRuntime) ProjectContainers(ctx context.Context, project *v1.Project) ([]docker.ProjectContainer, error) {
+	if m.listedFn != nil {
+		return m.listedFn(ctx, project)
+	}
+	return nil, nil
+}
+
+// StopAssignment falls back to stopFn, so a test counting stops sees either.
+func (m *mockRuntime) StopAssignment(ctx context.Context, project *v1.Project) error {
+	if m.stopAssignFn != nil {
+		return m.stopAssignFn(ctx, project)
+	}
+	if m.stopFn != nil {
+		return m.stopFn(ctx, project)
+	}
+	return nil
 }
 
 func (m *mockRuntime) SpecDrift(ctx context.Context, project *v1.Project) (docker.SpecDrift, error) {

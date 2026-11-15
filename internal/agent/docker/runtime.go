@@ -106,6 +106,34 @@ type StaleContainer struct {
 	Reason error
 }
 
+// ProjectContainer is one container on this node carrying a Project's labels,
+// found by listing them rather than by the services the spec names.
+type ProjectContainer struct {
+	// Name is the Docker container name.
+	Name string
+	// Service is the cara.service label. It may name a service the current
+	// spec no longer declares.
+	Service string
+	// ID is the full Docker container ID.
+	ID string
+	// State is the Docker state: "running", "exited", "created", "paused",
+	// "restarting", "dead", ...
+	State string
+	// NotOwned is nil when the container belongs to the assignment it was
+	// listed for, and otherwise the *ContainerNotOwnedError saying why not.
+	NotOwned error
+}
+
+// Stopped reports whether Docker says no process of the container can be
+// running. Anything else, a state this code does not know included, may run.
+func (c ProjectContainer) Stopped() bool {
+	switch c.State {
+	case "exited", "created", "dead":
+		return true
+	}
+	return false
+}
+
 // ProjectIdentity identifies one Project's Docker resources. Namespace is
 // included even while the API still treats names as globally unique so a
 // destructive runtime operation never broadens to another namespace.
@@ -253,6 +281,22 @@ type Runtime interface {
 	//
 	// An empty result means every container found is this assignment's.
 	StaleContainers(ctx context.Context, project *v1.Project) ([]StaleContainer, error)
+
+	// ProjectContainers lists every container on this node carrying the
+	// Project's labels, whatever service it names and whichever lifetime or
+	// generation it was created for, each classified against the current
+	// assignment. Like StaleContainers it asks Docker for the labels rather
+	// than walking the spec, so a container of a service the spec has since
+	// dropped is listed too.
+	ProjectContainers(ctx context.Context, project *v1.Project) ([]ProjectContainer, error)
+
+	// StopAssignment stops every container ProjectContainers lists as the
+	// current assignment's, without removing it. Services the spec declares
+	// stop first, in reverse spec order as StopProject does, then any the
+	// spec no longer declares. A container of another assignment is left
+	// exactly as it is — it is not this assignment's to stop — and does not
+	// fail the call, unlike StopProject. Missing containers are not an error.
+	StopAssignment(ctx context.Context, project *v1.Project) error
 
 	// GetContainerIPs returns a map of serviceName → IP address for each
 	// service container in the project. The IP is read from the container's

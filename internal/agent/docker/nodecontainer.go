@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -140,9 +141,27 @@ func (r *DockerRuntime) EnsureProjectNetwork(ctx context.Context, project *v1.Pr
 	return r.ensureNetwork(ctx, project.Namespace, project.Name, project.ObjectMeta.UID)
 }
 
-// RestartContainer stops and starts one container, for a setting that takes
-// effect only at process start.
+// ErrContainerNotRunning is returned by RestartContainer for a container that
+// is not running.
+var ErrContainerNotRunning = errors.New("container is not running")
+
+// RestartContainer stops and starts one running container, for a setting that
+// takes effect only at process start.
+//
+// It never starts a container that was not running. Docker's own restart
+// would, and something may have stopped it on purpose since the caller last
+// looked — a node that reported a Project stopped (CARA-92) must not see it
+// started again by a settings change. Unlike the Project-level starts, this
+// call names no Project, so the stop-latch guard cannot judge it; refusing to
+// start what is stopped keeps the promise without knowing whose it is.
 func (r *DockerRuntime) RestartContainer(ctx context.Context, nameOrID string) error {
+	info, err := r.client.ContainerInspect(ctx, nameOrID)
+	if err != nil {
+		return fmt.Errorf("docker: inspect %s: %w", nameOrID, err)
+	}
+	if info.ContainerJSONBase == nil || info.State == nil || !info.State.Running {
+		return fmt.Errorf("docker: restart %s: %w", nameOrID, ErrContainerNotRunning)
+	}
 	if err := r.client.ContainerStop(ctx, nameOrID, container.StopOptions{}); err != nil {
 		return fmt.Errorf("docker: stop %s: %w", nameOrID, err)
 	}
