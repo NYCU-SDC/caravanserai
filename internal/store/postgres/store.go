@@ -2556,3 +2556,34 @@ func (s *Store) RevokeNodeTokens(ctx context.Context, nodeName string) (int, int
 	}
 	return int(nodes.RowsAffected()), int(joins.RowsAffected()), nil
 }
+
+// ============================================================
+// Agent signing key
+// ============================================================
+
+// AgentSigningKey implements store.AgentSigningKeyStore.
+func (s *Store) AgentSigningKey(ctx context.Context, generate func() ([]byte, error)) ([]byte, error) {
+	var key []byte
+	err := s.pool.QueryRow(ctx, `SELECT private_key FROM agent_signing_key WHERE id = 1`).Scan(&key)
+	if err == nil {
+		return key, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: read agent signing key: %w", err)
+	}
+	fresh, err := generate()
+	if err != nil {
+		return nil, fmt.Errorf("postgres: generate agent signing key: %w", err)
+	}
+	// A server that started at the same moment may have inserted its own;
+	// both then read back the one that won.
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO agent_signing_key (id, private_key, created_at) VALUES (1, $1, $2)
+		ON CONFLICT (id) DO NOTHING`, fresh, time.Now().UTC()); err != nil {
+		return nil, fmt.Errorf("postgres: store agent signing key: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT private_key FROM agent_signing_key WHERE id = 1`).Scan(&key); err != nil {
+		return nil, fmt.Errorf("postgres: read agent signing key: %w", err)
+	}
+	return key, nil
+}

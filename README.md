@@ -384,7 +384,7 @@ The agent calls `POST /api/v1/nodes/{name}/join` with the join token as its bear
 | `GET` | `/api/v1/nodes/{name}` | Get a single node |
 | `DELETE` | `/api/v1/nodes/{name}` | Delete a node |
 | `POST` | `/api/v1/nodes/{name}/heartbeat` | Send a heartbeat |
-| `POST` | `/api/v1/nodes/{name}/probe` | Server-side reachability probe — server dials the agent's `/healthz` via the agent dialer (see `internal/server/agentdialer/`) and reports latency + status. When the server is joined to the overlay (see below) the dialer routes this over the agent's overlay IP via a tsnet-backed transport; otherwise it uses the default transport. Also surfaced as `caractl node probe <name>`. |
+| `POST` | `/api/v1/nodes/{name}/probe` | Server-side reachability probe — server calls the agent's signed `/api/v1/probe` via the agent dialer, so a success also shows the agent accepts the server's signature (see `internal/server/agentdialer/`) and reports latency + status. When the server is joined to the overlay (see below) the dialer routes this over the agent's overlay IP via a tsnet-backed transport; otherwise it uses the default transport. Also surfaced as `caractl node probe <name>`. |
 | `GET` | `/api/v1/nodes/{name}/cleanup-obligations` | Unresolved cleanup obligations this node owes for assignments it gave up — the cleanup tasks its agent runs (excludes Projects the node is still assigned) |
 
 ### Projects
@@ -405,6 +405,18 @@ The agent calls `POST /api/v1/nodes/{name}/join` with the join token as its bear
 | `PUT` | `/api/v1/projects/{name}/recovery/resources-removed` | Resolve a cleanup obligation after removing its runtime resources (the obligation's agent only; requires the assignment fence) |
 | `POST` | `/api/v1/projects/{name}/recovery/takeover` | Override the release gate for a Node that will not report back (admin only; `caractl takeover`) |
 | `GET` | `/api/v1/projects/{name}/recovery/takeover-audit` | List recorded takeovers of the Project (admin only; `caractl takeover-audit`) |
+
+### Agent access
+
+The agent API (`:9090`) answers only requests cara-server signed (CARA-139), except `GET /healthz`. cara-server keeps an Ed25519 key in its database and signs each request it sends an agent with a short-lived assertion bound to that Node, the method and the request URI; the agent fetches the public key with its Node token. So logs and port-forward go through cara-server:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/agent-signing-key` | The public key agents check the server's requests with. Nodes and users |
+| `GET` | `/api/v1/projects/{name}/services/{service}/logs` | The service's logs from the agent running the Project (`?follow`, `?tail`, `?timestamps`; `?node=` picks another Node). Users only; `caractl logs` |
+| `GET` | `/api/v1/projects/{name}/services/{service}/forward/{port}` | WebSocket tunnel to the container's port, through the agent. Users only; `caractl port-forward` |
+
+A Project assigned to no Node answers 409 unless `?node=` is given. An agent that does not answer within 15 seconds, or refuses the server's signature, answers 502 with the reason.
 
 ### Overlay
 

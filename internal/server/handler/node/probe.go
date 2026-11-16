@@ -17,8 +17,9 @@ import (
 
 // probeResult is the response body of POST /api/v1/nodes/{name}/probe.
 
-// A successful probe means cara-server was able to reach the agent's /healthz
-// endpoint through the configured Dialer transport
+// A successful probe means cara-server reached the agent's probe endpoint
+// through the configured Dialer transport and the agent accepted its
+// signature (CARA-139).
 type probeResult struct {
 	OK         bool   `json:"ok"`
 	StatusCode int    `json:"statusCode"`
@@ -26,6 +27,10 @@ type probeResult struct {
 	Address    string `json:"address"`
 	Error      string `json:"error,omitempty"`
 }
+
+// agentProbePath is the agent's signed probe route (agent apiserver.ProbePath;
+// not imported, to keep the server free of agent packages).
+const agentProbePath = "/api/v1/probe"
 
 // probe dials the named node's agent via the injected Dialer and reports
 // reachability.
@@ -79,11 +84,11 @@ func (h *Handler) probe(w http.ResponseWriter, r *http.Request) {
 	handlerutil.WriteJSONResponse(w, http.StatusOK, result)
 }
 
-// doProbe issues a single GET /healthz against baseURL using client and
+// doProbe issues a single signed GET of the agent's probe path against baseURL using client and
 // returns the observed status code, wall-clock latency, and any transport
 // error.
 func doProbe(ctx context.Context, client *http.Client, baseURL string) (int, time.Duration, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/healthz", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+agentProbePath, nil)
 	if err != nil {
 		return 0, 0, fmt.Errorf("build request: %w", err)
 	}

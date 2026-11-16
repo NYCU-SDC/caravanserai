@@ -73,10 +73,10 @@ func newTestHandler(t *testing.T, dialer agentdialer.Dialer) http.Handler {
 }
 
 func TestProbe_HappyPath(t *testing.T) {
-	// Fake agent returning 200 on /healthz.
+	// Fake agent returning 200 on its signed probe path.
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/healthz" {
-			t.Errorf("agent got path %q, want /healthz", r.URL.Path)
+		if r.URL.Path != agentProbePath {
+			t.Errorf("agent got path %q, want %s", r.URL.Path, agentProbePath)
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))

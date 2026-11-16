@@ -82,3 +82,10 @@ type NodeTokensRevoked struct {
 	NodeTokens int `json:"nodeTokens" yaml:"nodeTokens"`
 	JoinTokens int `json:"joinTokens" yaml:"joinTokens"`
 }
+
+// AgentSigningKey is the response of GET /api/v1/agent-signing-key: the
+// Ed25519 public key, base64, that an Agent checks cara-server's requests
+// with (CARA-139).
+type AgentSigningKey struct {
+	PublicKey string `json:"publicKey"`
+}

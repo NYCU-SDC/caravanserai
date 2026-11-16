@@ -10,6 +10,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/agentauth"
 
 	"go.uber.org/zap"
 )
@@ -860,4 +862,26 @@ func (c *Client) GetSecret(ctx context.Context, name string) (*v1.Secret, error)
 		return nil, fmt.Errorf("decode secret %q: %w", name, err)
 	}
 	return &secret, nil
+}
+
+// FetchSigningKey calls GET /api/v1/agent-signing-key and returns the key the
+// agent API checks cara-server's requests with (CARA-139).
+func (c *Client) FetchSigningKey(ctx context.Context) (ed25519.PublicKey, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.serverURL+"/api/v1/agent-signing-key", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build signing key request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("signing key request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("signing key: unexpected status %s", resp.Status)
+	}
+	var body v1.AgentSigningKey
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("decode signing key: %w", err)
+	}
+	return agentauth.DecodePublicKey(body.PublicKey)
 }

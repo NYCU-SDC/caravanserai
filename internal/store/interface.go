@@ -158,6 +158,20 @@ type APITokenStore interface {
 }
 
 // ============================================================
+// Agent signing key
+// ============================================================
+
+// AgentSigningKeyStore keeps the Ed25519 private key cara-server signs its
+// requests to Agents with (CARA-139). There is one, shared by every server
+// on the database.
+type AgentSigningKeyStore interface {
+	// AgentSigningKey returns the stored key. When there is none it stores
+	// the one generate returns, unless another server stored one first, and
+	// returns whichever was stored.
+	AgentSigningKey(ctx context.Context, generate func() ([]byte, error)) ([]byte, error)
+}
+
+// ============================================================
 // PreAuthKey
 // ============================================================
 

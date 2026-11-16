@@ -37,7 +37,8 @@ curl -sf http://localhost:8080/api/healthz
 NODE_NAME=test-node ./bin/cara-agent > /tmp/cara-agent.log 2>&1 &
 echo "cara-agent PID: $!"
 
-# 6. Verify agent HTTP server is ready (port-forward endpoint + healthz)
+# 6. Verify agent HTTP server is ready (healthz is its one unsigned route;
+#    logs and port-forward answer only requests cara-server signed)
 sleep 2
 curl -sf http://localhost:9090/healthz
 # Success: exit code 0, body contains "OK"

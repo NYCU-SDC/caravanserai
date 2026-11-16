@@ -83,6 +83,8 @@ func serve(t *testing.T, projects ProjectReader, p *auth.Principal, method, path
 	}
 	mux.HandleFunc("POST /api/v1/projects", h)
 	mux.HandleFunc("DELETE /api/v1/projects/{name}", h)
+	mux.HandleFunc("GET /api/v1/projects/{name}/services/{service}/logs", h)
+	mux.HandleFunc("GET /api/v1/projects/{name}/services/{service}/forward/{port}", h)
 
 	req := httptest.NewRequest(method, path, nil)
 	if p != nil {
@@ -125,6 +127,9 @@ func TestNodeRules(t *testing.T) {
 		{"secret nobody uses", http.MethodGet, "/api/v1/secrets/unused", http.StatusForbidden},
 		{"fenced status write reaches the handler", http.MethodPatch, "/api/v1/projects/theirs/status", http.StatusOK},
 		{"fenced evidence write reaches the handler", http.MethodPut, "/api/v1/projects/moved/recovery/resources-removed", http.StatusOK},
+		{"the key agents check the server with", http.MethodGet, "/api/v1/agent-signing-key", http.StatusOK},
+		{"logs of its own project through the server", http.MethodGet, "/api/v1/projects/mine/services/web/logs", http.StatusForbidden},
+		{"port-forward through the server", http.MethodGet, "/api/v1/projects/mine/services/web/forward/80", http.StatusForbidden},
 		{"no such route", http.MethodGet, "/api/v1/nothing", http.StatusNotFound},
 	}
 	for _, tc := range cases {

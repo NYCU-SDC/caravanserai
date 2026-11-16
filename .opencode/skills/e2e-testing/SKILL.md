@@ -166,11 +166,12 @@ sleep 15
 Requires a Running project with a service that listens on a TCP port.
 
 ```bash
-# With explicit agent address
-./bin/caractl port-forward wordpress/db 13306:3306 --node localhost:9090
-
-# Auto-resolve agent address via server (project → nodeRef → node IP + agentPort)
+# Through cara-server to the agent on the Project's Node (agents answer only
+# cara-server since CARA-139, so there is no agent-address form)
 ./bin/caractl port-forward wordpress/db 13306:3306
+
+# Through cara-server to a named Node
+./bin/caractl port-forward wordpress/db 13306:3306 --node agent-a
 
 # Same local and remote port (shorthand)
 ./bin/caractl port-forward wordpress/db 3306
