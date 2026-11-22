@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"NYCU-SDC/caravanserai/internal/agentauth"
 	"NYCU-SDC/caravanserai/internal/appinit"
 	"NYCU-SDC/caravanserai/internal/config"
 	"NYCU-SDC/caravanserai/internal/event"
@@ -24,6 +25,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/server/authz"
 	"NYCU-SDC/caravanserai/internal/server/controller"
 	"NYCU-SDC/caravanserai/internal/server/handler"
+	"NYCU-SDC/caravanserai/internal/server/handler/agentproxy"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
 	overlayhandler "NYCU-SDC/caravanserai/internal/server/handler/overlay"
 	projecthandler "NYCU-SDC/caravanserai/internal/server/handler/project"
@@ -178,9 +180,21 @@ func main() {
 	// dial-able HTTP endpoint for its agent.  When overlay is enabled it dials
 	// through the tsnet-backed transport (reaching the agent's overlay IP);
 	// otherwise Transport is nil and net/http.DefaultTransport is used.
+	//
+	// Every request to an agent is signed (CARA-139): agents refuse the rest.
+	// The key lives in the database so a restored or new leader keeps it.
+	signingKey, err := pgStore.AgentSigningKey(ctx, agentauth.GenerateKey)
+	if err != nil {
+		logger.Fatal("Cannot load the agent signing key", zap.Error(err))
+	}
+	agentSigner, err := agentauth.SignerFromKey(signingKey)
+	if err != nil {
+		logger.Fatal("Stored agent signing key is unusable", zap.Error(err))
+	}
 	agentDialer := agentdialer.New(agentdialer.Config{
 		Nodes:     pgStore,
 		Transport: overlayTransport,
+		Signer:    agentSigner,
 	})
 
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
@@ -190,6 +204,7 @@ func main() {
 		projecthandler.WithDefaultBackupInterval(cfg.DefaultBackupInterval)))
 	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
 	apiSrv.Register(tokenhandler.NewHandler(logger, pgStore, problemWriter))
+	apiSrv.Register(agentproxy.NewHandler(logger, pgStore, agentDialer, agentSigner, problemWriter))
 
 	// Every route but the health probe needs a token (ADR-0031).
 	breakGlassToken, err := readBreakGlassToken(cfg.BreakGlassTokenFile)

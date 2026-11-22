@@ -21,6 +21,7 @@ import (
 	"NYCU-SDC/caravanserai/internal/agent/identity"
 	"NYCU-SDC/caravanserai/internal/agent/pgbackrest"
 	"NYCU-SDC/caravanserai/internal/agent/proxy"
+	"NYCU-SDC/caravanserai/internal/agentauth"
 	"NYCU-SDC/caravanserai/internal/appinit"
 	"NYCU-SDC/caravanserai/internal/config"
 	"NYCU-SDC/caravanserai/internal/overlay"
@@ -228,7 +229,13 @@ func main() {
 	})
 
 	// ── Agent HTTP server ────────────────────────────────────────────────
-	apiSrv := agentapiserver.New(logger)
+	// Everything but /healthz accepts only requests cara-server signed
+	// (CARA-139). The key is fetched with the Node token; until it arrives
+	// those requests get 503.
+	serverKeys := &agentauth.KeyHolder{}
+	go agentauth.KeepFetched(ctx, agentClient.FetchSigningKey, serverKeys,
+		5*time.Second, 10*time.Minute, logger)
+	apiSrv := agentapiserver.New(logger, agentauth.NewVerifier(cfg.NodeName, serverKeys))
 
 	forwardPW := problem.NewWithMapping(forwardhandler.NewProblemMapping())
 	apiSrv.Register(forwardhandler.NewHandler(logger, dockerRuntime, forwardPW))

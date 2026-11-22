@@ -74,6 +74,9 @@ func TestAuthRequiredOnEveryRoute(t *testing.T) {
 		{http.MethodGet, "/api/v1/tokens"},
 		{http.MethodPost, "/api/v1/nodes/node-a/join-tokens"},
 		{http.MethodDelete, "/api/v1/nodes/node-a/tokens"},
+		{http.MethodGet, "/api/v1/agent-signing-key"},
+		{http.MethodGet, "/api/v1/projects/web/services/app/logs"},
+		{http.MethodGet, "/api/v1/projects/web/services/app/forward/80"},
 		{http.MethodGet, "/api/v1/no-such-route"},
 	}
 	for _, header := range []string{"", "Bearer ", "Bearer wrong", "Basic " + testAdminToken} {

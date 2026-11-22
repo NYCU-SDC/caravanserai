@@ -143,7 +143,7 @@ S3_BUCKET=cara-test
 S3_ACCESS_KEY=$VMTEST_S3_KEY
 S3_SECRET_KEY=$VMTEST_S3_SECRET"
 	fi
-	printf 'SERVER_URL=http://%s:8080\nNODE_NAME=%s\nJOIN_TOKEN_FILE=/etc/cara/join-token\nAGENT_LISTEN_PORT=0\nPROXY_LISTEN_ADDR=127.0.0.1:0\nAGENT_ADVERTISE_IP=%s\n%s\n' \
+	printf 'SERVER_URL=http://%s:8080\nNODE_NAME=%s\nJOIN_TOKEN_FILE=/etc/cara/join-token\nAGENT_LISTEN_PORT=9090\nPROXY_LISTEN_ADDR=127.0.0.1:0\nAGENT_ADVERTISE_IP=%s\n%s\n' \
 		"$VMTEST_SERVER_IP" "$node" "$(vm "$v" "hostname -I" | awk '{print $1}')" "$s3_env" |
 		vm "$v" "sudo sh -c 'cat >> /etc/cara/agent.env'"
 }

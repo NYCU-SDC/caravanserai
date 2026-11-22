@@ -19,11 +19,13 @@ import (
 	"testing"
 
 	v1 "NYCU-SDC/caravanserai/api/v1"
+	"NYCU-SDC/caravanserai/internal/agentauth"
 	"NYCU-SDC/caravanserai/internal/server/agentdialer"
 	"NYCU-SDC/caravanserai/internal/server/apiserver"
 	"NYCU-SDC/caravanserai/internal/server/auth"
 	"NYCU-SDC/caravanserai/internal/server/authz"
 	"NYCU-SDC/caravanserai/internal/server/handler"
+	"NYCU-SDC/caravanserai/internal/server/handler/agentproxy"
 	nodehandler "NYCU-SDC/caravanserai/internal/server/handler/node"
 	projecthandler "NYCU-SDC/caravanserai/internal/server/handler/project"
 	secrethandler "NYCU-SDC/caravanserai/internal/server/handler/secret"
@@ -42,10 +44,22 @@ import (
 var verbose = flag.Bool("verbose", false, "enable verbose infrastructure logging")
 
 // suite holds shared test infrastructure initialised once in TestMain.
-var suite struct {
+var suite suiteState
+
+type suiteState struct {
 	serverURL string
 	client    *http.Client
 	store     *pgstore.Store
+	// signer is the key the server signs its agent requests with, as loaded
+	// from the database.
+	signer *agentauth.Signer
+}
+
+// agentVerifier returns what the agent named node checks requests with.
+func (s *suiteState) agentVerifier(node string) *agentauth.Verifier {
+	keys := &agentauth.KeyHolder{}
+	keys.Set(s.signer.PublicKey())
+	return agentauth.NewVerifier(node, keys)
 }
 
 // problemResponse is the RFC 9457 Problem Details structure returned by
@@ -114,11 +128,22 @@ func run(m *testing.M) int {
 	apiSrv := apiserver.New(logger, basicMiddleware)
 
 	problemWriter := problem.NewWithMapping(handler.NewProblemMapping())
-	agentDialer := agentdialer.New(agentdialer.Config{Nodes: pgStore})
+	signingKey, err := pgStore.AgentSigningKey(context.Background(), agentauth.GenerateKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration: agent signing key: %v\n", err)
+		return 1
+	}
+	signer, err := agentauth.SignerFromKey(signingKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration: agent signing key: %v\n", err)
+		return 1
+	}
+	agentDialer := agentdialer.New(agentdialer.Config{Nodes: pgStore, Signer: signer})
 	apiSrv.Register(nodehandler.NewHandler(logger, pgStore, pgStore, pgStore, agentDialer, problemWriter))
 	apiSrv.Register(projecthandler.NewHandler(logger, pgStore, problemWriter))
 	apiSrv.Register(secrethandler.NewHandler(logger, pgStore, problemWriter))
 	apiSrv.Register(tokenhandler.NewHandler(logger, pgStore, problemWriter))
+	apiSrv.Register(agentproxy.NewHandler(logger, pgStore, agentDialer, signer, problemWriter))
 	apiSrv.RequireAuthentication(auth.NewAuthenticator(logger, pgStore, testAdminToken))
 	apiSrv.RequireAuthorization(authz.New(logger, pgStore))
 
@@ -131,6 +156,7 @@ func run(m *testing.M) int {
 	suite.client = ts.Client()
 	suite.client.Transport = defaultBearer{token: testAdminToken, base: suite.client.Transport}
 	suite.store = pgStore
+	suite.signer = signer
 
 	return m.Run()
 }
