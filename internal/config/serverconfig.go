@@ -1,7 +1,10 @@
 package config
 
 import (
+	"errors"
 	"flag"
+	"fmt"
+	"net/url"
 	"os"
 	"time"
 
@@ -83,6 +86,29 @@ type Config struct {
 	// Zero means 24h. A Project's own spec.backup wins, and
 	// spec.backup.disabled turns backup off for that Project.
 	DefaultBackupInterval time.Duration `yaml:"default_backup_interval" envconfig:"DEFAULT_BACKUP_INTERVAL"`
+
+	// Leader lease (CARA-71, ADR-0037). Setting LeaseS3Endpoint configures the
+	// object store holding lease.json; leaving it empty keeps the single-server
+	// behaviour. It is kept apart from the Agents' backup bucket and
+	// credentials: whoever can write lease.json decides which server Agents
+	// and caractl talk to, so only the servers that may become leader should
+	// hold these credentials. The secret key is read from the config file or
+	// the environment, never a flag, to keep it out of process listings.
+	LeaseS3Endpoint  string `yaml:"lease_s3_endpoint"   envconfig:"LEASE_S3_ENDPOINT"`
+	LeaseS3Bucket    string `yaml:"lease_s3_bucket"     envconfig:"LEASE_S3_BUCKET"`
+	LeaseS3Region    string `yaml:"lease_s3_region"     envconfig:"LEASE_S3_REGION"`
+	LeaseS3AccessKey string `yaml:"lease_s3_access_key" envconfig:"LEASE_S3_ACCESS_KEY"`
+	LeaseS3SecretKey string `yaml:"lease_s3_secret_key" envconfig:"LEASE_S3_SECRET_KEY"`
+	LeaseS3CAFile    string `yaml:"lease_s3_ca_file"    envconfig:"LEASE_S3_CA_FILE"`
+	// LeaseS3Key is the object key of lease.json. Empty means
+	// cara/v1/control-plane/lease.json.
+	LeaseS3Key string `yaml:"lease_s3_key" envconfig:"LEASE_S3_KEY"`
+	// ServerID is this server's identity in the lease. Empty means the
+	// hostname.
+	ServerID string `yaml:"server_id" envconfig:"SERVER_ID"`
+	// AdvertiseURL is where Agents and caractl reach this server once it holds
+	// the lease: its underlay address (ADR-0010). Required with a lease.
+	AdvertiseURL string `yaml:"advertise_url" envconfig:"SERVER_ADVERTISE_URL"`
 
 	// configFileError is why a config file named explicitly could not be used.
 	configFileError error
@@ -166,6 +192,16 @@ func FromEnv(cfg *Config, logger *LogBuffer) (*Config, error) {
 		GraceExpiredRelease: os.Getenv("GRACE_EXPIRED_RELEASE") == "true",
 
 		PostgresDifferentialImage: os.Getenv("POSTGRES_DIFFERENTIAL_IMAGE"),
+
+		LeaseS3Endpoint:  os.Getenv("LEASE_S3_ENDPOINT"),
+		LeaseS3Bucket:    os.Getenv("LEASE_S3_BUCKET"),
+		LeaseS3Region:    os.Getenv("LEASE_S3_REGION"),
+		LeaseS3AccessKey: os.Getenv("LEASE_S3_ACCESS_KEY"),
+		LeaseS3SecretKey: os.Getenv("LEASE_S3_SECRET_KEY"),
+		LeaseS3CAFile:    os.Getenv("LEASE_S3_CA_FILE"),
+		LeaseS3Key:       os.Getenv("LEASE_S3_KEY"),
+		ServerID:         os.Getenv("SERVER_ID"),
+		AdvertiseURL:     os.Getenv("SERVER_ADVERTISE_URL"),
 	}
 
 	if raw := os.Getenv("RUNNING_GRACE_PERIOD"); raw != "" {
@@ -214,7 +250,68 @@ func FromFlags(cfg *Config) (*Config, error) {
 	flag.BoolVar(&flagConfig.GraceExpiredRelease, "grace-expired-release", false, "move Projects off a node that stayed NotReady past the grace period; one with a Managed volume needs a committed backup")
 	flag.DurationVar(&flagConfig.DefaultBackupInterval, "default-backup-interval", 0, "backup interval of a Project with a Managed volume and no spec.backup (default: 24h)")
 	flag.StringVar(&flagConfig.BreakGlassTokenFile, "break-glass-token-file", "", "file holding the break-glass admin token")
+	flag.StringVar(&flagConfig.LeaseS3Endpoint, "lease-s3-endpoint", "", "object store holding the leader lease, http:// or https:// (enables the leader lease)")
+	flag.StringVar(&flagConfig.LeaseS3Bucket, "lease-s3-bucket", "", "bucket holding the leader lease")
+	flag.StringVar(&flagConfig.LeaseS3Key, "lease-s3-key", "", "object key of the leader lease (default: cara/v1/control-plane/lease.json)")
+	flag.StringVar(&flagConfig.ServerID, "server-id", "", "this server's identity in the leader lease (default: hostname)")
+	flag.StringVar(&flagConfig.AdvertiseURL, "advertise-url", "", "underlay URL Agents and caractl reach this server at when it holds the lease")
 	flag.String(configFlag, "", configFlagUsage)
 	flag.Parse()
 	return configutil.Merge[Config](cfg, flagConfig)
+}
+
+// LeaseEnabled reports whether a leader lease is configured.
+func (c *Config) LeaseEnabled() bool { return c.LeaseS3Endpoint != "" }
+
+// LeaseS3 is the lease's object store in the shape the Agents' backup store
+// uses, so both are validated and dialled the same way.
+func (c *Config) LeaseS3() S3Config {
+	return S3Config{
+		Endpoint:  c.LeaseS3Endpoint,
+		Bucket:    c.LeaseS3Bucket,
+		Region:    c.LeaseS3Region,
+		AccessKey: c.LeaseS3AccessKey,
+		SecretKey: c.LeaseS3SecretKey,
+		CAFile:    c.LeaseS3CAFile,
+	}
+}
+
+// ResolvedServerID is ServerID, or the hostname when it is empty.
+func (c *Config) ResolvedServerID() (string, error) {
+	if c.ServerID != "" {
+		return c.ServerID, nil
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		return "", fmt.Errorf("server_id is empty and the hostname cannot be read: %w", err)
+	}
+	if host == "" {
+		return "", errors.New("server_id is empty and the hostname is empty")
+	}
+	return host, nil
+}
+
+// validateLease checks the leader lease settings: all or nothing, so a
+// half-configured lease fails at startup instead of silently running a
+// second, unprotected server.
+func (c *Config) validateLease() error {
+	if !c.LeaseEnabled() {
+		if c.LeaseS3Bucket != "" || c.LeaseS3AccessKey != "" || c.LeaseS3SecretKey != "" ||
+			c.LeaseS3Key != "" || c.LeaseS3CAFile != "" || c.LeaseS3Region != "" {
+			return errors.New("lease_s3_endpoint is required when any other lease_s3_* setting is set")
+		}
+		return nil
+	}
+	s3 := c.LeaseS3()
+	if err := s3.Validate(); err != nil {
+		return fmt.Errorf("leader lease: %w", err)
+	}
+	if c.AdvertiseURL == "" {
+		return errors.New("advertise_url is required with a leader lease: it is the address Agents and caractl will use to reach this server")
+	}
+	u, err := url.Parse(c.AdvertiseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("advertise_url %q must be an absolute http:// or https:// URL", c.AdvertiseURL)
+	}
+	return nil
 }

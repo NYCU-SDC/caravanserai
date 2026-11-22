@@ -150,3 +150,75 @@ func TestServerConfig_Validate_RequiresDatabaseURL(t *testing.T) {
 	err := (&Config{}).Validate()
 	assert.ErrorContains(t, err, "database_url is required")
 }
+
+func TestServerFromEnvLoadsLeaseFields(t *testing.T) {
+	t.Setenv("LEASE_S3_ENDPOINT", "https://r2.example")
+	t.Setenv("LEASE_S3_BUCKET", "cara-lease")
+	t.Setenv("LEASE_S3_REGION", "auto")
+	t.Setenv("LEASE_S3_ACCESS_KEY", "id")
+	t.Setenv("LEASE_S3_SECRET_KEY", "secret")
+	t.Setenv("LEASE_S3_CA_FILE", "/etc/cara/lease-ca.crt")
+	t.Setenv("LEASE_S3_KEY", "custom/lease.json")
+	t.Setenv("SERVER_ID", "cp-1")
+	t.Setenv("SERVER_ADVERTISE_URL", "http://10.0.0.11:8080")
+
+	got, err := FromEnv(&Config{}, NewConfigLogger())
+	require.NoError(t, err)
+	assert.True(t, got.LeaseEnabled())
+	assert.Equal(t, S3Config{
+		Endpoint: "https://r2.example", Bucket: "cara-lease", Region: "auto",
+		AccessKey: "id", SecretKey: "secret", CAFile: "/etc/cara/lease-ca.crt",
+	}, got.LeaseS3())
+	assert.Equal(t, "custom/lease.json", got.LeaseS3Key)
+	assert.Equal(t, "cp-1", got.ServerID)
+	assert.Equal(t, "http://10.0.0.11:8080", got.AdvertiseURL)
+}
+
+func TestServerConfig_Validate_Lease(t *testing.T) {
+	full := func() Config {
+		return Config{
+			DatabaseURL:      "postgres://localhost/cara",
+			LeaseS3Endpoint:  "https://r2.example",
+			LeaseS3Bucket:    "cara-lease",
+			LeaseS3AccessKey: "id",
+			LeaseS3SecretKey: "secret",
+			AdvertiseURL:     "http://10.0.0.11:8080",
+		}
+	}
+	tests := []struct {
+		name    string
+		edit    func(*Config)
+		wantErr string
+	}{
+		{name: "no lease is the single-server default", edit: func(c *Config) { *c = Config{DatabaseURL: "postgres://localhost/cara"} }},
+		{name: "a complete lease", edit: func(*Config) {}},
+		{name: "a bucket without an endpoint", edit: func(c *Config) { c.LeaseS3Endpoint = "" }, wantErr: "lease_s3_endpoint is required"},
+		{name: "an endpoint without a scheme", edit: func(c *Config) { c.LeaseS3Endpoint = "r2.example" }, wantErr: "must start with http:// or https://"},
+		{name: "no bucket", edit: func(c *Config) { c.LeaseS3Bucket = "" }, wantErr: "bucket is required"},
+		{name: "no secret key", edit: func(c *Config) { c.LeaseS3SecretKey = "" }, wantErr: "secret_key is required"},
+		{name: "no advertise URL", edit: func(c *Config) { c.AdvertiseURL = "" }, wantErr: "advertise_url is required"},
+		{name: "an advertise URL without a scheme", edit: func(c *Config) { c.AdvertiseURL = "10.0.0.11:8080" }, wantErr: "absolute http:// or https:// URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := full()
+			tt.edit(&cfg)
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestServerConfig_ResolvedServerID(t *testing.T) {
+	got, err := (&Config{ServerID: "cp-1"}).ResolvedServerID()
+	require.NoError(t, err)
+	assert.Equal(t, "cp-1", got)
+
+	got, err = (&Config{}).ResolvedServerID()
+	require.NoError(t, err)
+	assert.NotEmpty(t, got, "falls back to the hostname")
+}
