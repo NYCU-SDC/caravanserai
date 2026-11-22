@@ -71,6 +71,12 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid config: %v", err)
 	}
+	// The lease settings are accepted and checked, but no election runs on
+	// them yet (CARA-71 stage 2). Starting anyway would let an operator believe
+	// two servers are protected from both serving at once.
+	if cfg.LeaseEnabled() {
+		log.Fatalf("invalid config: lease_s3_* configures the leader lease, which this version does not run yet; remove those settings")
+	}
 
 	logger, err := appinit.InitLogger(cfg.Debug, appMetadata)
 	if err != nil {

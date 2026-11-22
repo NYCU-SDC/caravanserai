@@ -99,10 +99,15 @@ func (s *minioStore) Put(ctx context.Context, key string, body io.Reader, opts P
 	// other value (including 0, for a genuinely empty object) is the exact
 	// length. Do not special-case 0 here — that would silently turn a real
 	// empty-object upload into an unknown-size streaming upload.
-	info, err := s.client.PutObject(ctx, s.bucket, key, body, opts.Size, minio.PutObjectOptions{
-		ContentType: opts.ContentType,
-	})
+	putOpts, err := minioPutOptions(opts)
 	if err != nil {
+		return ObjectMeta{}, fmt.Errorf("objectstore: put %q: %w", key, err)
+	}
+	info, err := s.client.PutObject(ctx, s.bucket, key, body, opts.Size, putOpts)
+	if err != nil {
+		if isPreconditionFailed(err) {
+			return ObjectMeta{}, fmt.Errorf("objectstore: put %q: %w", key, ErrPreconditionFailed)
+		}
 		return ObjectMeta{}, fmt.Errorf("objectstore: put %q: %w", key, err)
 	}
 	return ObjectMeta{
@@ -111,6 +116,27 @@ func (s *minioStore) Put(ctx context.Context, key string, body io.Reader, opts P
 		Size:         info.Size,
 		LastModified: info.LastModified,
 	}, nil
+}
+
+// minioPutOptions translates PutOptions, refusing combinations the SDK would
+// silently get wrong: with an unknown size minio-go switches to a multipart
+// upload, whose parts cannot carry the condition.
+func minioPutOptions(opts PutOptions) (minio.PutObjectOptions, error) {
+	out := minio.PutObjectOptions{ContentType: opts.ContentType}
+	conditional := opts.IfMatch != "" || opts.IfAbsent
+	if opts.IfMatch != "" && opts.IfAbsent {
+		return out, fmt.Errorf("%w: IfMatch and IfAbsent cannot be combined", ErrInvalidOptions)
+	}
+	if conditional && opts.Size < 0 {
+		return out, fmt.Errorf("%w: a conditional upload needs a known size", ErrInvalidOptions)
+	}
+	if opts.IfMatch != "" {
+		out.SetMatchETag(opts.IfMatch)
+	}
+	if opts.IfAbsent {
+		out.SetMatchETagExcept("*")
+	}
+	return out, nil
 }
 
 func (s *minioStore) Get(ctx context.Context, key string) (io.ReadCloser, ObjectMeta, error) {
@@ -185,4 +211,13 @@ func toObjectMeta(info minio.ObjectInfo) ObjectMeta {
 func isNotFound(err error) bool {
 	resp := minio.ToErrorResponse(err)
 	return resp.Code == "NoSuchKey" || resp.Code == "NoSuchBucket" || resp.StatusCode == 404
+}
+
+// isPreconditionFailed reports whether err is the provider refusing a
+// conditional upload (HTTP 412). A 409 ConditionalRequestConflict, which
+// Amazon S3 returns when a delete races the write, is not one: nothing
+// decided the condition, so it stays an ordinary, retryable error.
+func isPreconditionFailed(err error) bool {
+	resp := minio.ToErrorResponse(err)
+	return resp.StatusCode == http.StatusPreconditionFailed || resp.Code == "PreconditionFailed"
 }

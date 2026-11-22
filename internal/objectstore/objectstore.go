@@ -42,6 +42,21 @@ type PutOptions struct {
 	// so callers must set this field explicitly rather than relying on a
 	// struct literal's default.
 	Size int64
+	// IfMatch makes the upload conditional on the stored object's ETag: it
+	// succeeds only if an object exists at the key and its ETag equals IfMatch
+	// (S3 If-Match). Any other state fails with ErrPreconditionFailed and
+	// writes nothing. Empty means unconditional.
+	IfMatch string
+	// IfAbsent makes the upload succeed only if no object exists at the key
+	// (S3 If-None-Match: *). An existing object fails with
+	// ErrPreconditionFailed and is left as it was.
+	//
+	// Conditional uploads are what lets several writers agree on one value
+	// (the control-plane leader lease, ADR-0037): among concurrent conditional
+	// uploads against the same state, at most one succeeds. They need a known
+	// Size, since a multipart upload of unknown length cannot carry the
+	// condition, and IfMatch and IfAbsent cannot be combined.
+	IfAbsent bool
 }
 
 // ObjectStore is the narrow contract every S3-backed feature builds on.
@@ -49,7 +64,9 @@ type PutOptions struct {
 type ObjectStore interface {
 	// Put uploads body to key, returning the metadata the provider assigned.
 	// It does not create parent "directories" — S3-compatible stores are
-	// flat; keys merely contain slashes.
+	// flat; keys merely contain slashes. With opts.IfMatch or opts.IfAbsent
+	// it is conditional and returns an error satisfying
+	// errors.Is(err, ErrPreconditionFailed) when the condition does not hold.
 	Put(ctx context.Context, key string, body io.Reader, opts PutOptions) (ObjectMeta, error)
 
 	// Get downloads the object at key. The caller must close the returned
