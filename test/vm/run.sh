@@ -170,7 +170,13 @@ for i in "${!files[@]}"; do
 	# shellcheck disable=SC1090
 	. "$f" > >(tee "$out/logs/scenario-$VMTEST_SCENARIO.out") 2>&1
 done
-failed=$(jq -s '[.[] | select(.verdict == "FAIL")] | length' "$out/results.jsonl")
+# Scenarios are sourced into this shell, so one that assigns a variable named
+# like ours (out, sha, ...) would point the record somewhere else and could
+# report 0 failures. Read the record directory from the exported copy, and
+# treat an unreadable result file as a failed run.
+out=$VMTEST_OUT
+failed=$(jq -s '[.[] | select(.verdict == "FAIL")] | length' "$out/results.jsonl") || failed=""
+[[ $failed =~ ^[0-9]+$ ]] || { log "cannot read $out/results.jsonl; treating the run as failed"; exit 1; }
 
 # ── Record ────────────────────────────────────────────────────────────────────
 {
