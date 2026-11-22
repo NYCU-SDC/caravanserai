@@ -72,6 +72,7 @@ Available: `vm`, `srv`, `api`, `ctl`, `wait_for`, `expect`, `observe`, `power_of
 | `spec-update` | new with CARA-134 |
 | `overlap-partition` | new with ADR-0036 (`spec.overlap`) |
 | `default-backup` | new with the ADR-0029 default backup interval |
+| `agent-access` | new with CARA-139; the e2e `scripts/e2e/agent-access.sh` covers the same API on one machine |
 
 Porting the offline-retention and pgdiff-restore trials (2026-11-05) is follow-up work.
 
